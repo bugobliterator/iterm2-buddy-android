@@ -856,6 +856,47 @@ class CompanionClientTest {
     }
 
     @Test
+    fun acceptLostInFlightAfterLongOutageKeepsPairing() = runTest {
+        // Review probe P23. The seeded backoff draw lands past the old remainder, so a clock that
+        // resumed from 115 s would give up and wipe a pairing the Mac has pinned.
+        val h = Harness(this)
+        h.relay.reachable = false
+        h.client.pair(code)
+        h.await { it is ClientState.WaitingForMac }
+        advanceTimeBy(115.seconds)
+        h.relay.reachable = true
+        h.mac.start()
+        h.await(within = 3.minutes) { it is ClientState.ShowCode }
+        h.mac.awaitingCode.first { it != null }
+        advanceTimeBy(5.seconds)
+
+        // The phone's socket dies just before the verdict; the Mac accepts, pins, then its socket goes too.
+        h.relay.closePhone(room, 1006, "dropped")
+        h.mac.enterCode(accept = true)
+        runCurrent()
+        assertNotNull(h.mac.pinnedPhoneStatic)
+        h.mac.dropSocket()
+
+        h.awaitConnected()
+        assertFalse(h.states.any { it is ClientState.Failed })
+        assertEquals(PairingStage.REGISTERED, h.stage())
+    }
+
+    @Test
+    fun cancelSupersededByStartStillWipes() = runTest {
+        // Review probe P25: pair, cancel and start back to back.
+        val h = Harness(this)
+        h.mac.start()
+        h.client.pair(code)
+        h.client.cancel()
+        h.client.start()
+        advanceTimeBy(5.seconds)
+
+        assertNull("the cancel's wipe landed", h.store.load())
+        assertEquals(ClientState.Unpaired, h.client.state.value)
+    }
+
+    @Test
     fun pendingRecoveryAgainstMacPinnedToAnotherKeyGivesUp() = runTest {
         val h = Harness(this)
         h.stored(PairingStage.PENDING_CONFIRMATION)
