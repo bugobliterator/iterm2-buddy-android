@@ -183,8 +183,11 @@ class RelayConnectionTest {
     @Test
     fun upgradeRefusalIsHttpFailure() = runBlocking {
         for (status in listOf(403, 413, 429, 503)) {
-            server.enqueue(MockResponse().setResponseCode(status).setBody("nope"))
-            assertEquals(AdmissionResult.HttpFailure(status), connection().admit(Proof.Fresh))
+            server.enqueue(MockResponse().setResponseCode(status).setBody("""{"error":"nope $status"}"""))
+            assertEquals(
+                AdmissionResult.HttpFailure(status, """{"error":"nope $status"}"""),
+                connection().admit(Proof.Fresh),
+            )
         }
     }
 
