@@ -63,9 +63,10 @@ sealed interface MacMessage {
     /**
      * `hello(revision:minimumPeer:wantsNotificationPermission:aiAvailable:macStatus:)`.
      * [raw] is the whole case body, so later plans can read the optional fields
-     * (`macStatus` arrives only for a phone at revision 14 or later).
+     * (`macStatus` arrives only for a phone at revision 14 or later). The revisions
+     * are [Long] to match Swift's 64-bit `Int`.
      */
-    data class HelloReply(val revision: Int, val minimumPeer: Int, val raw: JsonObject) : MacMessage
+    data class HelloReply(val revision: Long, val minimumPeer: Long, val raw: JsonObject) : MacMessage
 
     data object RelayRoomSecretStored : MacMessage
 

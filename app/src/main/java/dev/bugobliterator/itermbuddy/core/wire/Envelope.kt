@@ -8,7 +8,13 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-/** A frame from the Mac that is not a valid envelope, or a known case with a malformed body. */
+/**
+ * A frame from the Mac that is not a valid envelope, or a known case with a malformed body.
+ *
+ * Callers drop such a frame, log it and keep the session, as upstream does
+ * (`CompanionSession.swift:120-126`); an empty frame is dropped the same way (`:127`).
+ * The session layer enforces this.
+ */
 class WireDecodeException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
 /** First byte of a media frame; a JSON control frame starts with `{` (`CompanionFrameChannel.swift`). */
@@ -41,6 +47,11 @@ fun encodeEnvelope(message: PhoneMessage, requestID: Long?): ByteArray {
  * - The payload must be an object with exactly one key. An unknown key decodes to
  *   [MacMessage.Unsupported]; a known key whose body does not decode throws.
  * - A frame whose first byte is `0x01` is a media frame: `Unsupported("media", {})`.
+ * - Integers are plain literals: `15.0` or `1e2` is rejected where Swift's
+ *   `JSONDecoder` may accept it. A deliberate deviation; the Mac writes integer literals.
+ *
+ * JSON leniency: kotlinx accepts some non-standard values (unquoted literals such as
+ * `abc`) in positions this decoder ignores, while a BOM or UTF-16 frame is rejected.
  *
  * @throws WireDecodeException for anything that is not such an envelope.
  */
@@ -51,6 +62,10 @@ fun decodeEnvelope(bytes: ByteArray): Pair<Long?, MacMessage> {
     val envelope = parseJson(bytes) as? JsonObject ?: throw WireDecodeException("envelope is not a JSON object")
     val requestID = decodeRequestID(envelope[REQUEST_ID])
     val payload = envelope[PAYLOAD] as? JsonObject ?: throw WireDecodeException("payload is missing or not an object")
+    // Upstream decides on the payload's FIRST key in document order: an unknown first
+    // key is `.unsupported`, a known one goes to the synthesized decode, whose allKeys
+    // hides unknown keys, so `{"pong":{},"futureThing":{}}` is `.pong` upstream.
+    // Android deliberately throws on any payload without exactly one key.
     val case = payload.keys.singleOrNull()
         ?: throw WireDecodeException("payload must have exactly one key, has ${payload.size}")
     return requestID to decodeMacCase(case, payload.getValue(case), payload)
@@ -64,7 +79,9 @@ fun decodeEnvelope(bytes: ByteArray): Pair<Long?, MacMessage> {
  * Stricter than upstream's decode, which ignores extra keys: the JSON tree must be
  * an object with exactly the one key `pairing` and exactly one of those two string
  * values. Whitespace between tokens is allowed, since it does not change the tree;
- * upstream sends the bytes with none.
+ * upstream sends the bytes with none. A repeated key is null too: upstream's
+ * `JSONSerialization` keeps the last value, so `{"pairing":"rejected","pairing":"accepted"}`
+ * would read as acceptance there, and kotlinx also keeps the last one silently.
  */
 fun decodePairingConfirmation(bytes: ByteArray): Boolean? {
     val element = try {
@@ -72,6 +89,7 @@ fun decodePairingConfirmation(bytes: ByteArray): Boolean? {
     } catch (_: WireDecodeException) {
         return null
     }
+    if (topLevelMemberCount(bytes.decodeToString()) != 1) return null
     val value = (element as? JsonObject)?.takeIf { it.size == 1 }?.get("pairing") as? JsonPrimitive
     if (value == null || !value.isString) return null
     return when (value.content) {
@@ -79,6 +97,32 @@ fun decodePairingConfirmation(bytes: ByteArray): Boolean? {
         "rejected" -> false
         else -> null
     }
+}
+
+/**
+ * Counts the members of a top-level JSON object by counting `:` at depth 1 outside
+ * strings, so a repeated key, which the parsed tree collapses, still counts twice.
+ * Only called on text that has already parsed as JSON.
+ */
+private fun topLevelMemberCount(text: String): Int {
+    var depth = 0
+    var inString = false
+    var escaped = false
+    var count = 0
+    for (char in text) {
+        when {
+            inString -> when {
+                escaped -> escaped = false
+                char == '\\' -> escaped = true
+                char == '"' -> inString = false
+            }
+            char == '"' -> inString = true
+            char == '{' || char == '[' -> depth++
+            char == '}' || char == ']' -> depth--
+            char == ':' && depth == 1 -> count++
+        }
+    }
+    return count
 }
 
 private fun parseJson(bytes: ByteArray): JsonElement {
@@ -101,9 +145,9 @@ private fun decodeRequestID(element: JsonElement?): Long? {
     if (element == null || element == JsonNull) return null
     val literal = (element as? JsonPrimitive)?.takeUnless { it.isString }?.content
     if (literal == null || !UNSIGNED_INTEGER.matches(literal)) {
-        throw WireDecodeException("requestID is not a non-negative integer: $element")
+        throw WireDecodeException("requestID is not a non-negative integer (${jsonType(element)})")
     }
-    return literal.toLongOrNull() ?: throw WireDecodeException("requestID is out of range: $literal")
+    return literal.toLongOrNull() ?: throw WireDecodeException("requestID is out of range (${literal.length} digits)")
 }
 
 private fun decodeMacCase(case: String, body: JsonElement, payload: JsonObject): MacMessage = when (case) {
@@ -112,7 +156,7 @@ private fun decodeMacCase(case: String, body: JsonElement, payload: JsonObject):
         hello.optional(case, "wantsNotificationPermission") { it.isBoolean() }
         hello.optional(case, "aiAvailable") { it.isBoolean() }
         hello.optional(case, "macStatus") { it is JsonObject }
-        MacMessage.HelloReply(hello.int(case, "revision"), hello.int(case, "minimumPeer"), hello)
+        MacMessage.HelloReply(hello.long(case, "revision"), hello.long(case, "minimumPeer"), hello)
     }
     "relayRoomSecretStored" -> MacMessage.RelayRoomSecretStored.also { body.asObject(case) }
     "pong" -> MacMessage.Pong.also { body.asObject(case) }
@@ -127,18 +171,25 @@ private fun decodeMacCase(case: String, body: JsonElement, payload: JsonObject):
     else -> MacMessage.Unsupported(case, payload)
 }
 
+private fun jsonType(element: JsonElement): String = when {
+    element is JsonObject -> "object"
+    element is JsonPrimitive && element.isString -> "string"
+    element is JsonPrimitive -> if (element.content == "true" || element.content == "false") "boolean" else "number"
+    else -> "array"
+}
+
 private fun JsonElement.asObject(case: String): JsonObject =
     this as? JsonObject ?: throw WireDecodeException("$case body is not an object")
 
 private fun JsonElement.isBoolean(): Boolean =
     this is JsonPrimitive && !isString && (content == "true" || content == "false")
 
-private fun JsonObject.int(case: String, key: String): Int {
+private fun JsonObject.long(case: String, key: String): Long {
     val literal = (get(key) as? JsonPrimitive)?.takeUnless { it.isString }?.content
     if (literal == null || !SIGNED_INTEGER.matches(literal)) {
         throw WireDecodeException("$case.$key is missing or not an integer")
     }
-    return literal.toIntOrNull() ?: throw WireDecodeException("$case.$key is out of range: $literal")
+    return literal.toLongOrNull() ?: throw WireDecodeException("$case.$key is out of range (${literal.length} digits)")
 }
 
 private fun JsonObject.string(case: String, key: String): String {
