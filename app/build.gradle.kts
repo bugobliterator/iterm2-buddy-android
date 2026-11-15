@@ -37,6 +37,7 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.bouncycastle.bcprov)
     constraints {
         // activity-compose pulls lifecycle 2.9.x, whose bundled lint checks use APIs
         // the current lint no longer has (ObsoleteLintCustomCheck). 2.11.0 is current stable.
