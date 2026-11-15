@@ -332,7 +332,7 @@ The connect flow, owned later by the foreground service. No UI in this task.
   - `suspend fun request(message: PhoneMessage): MacMessage`, `fun notify(message: PhoneMessage)` (fire-and-forget), `val events: SharedFlow<MacMessage>` for unsolicited messages.
 - Produces: `class FakeMac(endpoints: RelayEndpoints, code: PairingCode, macStaticPrivate: ByteArray)` in test sources.
   - Before it has a room secret, it admits as `{"v":1,"role":"mac"}` with proof `{}`. After `relayRoomSecret` it keeps the secret and signs with `JoinSigner(secret, JoinRole.MAC)`.
-  - It runs the Noise responder and stays silent until a simulated code entry (`fakeMac.enterCode(accept: Boolean)`), then sends the bare confirmation, accepted or rejected, as the real Mac does. On reconnects it sends no confirmation.
+  - It runs the Noise responder and stays silent until a simulated code entry (`fakeMac.enterCode(accept: Boolean)`), then sends the bare confirmation, accepted or rejected, as the real Mac does. Frames that arrive before the verdict are queued and handled once its link starts, matching the plugin's queueing. On reconnects it sends no confirmation.
   - It answers `hello`, `relayRoomSecret` and `ping`, records `unpairing`, can send `unpaired`, and can drop its socket.
 
 Flow (*notes* → Relay admission, Noise, After pairing):
