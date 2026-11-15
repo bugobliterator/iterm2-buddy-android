@@ -23,11 +23,6 @@ android {
         }
     }
 
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
     buildFeatures {
         compose = true
     }
@@ -59,5 +54,8 @@ val unitTestForks = providers.gradleProperty("testForks").map(String::toInt)
 tasks.withType<Test>().configureEach {
     maxParallelForks = unitTestForks.get()
     systemProperty("fixtures.dir", rootProject.file("fixtures").path)
-    inputs.dir(rootProject.file("fixtures")).withPathSensitivity(PathSensitivity.RELATIVE)
+    // Only the committed fixtures; fixtures/harness holds the Swift generator and its build output.
+    inputs.files(rootProject.fileTree("fixtures") { exclude("harness/**") })
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+        .withPropertyName("fixtures")
 }
