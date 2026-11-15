@@ -161,6 +161,12 @@ let canonical = canonicalInputs.map { input in
 /// upstream parses and that carry a relay origin are accepted; resolved (v=2)
 /// codes are refused because Android does not implement the shard resolver;
 /// every upstream parse failure is refused with the upstream error's name.
+/// The canonical relay origin's host must also be a plain hostname
+/// (`[A-Za-z0-9._-]+`) or a bracketed IP literal (`[0-9A-Fa-f:.]+`), with an
+/// optional port: upstream percent-decodes the host, so it can otherwise hold
+/// '@', '/', '#', control or non-ASCII characters (`invalidRelay`).
+let plainRelayOrigin = try! Regex("https://([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]+)?")
+
 func androidPolicy(_ result: Result<PairingCode, Error>) -> (accepts: Bool, reason: String?) {
     switch result {
     case .failure(let error):
@@ -171,6 +177,9 @@ func androidPolicy(_ result: Result<PairingCode, Error>) -> (accepts: Bool, reas
         }
         if code.relayOrigin == nil {
             return (false, "missingRelay")
+        }
+        if code.relayOrigin?.wholeMatch(of: plainRelayOrigin) == nil {
+            return (false, "invalidRelay")
         }
         return (true, nil)
     }
@@ -240,8 +249,8 @@ let pairingCodeInputs: [(name: String, qr: String)] = [
     ("relayWithUserinfo", directQR(extra: "&relay=https://user@relay.example.com")),
     ("wrongScheme", "https://pair?v=1&proto=\(protocolName)&rs=\(base64URL(macStaticKey))&pid=\(pairingID)"),
     ("wrongHost", "iterm2://pairing?v=1&proto=\(protocolName)&rs=\(base64URL(macStaticKey))&pid=\(pairingID)"),
-    // Relay origin edge forms. Their results are swift-corelibs-foundation's on
-    // Linux; Darwin Foundation may differ on the exotic hosts.
+    // Relay origin edge forms. Their results are URLComponents' in swift-foundation
+    // (FoundationEssentials) with Swift 6.2 on Linux; Darwin may differ on exotic hosts.
     ("relayEmptyPort", directQR(extra: "&relay=https://h:")),
     ("relayLeadingZeroPort", directQR(extra: "&relay=https://h:0443")),
     ("relayIPv6Literal", directQR(extra: "&relay=https://[::1]:8443")),
@@ -261,7 +270,24 @@ let pairingCodeInputs: [(name: String, qr: String)] = [
     ("missingPairingIDAndInvalidRelay", directQR(pid: nil, extra: "&relay=http://relay.example.com")),
     // The last base64url character carries two unused bits; here they are not zero.
     ("nonZeroTrailingBitsKey", directQR(rs: String(base64URL(macStaticKey).dropLast()) + "d",
-                                        extra: "&relay=\(exampleRelay)"))
+                                        extra: "&relay=\(exampleRelay)")),
+    // Upstream accepts these hosts once decoded; the Android policy refuses them.
+    ("relayEncodedAtSignHost", directQR(extra: "&relay=https://good.com%2540evil.com")),
+    ("relayEncodedSlashHost", directQR(extra: "&relay=https://evil.com%252Fgood")),
+    ("relayEncodedNewlineHost", directQR(extra: "&relay=https://h%250A.evil")),
+    ("relayEncodedNulHost", directQR(extra: "&relay=https://h%2500")),
+    ("relayEncodedHashHost", directQR(extra: "&relay=https://a%2523b")),
+    ("relayNonASCIIHost", directQR(extra: "&relay=https://r%25C3%25A9lay.com")),
+    // A query character RFC 3986 does not allow makes Foundation re-encode the
+    // whole query, so every value in it comes back undecoded.
+    ("rawQueryEncodedRelay", directQR(pid: "a|b", extra: "&relay=https%3A%2F%2Fh")),
+    ("rawQueryPairingID", directQR(pid: "%41|", extra: "&relay=\(projectRelayOrigin)")),
+    ("relayUndecodableUserinfo", directQR(extra: "&relay=https://%25FF@h")),
+    ("relayPortOverflow", directQR(extra: "&relay=https://h:9223372036854775808")),
+    ("relayUndecodablePath", directQR(extra: "&relay=https://h/%25FF")),
+    // Check order: v before proto, rs before pid.
+    ("unsupportedVersionAndProtocol", directQR(proto: "X", version: "3", extra: "&relay=\(exampleRelay)")),
+    ("invalidKeyAndMissingPairingID", directQR(rs: "not*base64", pid: nil, extra: "&relay=\(exampleRelay)"))
 ]
 let pairingCodes = pairingCodeInputs.map { input -> PairingCodeVector in
     let result = Result { try PairingCode.parse(input.qr) }

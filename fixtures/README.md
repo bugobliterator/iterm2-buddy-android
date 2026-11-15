@@ -51,19 +51,24 @@ docker run --rm -v "$PWD/fixtures/harness:/harness" -w /harness swift:6.2-noble 
   `PairingCode.parse`; `androidAccepts`/`androidReason` are the Android app's
   policy, written in `main.swift`: only a `v=1` code with a relay origin is
   accepted (`resolverUnsupported` for `v=2`, `missingRelay` for a `v=1` code
-  without `relay=`, otherwise the upstream error name). Join signatures are
+  without `relay=`, otherwise the upstream error name), and only when the
+  canonical origin's host is a plain hostname (`[A-Za-z0-9._-]+`) or a
+  bracketed IP literal (`[0-9A-Fa-f:.]+`), else `invalidRelay`: upstream
+  percent-decodes the host, so it can hold `@`, `/`, `#`, control or non-ASCII
+  characters. Join signatures are
   deterministic RFC 8032 Ed25519 only with swift-crypto's BoringSSL backend,
   so regenerate on Linux: Darwin CryptoKit randomises them.
   QR query values are percent-decoded without turning `+` into a space
   (upstream keeps a literal `+`), so Android parses the raw query with its own
   `&`/`=` splitter plus percent-decoding, never `Uri.getQueryParameter` or
   `URLDecoder`.
-  The relay-origin edge entries (`relayEmptyPort` through `relayInvalidUTF8`:
-  empty or leading-zero ports, an IPv6 literal, an out-of-range port,
-  underscores, empty labels, leading hyphens, a percent-encoded host, an empty
-  query, fragment or userinfo, invalid UTF-8) record what swift-corelibs
-  Foundation on Linux does. Darwin Foundation may differ on the exotic hosts;
-  the Mac never renders those, so only the common forms must agree there.
+  The relay-origin and query edge entries (from `relayEmptyPort` on: odd
+  ports, an IPv6 literal, unusual or percent-encoded hosts, empty query,
+  fragment or userinfo, invalid UTF-8, a query Foundation re-encodes) record
+  what `URLComponents` does in swift-foundation (`FoundationEssentials`) as
+  shipped with Swift 6.2 on Linux (`swift:6.2-noble`, 6.2.4); the `Foundation`
+  module there re-exports it. Darwin Foundation may differ on the exotic
+  hosts; the Mac never renders those, so only the common forms must agree.
 - `messages/session/*.json` (generated): session envelopes from v3.7.7, each
   `{"direction", "swiftValue", "json"}`. `json` is the envelope as upstream
   `WireCoding` encodes it, built the way the real flow builds it (iOS
