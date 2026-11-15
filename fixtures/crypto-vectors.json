@@ -345,6 +345,145 @@
       "qr" : "iterm2://pairing?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a",
       "upstreamError" : "malformedURL",
       "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "relayEmptyPort",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://h:",
+      "relayOrigin" : "https://h",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "relayLeadingZeroPort",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://h:0443",
+      "relayOrigin" : "https://h:443",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "relayIPv6Literal",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://[::1]:8443",
+      "relayOrigin" : "https://[::1]:8443",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "relayPortOutOfRange",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://h:65536",
+      "relayOrigin" : "https://h:65536",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidRelay",
+      "name" : "relayEmptyFragment",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://h%23",
+      "upstreamError" : "invalidRelay",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidRelay",
+      "name" : "relayEmptyQuery",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://h%3F",
+      "upstreamError" : "invalidRelay",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "relayUnderscoreHost",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://my_relay.lan",
+      "relayOrigin" : "https://my_relay.lan",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "relayEmptyLabelHost",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://h..com",
+      "relayOrigin" : "https://h..com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "relayLeadingHyphenHost",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://-h.com",
+      "relayOrigin" : "https://-h.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "relayPercentEncodedHost",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay%252Eexample.com",
+      "relayOrigin" : "https://relay.example.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidRelay",
+      "name" : "relayEmptyUserinfo",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://@h",
+      "upstreamError" : "invalidRelay",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "unrelatedInvalidUTF8Item",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com&x=%FF",
+      "relayOrigin" : "https://relay.example.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "missingRelay",
+      "name" : "relayInvalidUTF8",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=%FF",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "unsupportedProtocol",
+      "name" : "wrongProtocolAndInvalidKey",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_SHA256&rs=not*base64&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com",
+      "upstreamError" : "unsupportedProtocol",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "missingPairingID",
+      "name" : "missingPairingIDAndInvalidRelay",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&relay=http://relay.example.com",
+      "upstreamError" : "missingPairingID",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "nonZeroTrailingBitsKey",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhd&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com",
+      "relayOrigin" : "https://relay.example.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
     }
   ],
   "prologues" : [
