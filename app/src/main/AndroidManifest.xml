@@ -1,7 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+    INTERNET only. ML Kit's telemetry library (com.google.android.datatransport, pulled in by the
+    code scanner) asks for ACCESS_NETWORK_STATE to schedule log uploads with a network constraint.
+    Without it the JobScheduler call throws SecurityException, which datatransport catches and logs
+    (DefaultScheduler's catch, and its SafeLoggingExecutor for WorkInitializer), so ML Kit's usage
+    logs are never uploaded and scanning is unaffected: the scanner itself runs in Play services.
+    If the on-device check shows a crash, restore the permission.
+    -->
+    <uses-permission
+        android:name="android.permission.ACCESS_NETWORK_STATE"
+        tools:node="remove" />
 
     <application
         android:name=".CompanionApp"

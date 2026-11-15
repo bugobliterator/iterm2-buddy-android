@@ -46,8 +46,9 @@ class ConnectionStatusTest {
                     "Open pairing in iTerm2 on your Mac, then scan the QR code it shows.",
                     listOf("Scan to pair" to ButtonAction.SCAN),
                 )
+                // Neutral: Idle also follows a cancel while the store was unreadable.
                 ClientState.Idle -> Expected(
-                    "Paired with iTerm2, not connected",
+                    "Not connected",
                     null,
                     listOf("Connect" to ButtonAction.START, "Unpair" to ButtonAction.UNPAIR),
                 )
@@ -77,7 +78,7 @@ class ConnectionStatusTest {
                     if (state.rescanNeeded) {
                         listOf("Scan again" to ButtonAction.SCAN)
                     } else {
-                        listOf("Try again" to ButtonAction.START)
+                        listOf("Try again" to ButtonAction.START, "Scan again" to ButtonAction.SCAN)
                     },
                 )
             }
@@ -98,8 +99,20 @@ class ConnectionStatusTest {
     }
 
     @Test
+    fun everyFailureHasAWayOutThroughScanning() {
+        for (state in allStates().filterIsInstance<ClientState.Failed>()) {
+            assertTrue("$state", screenContent(state).buttons.any { it.action == ButtonAction.SCAN })
+        }
+    }
+
+    @Test
     fun scannerInstallingOffersTryAgainThatScans() {
-        for (state in listOf(ClientState.Unpaired, ClientState.Failed("Unpaired on the Mac", rescanNeeded = true))) {
+        val states = listOf(
+            ClientState.Unpaired,
+            ClientState.Failed("Unpaired on the Mac", rescanNeeded = true),
+            ClientState.Failed("The relay refused the connection (HTTP 403): forbidden", rescanNeeded = false),
+        )
+        for (state in states) {
             val content = screenContent(state, ScanNotice.Installing)
             assertEquals("$state", "The scanner is still installing; try again in a moment.", content.body)
             assertEquals("$state", listOf("Try again" to ButtonAction.SCAN), content.buttons.map { it.label to it.action })
@@ -116,9 +129,50 @@ class ConnectionStatusTest {
     @Test
     fun scanNoticeIsIgnoredWhereNoScanIsOffered() {
         val notice = ScanNotice.Problem("This QR code is invalid.")
-        for (state in allStates().filterNot { it == ClientState.Unpaired || (it is ClientState.Failed && it.rescanNeeded) }) {
+        for (state in allStates().filterNot { it == ClientState.Unpaired || it is ClientState.Failed }) {
             assertEquals("$state", screenContent(state), screenContent(state, notice))
         }
+    }
+
+    @Test
+    fun unpairingIsBusyWithNoButtons() {
+        for (state in allStates()) {
+            assertEquals("$state", ScreenContent("Unpairing…", buttons = emptyList(), busy = true), screenContent(state, unpairing = true))
+        }
+    }
+
+    @Test
+    fun failedUnpairSaysSoAndKeepsTheButtons() {
+        for (state in listOf(ClientState.Idle, ClientState.Connected(11))) {
+            val content = screenContent(state, unpairFailed = true)
+            assertEquals("$state", "Couldn't unpair; try again.", content.body)
+            assertEquals("$state", screenContent(state).buttons, content.buttons)
+        }
+    }
+
+    @Test
+    fun eachButtonActionCallsItsAction() {
+        val calls = mutableListOf<String>()
+        val actions = object : PairingActions {
+            override fun scan() {
+                calls += "scan"
+            }
+
+            override fun start() {
+                calls += "start"
+            }
+
+            override fun cancel() {
+                calls += "cancel"
+            }
+
+            override fun unpair() {
+                calls += "unpair"
+            }
+        }
+        for (action in ButtonAction.entries) perform(action, actions)
+        assertEquals(listOf("scan", "start", "cancel", "unpair"), calls)
+        assertEquals(listOf(ButtonAction.SCAN, ButtonAction.START, ButtonAction.CANCEL, ButtonAction.UNPAIR), ButtonAction.entries)
     }
 
     @Test
@@ -192,7 +246,7 @@ class ConnectionStatusTest {
     private companion object {
         val CANCEL_ONLY = listOf("Cancel" to ButtonAction.CANCEL)
 
-        /** One of each state, with every failure the client produces (CompanionClient's messages). */
+        /** One of each state, with every Failed message CompanionClient produces (copied from it). */
         fun allStates(): List<ClientState> = listOf(
             ClientState.Unpaired,
             ClientState.Idle,
@@ -221,6 +275,11 @@ class ConnectionStatusTest {
                 "iTerm2 isn't showing that pairing code any more. Open pairing on the Mac and scan again.",
                 rescanNeeded = true,
             ),
+            ClientState.Failed("The code wasn't entered on your Mac in time. Scan again to pair.", rescanNeeded = true),
+            ClientState.Failed("Your Mac couldn't save the pairing. Check iTerm2, then reconnect.", rescanNeeded = false),
+            ClientState.Failed("The relay closed this pairing. Open pairing on the Mac and scan again.", rescanNeeded = true),
+            ClientState.Failed("The stored relay address can't be used. Scan again.", rescanNeeded = true),
+            ClientState.Failed("This phone couldn't save the pairing. Scan again.", rescanNeeded = true),
         )
     }
 }

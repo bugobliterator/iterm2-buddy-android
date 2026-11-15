@@ -7,6 +7,17 @@ import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
 import dev.bugobliterator.itermbuddy.core.pairing.PairingCodeResult
 import dev.bugobliterator.itermbuddy.core.pairing.parsePairingCode
 
+/** What the pairing screens can ask for. */
+interface PairingActions {
+    fun scan()
+
+    fun start()
+
+    fun cancel()
+
+    fun unpair()
+}
+
 /** What a button does; [PairingScreen] maps each one to a [PairingActions] call. */
 enum class ButtonAction {
     /** Open the code scanner. */
@@ -23,6 +34,14 @@ enum class ButtonAction {
 }
 
 data class ScreenButton(val label: String, val action: ButtonAction)
+
+/** Runs [action] on [actions]: the one place a button becomes a call. */
+fun perform(action: ButtonAction, actions: PairingActions) = when (action) {
+    ButtonAction.SCAN -> actions.scan()
+    ButtonAction.START -> actions.start()
+    ButtonAction.CANCEL -> actions.cancel()
+    ButtonAction.UNPAIR -> actions.unpair()
+}
 
 /** The pairing code as shown: [text] is `482 913`, [spoken] is what TalkBack reads, digit by digit. */
 data class CodeDisplay(val text: String, val spoken: String)
@@ -89,16 +108,36 @@ fun formatPairingCode(code: String): String = code.chunked(CODE_GROUP).joinToStr
 /** The code for TalkBack, one digit at a time: `Code 4 8 2 9 1 3`. */
 fun spokenPairingCode(code: String): String = "Code " + code.filter { !it.isWhitespace() }.toList().joinToString(" ")
 
-/** The screen for [state]; [notice] is the latest scanner report, shown where a scan is offered. */
-fun screenContent(state: ClientState, notice: ScanNotice? = null): ScreenContent = when (state) {
-    ClientState.Unpaired -> scanScreen(
-        title = "Not paired",
-        body = "Open pairing in iTerm2 on your Mac, then scan the QR code it shows.",
-        scanLabel = "Scan to pair",
-        notice = notice,
+/**
+ * The screen for [state].
+ *
+ * @param notice the latest scanner report, shown where a scan is offered.
+ * @param unpairing an unpair is running: a busy screen with no buttons.
+ * @param unpairFailed the last unpair could not clear the store: says so in place of the body.
+ */
+fun screenContent(
+    state: ClientState,
+    notice: ScanNotice? = null,
+    unpairing: Boolean = false,
+    unpairFailed: Boolean = false,
+): ScreenContent {
+    if (unpairing) return ScreenContent(title = "Unpairing…", buttons = emptyList(), busy = true)
+    val content = stateContent(state, notice)
+    return if (unpairFailed) content.copy(body = UNPAIR_FAILED) else content
+}
+
+private fun stateContent(state: ClientState, notice: ScanNotice?): ScreenContent = when (state) {
+    ClientState.Unpaired -> withScanNotice(
+        ScreenContent(
+            title = "Not paired",
+            body = "Open pairing in iTerm2 on your Mac, then scan the QR code it shows.",
+            buttons = listOf(ScreenButton("Scan to pair", ButtonAction.SCAN)),
+        ),
+        notice,
     )
+    // Idle also follows a cancel while the store could not be read, so it does not claim a pairing.
     ClientState.Idle -> ScreenContent(
-        title = "Paired with iTerm2, not connected",
+        title = "Not connected",
         buttons = listOf(ScreenButton("Connect", ButtonAction.START), UNPAIR),
     )
     ClientState.Connecting -> ScreenContent(title = "Connecting…", buttons = listOf(CANCEL), busy = true)
@@ -128,31 +167,36 @@ fun screenContent(state: ClientState, notice: ScanNotice? = null): ScreenContent
         buttons = listOf(CANCEL),
     )
     is ClientState.Connected -> ScreenContent(title = "Connected to iTerm2", buttons = listOf(UNPAIR))
-    is ClientState.Failed ->
-        if (state.rescanNeeded) {
-            scanScreen(title = "Not connected", body = state.message, scanLabel = "Scan again", notice = notice)
-        } else {
-            // The pairing is kept; start() reconnects it, or goes Unpaired if it has since gone.
-            ScreenContent(
-                title = "Not connected",
-                body = state.message,
-                buttons = listOf(ScreenButton("Try again", ButtonAction.START)),
-            )
-        }
+    is ClientState.Failed -> withScanNotice(
+        ScreenContent(
+            title = "Not connected",
+            body = state.message,
+            buttons = if (state.rescanNeeded) {
+                listOf(SCAN_AGAIN)
+            } else {
+                // The pairing is kept: start() reconnects it, or goes Unpaired if it has gone.
+                // Scan again is the way out when the kept pairing keeps failing (TLS, HTTP 403, ...).
+                listOf(ScreenButton("Try again", ButtonAction.START), SCAN_AGAIN)
+            },
+        ),
+        notice,
+    )
 }
 
-/** A screen whose button opens the scanner; a scanner notice replaces [body]. */
-private fun scanScreen(title: String, body: String, scanLabel: String, notice: ScanNotice?): ScreenContent =
-    when (notice) {
-        null -> ScreenContent(title, body, buttons = listOf(ScreenButton(scanLabel, ButtonAction.SCAN)))
-        ScanNotice.Installing ->
-            ScreenContent(title, SCANNER_INSTALLING, buttons = listOf(ScreenButton("Try again", ButtonAction.SCAN)))
-        is ScanNotice.Problem ->
-            ScreenContent(title, notice.message, buttons = listOf(ScreenButton(scanLabel, ButtonAction.SCAN)))
-    }
+/**
+ * A scanner [notice] on a screen that offers a scan: a problem replaces the body; "still
+ * installing" also makes the only button a Try again that scans.
+ */
+private fun withScanNotice(content: ScreenContent, notice: ScanNotice?): ScreenContent = when (notice) {
+    null -> content
+    ScanNotice.Installing ->
+        content.copy(body = SCANNER_INSTALLING, buttons = listOf(ScreenButton("Try again", ButtonAction.SCAN)))
+    is ScanNotice.Problem -> content.copy(body = notice.message)
+}
 
 private val CANCEL = ScreenButton("Cancel", ButtonAction.CANCEL)
 private val UNPAIR = ScreenButton("Unpair", ButtonAction.UNPAIR)
+private val SCAN_AGAIN = ScreenButton("Scan again", ButtonAction.SCAN)
 private const val CODE_GROUP = 3
 
 internal const val SCANNER_INSTALLING = "The scanner is still installing; try again in a moment."
@@ -160,3 +204,4 @@ internal const val CAMERA_DENIED =
     "The scanner needs the camera. Allow camera access for Google Play services, then try again."
 internal const val PLAY_SERVICES_TOO_OLD = "The scanner needs a newer Google Play services. Update it, then try again."
 internal const val SCANNER_FAILED = "The scanner couldn't start. Try again."
+internal const val UNPAIR_FAILED = "Couldn't unpair; try again."

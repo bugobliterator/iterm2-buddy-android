@@ -4,18 +4,23 @@ import android.app.Application
 import android.util.Log
 import dev.bugobliterator.itermbuddy.core.CompanionClient
 import dev.bugobliterator.itermbuddy.store.KeystorePairingStore
-import dev.bugobliterator.itermbuddy.store.PairingStoreUnavailableException
 import dev.bugobliterator.itermbuddy.ui.ScanNotice
 import dev.bugobliterator.itermbuddy.ui.ScanOutcome
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Holds the process's single [CompanionClient], so it outlives activity recreation (rotation,
@@ -27,8 +32,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * instrumented tests, which would then race the client for the pairing store.
  */
 class CompanionApp : Application() {
-    /** App-lifetime work: one failure never cancels the rest. */
-    val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    /**
+     * App-lifetime work: one failure never cancels the rest, and an exception nothing caught is
+     * logged rather than crashing the process.
+     */
+    val scope: CoroutineScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e -> Log.e(TAG, "uncaught in app scope", e) },
+    )
 
     lateinit var client: CompanionClient
         private set
@@ -40,6 +50,18 @@ class CompanionApp : Application() {
     /** The latest scanner report, kept here so it survives activity recreation. */
     val scanNotice: StateFlow<ScanNotice?> = scanNoticeFlow.asStateFlow()
 
+    private val unpairingFlow = MutableStateFlow(false)
+
+    /** True while an [unpair] runs. */
+    val unpairing: StateFlow<Boolean> = unpairingFlow.asStateFlow()
+
+    private val unpairFailedFlow = MutableStateFlow(false)
+
+    /** True for a few seconds after an [unpair] failed, or until the next button press. */
+    val unpairFailed: StateFlow<Boolean> = unpairFailedFlow.asStateFlow()
+
+    private var unpairFailedTimer: Job? = null
+
     override fun onCreate() {
         super.onCreate()
         client = CompanionClient(KeystorePairingStore(this), OkHttpClient(), scope)
@@ -50,8 +72,10 @@ class CompanionApp : Application() {
         if (started.compareAndSet(false, true)) client.start()
     }
 
-    fun clearScanNotice() {
+    /** Clears the transient notices; every button press calls this first. */
+    fun clearNotices() {
         scanNoticeFlow.value = null
+        unpairFailedFlow.value = false
     }
 
     /** Acts on a finished scan: pairs, shows a notice, or does nothing. Never logs the QR text. */
@@ -66,19 +90,40 @@ class CompanionApp : Application() {
         }
     }
 
-    /** [CompanionClient.unpair] in the app scope, so leaving the screen does not cut it short. */
+    /**
+     * [CompanionClient.unpair] in the app scope, so leaving the screen does not cut it short.
+     * Undispatched, so the client's control chain has the unpair queued before this returns and a
+     * button pressed straight after runs after it.
+     */
     fun unpair() {
-        scope.launch {
+        unpairingFlow.value = true
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
                 client.unpair()
-            } catch (e: PairingStoreUnavailableException) {
-                // The client is Idle with the pairing still stored; the screen offers Unpair again.
-                Log.w(TAG, "unpair could not clear the store: ${e.message}")
+            } catch (e: CancellationException) {
+                // Superseded by a later pair() or start(), or the scope is going away.
+                throw e
+            } catch (e: Exception) {
+                // An IOException leaves the client Idle with the pairing still stored.
+                Log.w(TAG, "unpair failed: $e")
+                showUnpairFailed()
+            } finally {
+                unpairingFlow.value = false
             }
+        }
+    }
+
+    private fun showUnpairFailed() {
+        unpairFailedFlow.value = true
+        unpairFailedTimer?.cancel()
+        unpairFailedTimer = scope.launch {
+            delay(UNPAIR_FAILED_SHOWN)
+            unpairFailedFlow.value = false
         }
     }
 
     private companion object {
         const val TAG = "CompanionApp"
+        val UNPAIR_FAILED_SHOWN = 5.seconds
     }
 }
