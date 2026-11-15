@@ -1,0 +1,5 @@
+/.build/
+/.swiftpm/
+# Filled by sync-upstream.sh; the Linux copy differs from the Darwin copy.
+/Sources/CompanionProtocol/Upstream/
+/Sources/WireFixtures/Upstream/

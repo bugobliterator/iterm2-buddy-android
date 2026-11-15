@@ -1,0 +1,54 @@
+--- a/sources/AITerm/iTermAIError.swift
++++ b/sources/AITerm/iTermAIError.swift
+@@ -10,9 +10,9 @@
+ 
+ import Foundation
+ 
+-@objc public class iTermAIError: NSObject {
+-    @objc static let domain = "com.iterm2.ai"
+-    @objc(iTermAIErrorType) public enum ErrorType: Int, Codable {
++public class iTermAIError {
++    static let domain = "com.iterm2.ai"
++    public enum ErrorType: Int, Codable {
+         case generic = 0
+         case requestTooLarge = 1
+     }
+--- a/sources/ClaudeCode/Orchestration/StableSessionID.swift
++++ b/sources/ClaudeCode/Orchestration/StableSessionID.swift
+@@ -22,8 +22,7 @@
+ 
+ import Foundation
+ 
+-@objc(iTermStableSessionID)
+-class StableSessionID: NSObject {
++class StableSessionID {
+     /// Leading tag. Kept in one constant so the whole scheme is a one-line rename.
+     static let prefix = "ptys_"
+ 
+@@ -62,7 +61,7 @@
+     static let tokenPattern = prefix + charClass + "{\(bodyLength + 1)}"
+ 
+     /// Mints a fresh id. Canonical (uppercase, strict alphabet) by construction.
+-    @objc static func generate() -> String {
++    static func generate() -> String {
+         var indices = [Int]()
+         indices.reserveCapacity(bodyLength)
+         for _ in 0..<bodyLength {
+@@ -75,7 +74,7 @@
+ 
+     /// True if `candidate` is a well-formed stable id (prefix, length, alphabet,
+     /// checksum). Accepts any case and Crockford-confusable input.
+-    @objc static func isValid(_ candidate: String) -> Bool {
++    static func isValid(_ candidate: String) -> Bool {
+         return canonical(candidate) != nil
+     }
+ 
+@@ -83,7 +82,7 @@
+     /// it is a valid stable id, else nil. Normalize an id through this before
+     /// using it as a lookup key so that case and Crockford confusables (I/L->1,
+     /// O->0) do not cause a miss.
+-    @objc static func canonical(_ candidate: String) -> String? {
++    static func canonical(_ candidate: String) -> String? {
+         // Case-insensitive prefix so the recommended case-insensitive scan (which
+         // may capture an uppercased "PTYS_") round-trips through here. The
+         // canonical output always uses the lowercase prefix constant.

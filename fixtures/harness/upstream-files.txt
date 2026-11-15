@@ -1,0 +1,53 @@
+# Upstream iTerm2 files compiled by the wire-fixture harness.
+# Tag v3.7.7 (e0025340b49a2fc6415f490d77bbead5d3e0583e), https://gitlab.com/gnachman/iterm2.git
+# Format: <target> <path in upstream repo>
+# sync-upstream.sh copies each file to Sources/<target>/Upstream/<path in upstream repo>.
+
+# CompanionCore protocol files (public API).
+CompanionProtocol Companion/CompanionCore/Sources/CompanionProtocol/Wire/CanonicalEncoding.swift
+CompanionProtocol Companion/CompanionCore/Sources/CompanionProtocol/Pairing/PairingCode.swift
+CompanionProtocol Companion/CompanionCore/Sources/CompanionProtocol/Pairing/RelayRoom.swift
+CompanionProtocol Companion/CompanionCore/Sources/CompanionProtocol/Pairing/PairingSAS.swift
+CompanionProtocol Companion/CompanionCore/Sources/CompanionProtocol/Pairing/RelayJoin.swift
+CompanionProtocol Companion/CompanionCore/Sources/CompanionProtocol/Pairing/PairingConfirmation.swift
+CompanionProtocol Companion/CompanionCore/Sources/CompanionProtocol/Wire/WireCoding.swift
+CompanionProtocol Companion/CompanionCore/Sources/CompanionProtocol/CompanionProtocolVersion.swift
+CompanionProtocol Companion/CompanionCore/Sources/CompanionProtocol/Transport/MessageTransport.swift
+# Further CompanionProtocol files the files above and CompanionMessages.swift use.
+CompanionProtocol Companion/CompanionCore/Sources/CompanionProtocol/DataHex.swift
+CompanionProtocol Companion/CompanionCore/Sources/CompanionProtocol/CompanionSyncItem.swift
+CompanionProtocol Companion/CompanionCore/Sources/CompanionProtocol/Wire/CompanionError.swift
+
+# Shared sources of the iOS app target (Companion/iTerm2Companion.xcodeproj,
+# target iTerm2Companion), in the order of its Sources build phase.
+# Excluded: sources/Companion/Shared/CompanionHEVCSampleBuilder.swift (CoreMedia)
+#           sources/Companion/Shared/CompanionTouchMapper.swift (CoreGraphics)
+WireFixtures sources/AITerm/Message.swift
+WireFixtures sources/AITerm/Chat.swift
+WireFixtures sources/AITerm/RemoteCommand.swift
+WireFixtures sources/AITerm/LLM.swift
+WireFixtures sources/AITerm/AIExplanationRequest.swift
+WireFixtures sources/AITerm/AIExplanationResponse.swift
+WireFixtures sources/AITerm/iTermAIError.swift
+WireFixtures sources/AITerm/TerminalCommand.swift
+WireFixtures sources/AITerm/AIReasoningTypes.swift
+WireFixtures sources/Categories/Result+iTerm.swift
+WireFixtures sources/Categories/NSDictionaryCodableBox.swift
+WireFixtures sources/Categories/Data+BigEndian.swift
+WireFixtures sources/ClaudeCode/Orchestration/MentionParser.swift
+WireFixtures sources/ClaudeCode/Orchestration/StableSessionID.swift
+WireFixtures sources/ClaudeCode/Orchestration/WorkgroupWatcher.swift
+WireFixtures sources/Companion/CompanionMessageSubstance.swift
+WireFixtures sources/Companion/MentionPlainTextRenderer.swift
+WireFixtures sources/Companion/Shared/CompanionMessages.swift
+WireFixtures sources/Companion/Shared/CompanionPushRelay.swift
+WireFixtures sources/Companion/Shared/CompanionSession.swift
+WireFixtures sources/Companion/Shared/CompanionMediaFrame.swift
+WireFixtures sources/Companion/Shared/CompanionFrameChannel.swift
+WireFixtures sources/Companion/Shared/CompanionHEVCFraming.swift
+WireFixtures sources/Companion/Shared/CompanionHistoryWindow.swift
+
+# iOS target shims standing in for macOS-only iTerm2 types.
+WireFixtures Companion/iTerm2Companion/Satellites/JSONValue.swift
+WireFixtures Companion/iTerm2Companion/Satellites/MacShims.swift
+WireFixtures Companion/iTerm2Companion/Satellites/MacTypeShadows.swift
