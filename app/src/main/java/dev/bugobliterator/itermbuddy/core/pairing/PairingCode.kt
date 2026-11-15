@@ -82,7 +82,7 @@ fun parsePairingCode(qr: String): PairingCodeResult {
     val origin = canonicalRelayOrigin(relay) ?: return rejected(Reason.INVALID_RELAY)
     // App policy: upstream percent-decodes the host, so it can hold '@', '/', '#', control or
     // non-ASCII characters. Only a plain hostname or bracketed IP literal is used.
-    if (!PLAIN_RELAY_ORIGIN.matches(origin)) return rejected(Reason.INVALID_RELAY)
+    if (!isAcceptedRelayOrigin(origin)) return rejected(Reason.INVALID_RELAY)
     return PairingCodeResult.Ok(PairingCode(key, pid, origin))
 }
 
@@ -97,6 +97,14 @@ internal fun canonicalRelayOrigin(raw: String): String? {
     if (url.path.isNotEmpty() && url.path != "/") return null
     return "https://" + url.host + (url.port?.let { ":$it" } ?: "")
 }
+
+/**
+ * True when [origin] is exactly what [parsePairingCode] would store: already canonical (upstream
+ * `canonicalRelayOrigin` maps it to itself) and a plain hostname or bracketed IP literal.
+ * The pairing store re-checks a loaded origin with this.
+ */
+internal fun isAcceptedRelayOrigin(origin: String): Boolean =
+    PLAIN_RELAY_ORIGIN.matches(origin) && canonicalRelayOrigin(origin) == origin
 
 /** Upstream `canonicalResolverURL`'s validity rule: like the relay origin, but any path is allowed. */
 private fun isValidResolverURL(raw: String): Boolean = parseHttpsURL(raw) != null
