@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: Optional(2), payload: WireFixtures.CompanionHostMessage.hello(revision: 15, minimumPeer: 11, wantsNotificationPermission: Optional(false), aiAvailable: Optional(true), macStatus: Optional(WireFixtures.CompanionMacStatus(modalAlerts: [], mainBlocked: false))))",
+  "json" : {"payload":{"hello":{"aiAvailable":true,"macStatus":{"mainBlocked":false,"modalAlerts":[]},"minimumPeer":11,"revision":15,"wantsNotificationPermission":false}},"requestID":2}
+}
