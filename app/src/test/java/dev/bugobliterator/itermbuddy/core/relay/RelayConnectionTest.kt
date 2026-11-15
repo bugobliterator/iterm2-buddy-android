@@ -6,6 +6,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Dns
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Response
@@ -14,21 +15,36 @@ import okhttp3.WebSocketListener
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.tls.HandshakeCertificates
+import okhttp3.tls.HeldCertificate
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
-import java.net.ServerSocket
+import java.io.IOException
+import java.io.InterruptedIOException
+import java.net.ConnectException
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.NoRouteToHostException
+import java.net.Socket
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.security.cert.CertificateException
 import java.util.Base64
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLPeerUnverifiedException
 
 /**
  * Admission, framing and /register against MockWebServer playing the relay (room.js at b8aa2f9).
@@ -39,6 +55,7 @@ class RelayConnectionTest {
     private lateinit var server: MockWebServer
     private lateinit var client: OkHttpClient
     private val connections = mutableListOf<RelayConnection>()
+    private val heldSockets = mutableListOf<Socket>()
 
     @Before
     fun setUp() {
@@ -53,6 +70,7 @@ class RelayConnectionTest {
     @After
     fun tearDown() {
         connections.forEach { it.close() }
+        heldSockets.forEach { it.close() }
         server.shutdown()
         client.dispatcher.executorService.shutdown()
         client.connectionPool.evictAll()
@@ -172,10 +190,57 @@ class RelayConnectionTest {
 
     @Test
     fun unreachableHostIsUnreachable() = runBlocking {
-        val port = ServerSocket(0).use { it.localPort }
-        val closed = RelayEndpoints(ORIGIN, "ws://127.0.0.1:$port/", "http://127.0.0.1:$port")
-        val result = connection(relayEndpoints = closed).admit(Proof.Fresh)
-        assertTrue("$result", result is AdmissionResult.Unreachable)
+        val result = connection(relayEndpoints = refusingEndpoints()).admit(Proof.Fresh)
+        assertEquals("$result", UnreachableKind.CONNECT, (result as AdmissionResult.Unreachable).kind)
+    }
+
+    @Test
+    fun unresolvableHostIsUnreachableDns() = runBlocking {
+        val noDns = client.newBuilder().dns(failingDns {}).build()
+        val endpoints = RelayEndpoints(ORIGIN, "ws://relay.invalid/", "http://relay.invalid")
+        val result = connection(relayClient = noDns, relayEndpoints = endpoints).admit(Proof.Fresh)
+        assertEquals("$result", UnreachableKind.DNS, (result as AdmissionResult.Unreachable).kind)
+    }
+
+    @Test
+    fun connectStillPendingAtTimeoutIsUnreachableTimeout() = runBlocking {
+        val release = CountDownLatch(1)
+        val stuckDns = client.newBuilder().dns(failingDns { release.await(5, TimeUnit.SECONDS) }).build()
+        try {
+            val endpoints = RelayEndpoints(ORIGIN, "ws://relay.invalid/", "http://relay.invalid")
+            val result = connection(relayClient = stuckDns, relayEndpoints = endpoints, admissionTimeoutMillis = 150)
+                .admit(Proof.Fresh)
+            assertEquals("$result", UnreachableKind.TIMEOUT, (result as AdmissionResult.Unreachable).kind)
+        } finally {
+            release.countDown()
+        }
+    }
+
+    @Test
+    fun untrustedCertificateIsUnreachableTls() = runBlocking {
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName("localhost").build()
+        server.useHttps(HandshakeCertificates.Builder().heldCertificate(certificate).build().sslSocketFactory(), false)
+        server.enqueue(MockResponse().withWebSocketUpgrade(FakeRelay()))
+        val endpoints = RelayEndpoints(ORIGIN, "wss://localhost:${server.port}/", "https://localhost:${server.port}")
+        val result = connection(relayEndpoints = endpoints).admit(Proof.Fresh)
+        assertEquals("$result", UnreachableKind.TLS, (result as AdmissionResult.Unreachable).kind)
+    }
+
+    @Test
+    fun unreachableKindsClassifyCauseChains() {
+        val cases = listOf(
+            UnknownHostException("relay.invalid") to UnreachableKind.DNS,
+            ConnectException("refused") to UnreachableKind.CONNECT,
+            NoRouteToHostException("no route") to UnreachableKind.CONNECT,
+            SocketTimeoutException("connect timed out") to UnreachableKind.TIMEOUT,
+            InterruptedIOException("timeout") to UnreachableKind.TIMEOUT,
+            SSLHandshakeException("PKIX path building failed") to UnreachableKind.TLS,
+            SSLPeerUnverifiedException("Hostname not verified") to UnreachableKind.TLS,
+            IOException("wrapped", CertificateException("expired")) to UnreachableKind.TLS,
+            IOException("wrapped", UnknownHostException("x")) to UnreachableKind.DNS,
+            IOException("something else") to UnreachableKind.OTHER,
+        )
+        for ((error, kind) in cases) assertEquals("$error", kind, classifyUnreachable(error))
     }
 
     @Test
@@ -185,6 +250,64 @@ class RelayConnectionTest {
         val result = connection(admissionTimeoutMillis = 200).admit(Proof.Fresh)
         assertEquals(AdmissionResult.Closed(1006, "admission timeout"), result)
         assertTrue("took too long", System.nanoTime() - started < TimeUnit.SECONDS.toNanos(3))
+    }
+
+    @Test
+    fun resultArrivingAsTimeoutFiresStillAdmits() = runBlocking {
+        // The relay withholds its result until the timeout has fired; the hook then delivers it
+        // and waits for it to land before the timeout path takes the lock.
+        val fake = relay(FakeRelay(reply = null))
+        val connection = connection(admissionTimeoutMillis = 300)
+        connection.beforeTimeoutSettles = {
+            fake.nextText()
+            fake.nextText()
+            fake.socket().send("""{"ok":true,"registrationToken":"$TOKEN"}""")
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (!connection.admissionSettled && System.nanoTime() < deadline) Thread.sleep(1)
+        }
+        assertEquals(AdmissionResult.Admitted(TOKEN), connection.admit(Proof.Fresh))
+        connection.send(byteArrayOf(4, 2))
+        assertEquals(byteArrayOf(4, 2).toByteString(), fake.next())
+        fake.socket().send(byteArrayOf(7).toByteString())
+        assertArrayEquals(byteArrayOf(7), withTimeout(5_000) { connection.incoming.receive() })
+    }
+
+    @Test
+    fun timeoutFailsIncomingWithAbnormalClose() = runBlocking {
+        relay(FakeRelay(silent = true))
+        val connection = connection(admissionTimeoutMillis = 100)
+        assertEquals(AdmissionResult.Closed(1006, "admission timeout"), connection.admit(Proof.Fresh))
+        val closed = assertThrows(RelayClosedException::class.java) { runBlocking { connection.incoming.receive() } }
+        assertEquals(1006, closed.code)
+    }
+
+    @Test
+    fun pairingCycleCapBeforeAdmissionRequiresRescan() = runBlocking {
+        // room.js:491-497, 761-763: the room is torn down with 1000 and no admission reply.
+        relay(FakeRelay(reply = null, closeAfterReply = 1000 to "pairing cycle cap"))
+        val result = connection().admit(Proof.Fresh)
+        assertEquals(AdmissionResult.Closed(1000, "pairing cycle cap"), result)
+        assertTrue(requiresRescan((result as AdmissionResult.Closed).close))
+    }
+
+    @Test
+    fun pairingCycleCapAfterAdmissionRequiresRescan() = runBlocking {
+        val fake = relay(FakeRelay())
+        val connection = connection()
+        assertEquals(AdmissionResult.Admitted(TOKEN), connection.admit(Proof.Fresh))
+        fake.socket().close(1000, "pairing cycle cap")
+        val closed = assertThrows(RelayClosedException::class.java) {
+            runBlocking { withTimeout(5_000) { connection.incoming.receive() } }
+        }
+        assertEquals(RelayClose(1000, "pairing cycle cap"), closed.close)
+        assertTrue(requiresRescan(closed.close))
+    }
+
+    @Test
+    fun admittedToStringRedactsToken() {
+        val text = AdmissionResult.Admitted(TOKEN).toString()
+        assertFalse(text, text.contains(TOKEN))
+        assertTrue(text, text.contains("redacted"))
     }
 
     @Test
@@ -345,9 +468,11 @@ class RelayConnectionTest {
             403 to """{"ok":false,"error":"bad token"}""",
             403 to """{"ok":false,"error":"token required"}""",
             400 to """{"ok":false,"error":"missing verifier"}""",
+            403 to """{"ok":false,"error":"Already registered"}""",
             403 to "forbidden",
             413 to "payload too large",
             500 to "internal error",
+            502 to "bad gateway",
         )
         for ((status, body) in refusals) {
             server.enqueue(MockResponse().setResponseCode(status).setBody(body))
@@ -361,10 +486,30 @@ class RelayConnectionTest {
 
     @Test
     fun registerReportsTransportError() = runTest {
-        val port = ServerSocket(0).use { it.localPort }
-        val closed = RelayEndpoints(ORIGIN, "ws://127.0.0.1:$port/", "http://127.0.0.1:$port")
-        val result = RelayRegistrar(client, closed).register(ROOM, TOKEN, ByteArray(32))
+        val result = RelayRegistrar(client, refusingEndpoints()).register(ROOM, TOKEN, ByteArray(32))
         assertTrue("$result", result is RegisterResult.TransportError)
+    }
+
+    @Test
+    fun registerRequiresThirtyTwoByteVerifier() = runTest {
+        val registrar = RelayRegistrar(client, endpoints())
+        for (size in listOf(0, 31, 33, 64)) {
+            assertThrows("$size", IllegalArgumentException::class.java) {
+                runBlocking { registrar.register(ROOM, TOKEN, ByteArray(size)) }
+            }
+        }
+        assertEquals(0, server.requestCount)
+    }
+
+    /**
+     * Endpoints on a port held by a bound socket that never listens, so connects are refused and
+     * no other test can take the port meanwhile.
+     */
+    private fun refusingEndpoints(): RelayEndpoints {
+        val holder = Socket().apply { bind(InetSocketAddress(InetAddress.getLoopbackAddress(), 0)) }
+        heldSockets += holder
+        val port = holder.localPort
+        return RelayEndpoints(ORIGIN, "ws://127.0.0.1:$port/", "http://127.0.0.1:$port")
     }
 
     /** Plays room.js's admission: Hello -> Challenge, Proof -> reply, then splices frames. */
@@ -419,6 +564,14 @@ class RelayConnectionTest {
         fun next(): Any = received.poll(5, TimeUnit.SECONDS) ?: throw AssertionError("relay received nothing")
 
         fun nextText(): String = next() as String
+    }
+
+    /** A resolver that runs [first] (to stall, say) and then fails every lookup. */
+    private fun failingDns(first: () -> Unit): Dns = object : Dns {
+        override fun lookup(hostname: String): List<InetAddress> {
+            first()
+            throw UnknownHostException(hostname)
+        }
     }
 
     private object AddOrigin : Interceptor {

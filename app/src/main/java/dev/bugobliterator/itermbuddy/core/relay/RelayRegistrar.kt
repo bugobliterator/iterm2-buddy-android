@@ -29,6 +29,10 @@ sealed interface RegisterResult {
  * later joins must be signed. Called after admission with the token the relay handed out
  * (valid 5 min, single use), once the Mac has stored the room secret.
  *
+ * The caller's [client] keeps its interceptors. An `Origin` header its application interceptors
+ * add is stripped, but its network interceptors run after that stripping, so the production
+ * client must never add `Origin` (the relay answers 403 to any request carrying one).
+ *
  * @param callTimeoutMillis bound on the whole call; tests pass a few hundred milliseconds.
  */
 class RelayRegistrar(
@@ -44,9 +48,13 @@ class RelayRegistrar(
     /**
      * `POST <httpBaseUrl>/register` with `{"registrationToken": ..., "verifier": <std base64>}`.
      * 2xx and 403 "already registered" both mean the room is locked by a verifier.
+     *
+     * @param verifier the 32-byte Ed25519 public key, [JoinSigner.verifier].
+     * @throws IllegalArgumentException for a malformed room name or a verifier not 32 bytes.
      */
     suspend fun register(roomName: String, registrationToken: String, verifier: ByteArray): RegisterResult {
         require(ROOM_NAME_PATTERN.matches(roomName)) { "room name must be 64 lowercase hex characters" }
+        require(verifier.size == VERIFIER_BYTES) { "verifier must be a $VERIFIER_BYTES-byte Ed25519 public key" }
         val body = buildJsonObject {
             put("registrationToken", registrationToken)
             put("verifier", Base64.getEncoder().encodeToString(verifier))
@@ -85,6 +93,7 @@ class RelayRegistrar(
         const val HTTP_FORBIDDEN = 403
         const val ALREADY_REGISTERED = "already registered"
         const val MAX_BODY_BYTES = 4_096L
+        const val VERIFIER_BYTES = 32
         val JSON_MEDIA_TYPE = "application/json".toMediaType()
     }
 }

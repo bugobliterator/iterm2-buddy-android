@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy.core.relay
 
+import androidx.annotation.VisibleForTesting
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
@@ -19,8 +20,17 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import java.io.IOException
+import java.io.InterruptedIOException
+import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.PortUnreachableException
+import java.net.SocketException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.security.cert.CertificateException
 import java.util.Base64
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLException
 
 /** What the phone presents after the relay's challenge. */
 sealed interface Proof {
@@ -33,7 +43,10 @@ sealed interface Proof {
 
 sealed interface AdmissionResult {
     /** The phone holds the room's phone slot; [registrationToken] is for `/register` (5 min, single use). */
-    data class Admitted(val registrationToken: String) : AdmissionResult
+    data class Admitted(val registrationToken: String) : AdmissionResult {
+        /** Redacted: the token is a bearer credential for `/register` and must not reach logs. */
+        override fun toString(): String = "Admitted(registrationToken=<redacted>)"
+    }
 
     /** The relay's `{"ok":false,"error":...}`: "mac offline", "bad signature", "signature required", ... */
     data class Rejected(val error: String) : AdmissionResult
@@ -41,22 +54,74 @@ sealed interface AdmissionResult {
     /**
      * The socket closed before a result: the relay's own close (for example 1008 "admission
      * timeout"), 1006 for a dropped connection or a local admission timeout, or 1000 when
-     * [RelayConnection.close] ran first.
+     * [RelayConnection.close] ran first. 1000 "pairing cycle cap" means the room is gone; see
+     * [requiresRescan].
      */
-    data class Closed(val code: Int, val reason: String) : AdmissionResult
+    data class Closed(val code: Int, val reason: String) : AdmissionResult {
+        /** As a [RelayClose] for [nextDelayMillis] and [requiresRescan]. */
+        val close: RelayClose get() = RelayClose(code, reason)
+    }
 
     /** The WebSocket upgrade got this HTTP status instead of 101. See [isFatalHttp]. */
     data class HttpFailure(val status: Int) : AdmissionResult
 
-    /** DNS, TCP or TLS failure, or a connect timeout, before any HTTP response. */
-    data class Unreachable(val cause: String) : AdmissionResult
+    /**
+     * No HTTP response: [kind] says why, [detail] is the underlying error for logs. A
+     * [UnreachableKind.TLS] failure is a configuration error (wrong host or certificate) that
+     * waiting will not fix; the others are what an asleep or offline Mac looks like.
+     */
+    data class Unreachable(val kind: UnreachableKind, val detail: String) : AdmissionResult
 
     /** The peer broke the admission protocol: a malformed challenge or result, or a binary frame. */
     data class ProtocolError(val detail: String) : AdmissionResult
 }
 
-/** The relay closed an admitted connection; [reason] feeds [nextDelayMillis]. 1006 means it dropped. */
-class RelayClosedException(val code: Int, val reason: String) : IOException("relay closed the connection: $code $reason")
+/** Why a relay could not be reached before any HTTP response. */
+enum class UnreachableKind {
+    /** The host name did not resolve. */
+    DNS,
+
+    /** TCP connect refused or failed, or the network is unreachable. */
+    CONNECT,
+
+    /** The TLS handshake or certificate check failed: a configuration error, not a wait. */
+    TLS,
+
+    /** No connection within the connect or admission timeout. */
+    TIMEOUT,
+
+    /** Any other I/O failure before a response. */
+    OTHER,
+}
+
+/** Classifies a failure before any HTTP response by walking [error]'s cause chain. */
+internal fun classifyUnreachable(error: Throwable): UnreachableKind {
+    var current: Throwable? = error
+    val seen = HashSet<Throwable>()
+    while (current != null && seen.add(current)) {
+        when (current) {
+            is UnknownHostException -> return UnreachableKind.DNS
+            is SSLException, is CertificateException -> return UnreachableKind.TLS
+            is SocketTimeoutException -> return UnreachableKind.TIMEOUT
+            is ConnectException, is NoRouteToHostException, is PortUnreachableException ->
+                return UnreachableKind.CONNECT
+        }
+        current = current.cause
+    }
+    return when {
+        error is InterruptedIOException && error.message == "timeout" -> UnreachableKind.TIMEOUT
+        error is SocketException -> UnreachableKind.CONNECT
+        else -> UnreachableKind.OTHER
+    }
+}
+
+/**
+ * The relay closed an admitted connection with [code] and [reason]; 1006 means it dropped. Pass
+ * [close] to [nextDelayMillis], and check [requiresRescan] first.
+ */
+class RelayClosedException(val code: Int, val reason: String) : IOException("relay closed the connection: $code $reason") {
+    val close: RelayClose get() = RelayClose(code, reason)
+}
 
 /** The relay broke framing after admission, such as by sending a text frame. The connection is closed. */
 class RelayProtocolException(message: String) : IOException(message)
@@ -80,6 +145,9 @@ class RelaySendException(message: String) : IOException(message)
  * @param roomName 64 lowercase hex characters, as `roomName(code)` gives.
  * @param admissionTimeoutMillis bound on [admit] from connect to result (upstream: 30 s).
  * @param pingIntervalMillis WebSocket ping cadence; OkHttp fails the socket on a missed pong.
+ * @param client the caller's client. An `Origin` header any of its application interceptors add
+ *   is stripped. WebSocket calls run no network interceptors, but the production client must not
+ *   add `Origin` anywhere regardless.
  */
 class RelayConnection(
     client: OkHttpClient,
@@ -97,7 +165,10 @@ class RelayConnection(
         .addInterceptor(StripOriginHeader)
         .build()
 
-    // Unlimited: OkHttp's reader thread must never block. The relay caps a room at 500 frames/s.
+    // Unbounded on purpose: OkHttp's single reader thread must never block, or pings and the
+    // close handshake stall behind a slow consumer. The relay bounds what can pile up here: it
+    // splices at most 500 frames/s per room, each at most 256 KiB, and 512 MiB per room per day
+    // (room.js:51-61). A consumer that stops reading for long should close the connection.
     private val frames = Channel<ByteArray>(Channel.UNLIMITED)
 
     /**
@@ -115,6 +186,17 @@ class RelayConnection(
     private var webSocket: WebSocket? = null
 
     private enum class Phase { NEW, CONNECTING, HELLO_SENT, PROOF_SENT, ADMITTED, CLOSED }
+
+    /**
+     * Test hook: runs after the admission timeout fires and before the timeout takes the lock,
+     * which is the window where a late relay result can still win.
+     */
+    @VisibleForTesting
+    internal var beforeTimeoutSettles: (() -> Unit)? = null
+
+    /** Whether admission has a result yet; for tests that drive the timeout race. */
+    @VisibleForTesting
+    internal val admissionSettled: Boolean get() = admission.isCompleted
 
     /**
      * Connects and runs admission. Any result other than [AdmissionResult.Admitted] leaves the
@@ -194,21 +276,21 @@ class RelayConnection(
     }
 
     private suspend fun admissionTimedOut(): AdmissionResult {
+        beforeTimeoutSettles?.invoke()
         val socket = synchronized(lock) {
-            if (phase != Phase.CLOSED) {
-                val result = if (phase == Phase.CONNECTING) {
-                    AdmissionResult.Unreachable("timed out after $admissionTimeoutMillis ms connecting")
-                } else {
-                    AdmissionResult.Closed(CLOSE_ABNORMAL, "admission timeout")
-                }
-                phase = Phase.CLOSED
-                admission.complete(result)
-                frames.close()
+            // A result that landed after the timeout fired wins; an admitted socket stays open.
+            if (admission.isCompleted) return@synchronized null
+            val result = if (phase == Phase.CONNECTING) {
+                AdmissionResult.Unreachable(UnreachableKind.TIMEOUT, "no connection within $admissionTimeoutMillis ms")
+            } else {
+                AdmissionResult.Closed(CLOSE_ABNORMAL, ADMISSION_TIMEOUT)
             }
+            phase = Phase.CLOSED
+            admission.complete(result)
+            frames.close(RelayClosedException(CLOSE_ABNORMAL, ADMISSION_TIMEOUT))
             webSocket
         }
         socket?.cancel()
-        // Completed by now: here, or by a callback that won the race.
         return admission.await()
     }
 
@@ -324,7 +406,7 @@ class RelayConnection(
                 val cause = t.toString()
                 val beforeAdmission = when {
                     phase != Phase.CONNECTING -> AdmissionResult.Closed(CLOSE_ABNORMAL, cause)
-                    response == null -> AdmissionResult.Unreachable(cause)
+                    response == null -> AdmissionResult.Unreachable(classifyUnreachable(t), cause)
                     response.code == HTTP_SWITCHING_PROTOCOLS -> AdmissionResult.ProtocolError("bad upgrade: $cause")
                     else -> AdmissionResult.HttpFailure(response.code)
                 }
@@ -348,6 +430,7 @@ class RelayConnection(
         const val CLOSE_PROTOCOL_ERROR = 1002
         const val CLOSE_ABNORMAL = 1006
         const val HTTP_SWITCHING_PROTOCOLS = 101
+        const val ADMISSION_TIMEOUT = "admission timeout"
 
         val HELLO: String = buildJsonObject {
             put("v", PROTOCOL_VERSION)
