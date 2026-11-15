@@ -32,8 +32,8 @@ JDK_SHA256="8b9b611d917e3dfd8419d3566b5949226f69b052fed7e109c1368add1dfe8711"
 CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-16111833_latest.zip"
 CMDLINE_TOOLS_SHA256="0877a1d048fe4a24efe2eff536ca4223f7adeb58648bb81909d33c446918cfa8"
 
-# cimg/android:2025.10, pinned by digest.
-FALLBACK_IMAGE="cimg/android@sha256:dc1cda740cb5712732734ca8ee61fa8f35d2a0fa55fbc468ad13a52efbdf65ac"
+# cimg/android:2025.10, pinned by digest. Overridable only to test the fallback.
+FALLBACK_IMAGE="${FALLBACK_IMAGE:-cimg/android@sha256:dc1cda740cb5712732734ca8ee61fa8f35d2a0fa55fbc468ad13a52efbdf65ac}"
 FALLBACK_SDK_DIR="/home/circleci/android-sdk"
 FALLBACK_JDK_DIR="/usr/lib/jvm/java-17-openjdk-amd64"
 FALLBACK_JDK_CONF_DIR="/etc/java-17-openjdk"
@@ -76,6 +76,8 @@ download_verified() {
 }
 
 # Creates (once) a stopped container of the fallback image to copy from.
+# Callers may run it where set -e is off (left of ||), so each step checks
+# itself; fail exits the script from there, as no subshell is involved.
 ensure_fallback_container() {
     if [[ -n "$fallback_container" ]]; then
         return 0
@@ -83,9 +85,10 @@ ensure_fallback_container() {
     command -v docker >/dev/null || fail "download failed and docker is not installed, so there is no fallback"
     if ! docker image inspect "$FALLBACK_IMAGE" >/dev/null 2>&1; then
         log "pulling $FALLBACK_IMAGE"
-        docker pull "$FALLBACK_IMAGE" >/dev/null
+        docker pull "$FALLBACK_IMAGE" >/dev/null || fail "could not pull $FALLBACK_IMAGE"
     fi
-    fallback_container="$(docker create "$FALLBACK_IMAGE")"
+    fallback_container="$(docker create "$FALLBACK_IMAGE")" ||
+        fail "could not create a container from $FALLBACK_IMAGE"
 }
 
 image_has_path() {
@@ -280,6 +283,10 @@ write_local_properties() {
         awk -v line="$line" '/^sdk\.dir=/ { print line; next } { print }' "$properties" >"$updated/local.properties"
         cat "$updated/local.properties" >"$properties"
     else
+        # Start a new line if the file does not end with one.
+        if [[ -s "$properties" && -n "$(tail -c 1 "$properties")" ]]; then
+            printf '\n' >>"$properties"
+        fi
         printf '%s\n' "$line" >>"$properties"
     fi
     log "set $line in $properties"
