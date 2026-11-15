@@ -11,8 +11,11 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-/** A stored pairing blob that is not a valid record of a known format. The message never holds secrets. */
-class PairingRecordFormatException(message: String, cause: Throwable? = null) : Exception(message, cause)
+/**
+ * A stored pairing blob that is not a valid record of a known format. It never carries a cause:
+ * parser and decoder messages can quote the secret-bearing input. Its message is fixed text.
+ */
+class PairingRecordFormatException(message: String) : Exception(message)
 
 /**
  * The plaintext form of a [PairingRecord]: one UTF-8 JSON object, written by [encode] as
@@ -79,13 +82,14 @@ object PairingRecordCodec {
                 .onUnmappableCharacter(CodingErrorAction.REPORT)
                 .decode(ByteBuffer.wrap(bytes))
                 .toString()
-        } catch (e: CharacterCodingException) {
-            throw PairingRecordFormatException("record is not UTF-8", e)
+        } catch (_: CharacterCodingException) {
+            throw PairingRecordFormatException("record is not UTF-8")
         }
         val element = try {
             Json.parseToJsonElement(text)
-        } catch (e: SerializationException) {
-            throw PairingRecordFormatException("record is not JSON", e)
+        } catch (_: SerializationException) {
+            // Not attached as the cause: kotlinx quotes the input around the failing offset.
+            throw PairingRecordFormatException("record is not JSON")
         }
         val json = element as? JsonObject ?: throw PairingRecordFormatException("record is not a JSON object")
         if (json.keys != FIELDS) throw PairingRecordFormatException("record fields are missing or unknown")
@@ -126,8 +130,8 @@ object PairingRecordCodec {
         val text = string(name)
         val bytes = try {
             Base64.getDecoder().decode(text)
-        } catch (e: IllegalArgumentException) {
-            throw PairingRecordFormatException("$name is not base64", e)
+        } catch (_: IllegalArgumentException) {
+            throw PairingRecordFormatException("$name is not base64")
         }
         val canonical = base64.encode(bytes)
         val isCanonical = canonical.size == text.length && canonical.indices.all { canonical[it].toInt() == text[it].code }
