@@ -39,6 +39,10 @@ dependencies {
     implementation(libs.androidx.annotation)
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    debugImplementation(libs.androidx.compose.ui.tooling)
+    implementation(libs.play.services.code.scanner)
+    implementation(libs.mlkit.common)
     implementation(libs.bouncycastle.bcprov)
     implementation(libs.noise.java)
     // JSON tree API (JsonObject) for the wire envelope; no serialization compiler plugin.

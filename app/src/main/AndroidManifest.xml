@@ -4,12 +4,17 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
+        android:name=".CompanionApp"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/launcher_icon"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
+        <!-- Asks Play services to fetch the code scanner module at install time, where it can. -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="barcode_ui" />
         <activity
             android:name=".MainActivity"
             android:exported="true">
