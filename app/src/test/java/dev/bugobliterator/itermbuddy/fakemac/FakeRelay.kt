@@ -11,6 +11,7 @@ import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
 import dev.bugobliterator.itermbuddy.core.relay.RelaySendException
 import dev.bugobliterator.itermbuddy.core.relay.UnreachableKind
 import dev.bugobliterator.itermbuddy.core.relay.joinTranscript
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
@@ -96,6 +97,17 @@ internal class FakeRelay(val origin: String) : RelayTransport, MacRelay {
     @Synchronized
     fun closePhone(roomName: String, code: Int, reason: String) {
         rooms[roomName]?.phone?.closedByRelay(code, reason)
+    }
+
+    /**
+     * The phone's connection dies (1006), as on a network change. The relay notices the socket go
+     * and closes the Mac with 1001 "peer gone" (webSocketClose -> closePeerOf).
+     */
+    @Synchronized
+    fun dropPhone(roomName: String) {
+        val room = rooms[roomName] ?: return
+        room.phone?.closedByRelay(CLOSE_ABNORMAL, "dropped")
+        room.mac?.closedByRelay(CLOSE_GOING_AWAY, "peer gone")
     }
 
     /** Every socket drops (1006), as when the relay process dies. */
@@ -240,22 +252,24 @@ internal class FakeRelay(val origin: String) : RelayTransport, MacRelay {
 
     private inner class MacSide(private val roomName: String) : MacSocket {
         private val frames = Channel<ByteArray>(Channel.UNLIMITED)
-        private var closed = false
+        private var isClosed = false
+        override val closed = CompletableDeferred<Unit>()
 
         override val incoming: ReceiveChannel<ByteArray> get() = frames
 
         override suspend fun send(frame: ByteArray) {
             synchronized(this@FakeRelay) {
-                if (closed) throw RelaySendException("cannot send: connection is closed")
+                if (isClosed) throw RelaySendException("cannot send: connection is closed")
                 rooms[roomName]?.phone?.deliver(frame)
             }
         }
 
         override fun close() {
             synchronized(this@FakeRelay) {
-                if (closed) return
-                closed = true
+                if (isClosed) return
+                isClosed = true
                 frames.close()
+                closed.complete(Unit)
                 val room = rooms[roomName] ?: return
                 if (room.mac === this) {
                     room.mac = null
@@ -265,13 +279,14 @@ internal class FakeRelay(val origin: String) : RelayTransport, MacRelay {
         }
 
         fun deliver(frame: ByteArray) {
-            if (!closed) frames.trySend(frame)
+            if (!isClosed) frames.trySend(frame)
         }
 
         fun closedByRelay(code: Int, reason: String) {
-            if (closed) return
-            closed = true
+            if (isClosed) return
+            isClosed = true
             frames.close(RelayClosedException(code, reason))
+            closed.complete(Unit)
             val room = rooms[roomName] ?: return
             if (room.mac === this) room.mac = null
         }

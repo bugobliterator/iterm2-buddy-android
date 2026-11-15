@@ -14,6 +14,7 @@ import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
 import dev.bugobliterator.itermbuddy.core.relay.RelaySendException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -25,6 +26,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
@@ -53,6 +55,9 @@ import java.util.concurrent.atomic.AtomicInteger
 interface MacSocket {
     val incoming: ReceiveChannel<ByteArray>
 
+    /** Completes when the socket closes, from either side, even while frames wait unread. */
+    val closed: Deferred<Unit>
+
     suspend fun send(frame: ByteArray)
 
     fun close()
@@ -78,9 +83,11 @@ interface MacRelay {
  *   secret and signs its parks (`CompanionLink.swift:429-453`).
  * - With no pinned phone it is in SAS mode: after the handshake it stays silent until
  *   [enterCode], then sends the bare verdict (`CompanionPairingController.swift:1470-1490`). On
- *   acceptance it pins the phone's static key; on rejection it closes and goes away, as iTerm2
- *   regenerates the pid. Frames the phone sends before the verdict wait in the socket's queue and
- *   are handled once the link starts, like the plugin's queue (`iTermCompanionPlugin.js:52-69`).
+ *   acceptance it pins the phone's static key; on rejection it closes, mints a new pid and parks
+ *   under it, as iTerm2 regenerates the code (`:1478-1488`), so the old code is dead. If the
+ *   socket closes while it waits for the code, it dismisses the entry and parks again under the
+ *   same pid. Frames the phone sends before the verdict wait in the socket's queue and are
+ *   handled once the link starts, like the plugin's queue (`iTermCompanionPlugin.js:52-69`).
  * - With a pinned phone (a reconnect) it sends nothing first and rejects any other static key
  *   (`CompanionParkSupervisor.swift:425-437`).
  * - Its link answers `hello`, `relayRoomSecret` and `ping`, records `unpairing`, and can send
@@ -88,7 +95,7 @@ interface MacRelay {
  */
 class FakeMac(
     private val relay: MacRelay,
-    val code: PairingCode,
+    code: PairingCode,
     private val macStaticPrivate: ByteArray,
     private val scope: CoroutineScope,
     private val reparkDelayMillis: Long = DEFAULT_REPARK_DELAY_MILLIS,
@@ -102,7 +109,13 @@ class FakeMac(
         scope: CoroutineScope,
     ) : this(OkHttpMacRelay(http, endpoints), code, macStaticPrivate, scope)
 
-    private val room = roomName(code)
+    /** The pairing code the Mac currently advertises; a rejected code is replaced. */
+    @Volatile var code: PairingCode = code
+        private set
+
+    private val room: String get() = roomName(code)
+
+    private var regenerations = 0
 
     /** The hello reply's revision and minimum peer; v3.7.7 sends 15 and 11. */
     @Volatile var revision = MAC_REVISION
@@ -114,6 +127,12 @@ class FakeMac(
 
     /** How many of the next `relayRoomSecret` requests get an `error` reply (a failed Keychain write). */
     val roomSecretFailures = AtomicInteger(0)
+
+    /**
+     * When set, the Mac is unpairing as the next `relayRoomSecret` arrives: it answers with an
+     * `error` (storage stopped) and then sends `unpaired` (`CompanionLink.swift:442-453`).
+     */
+    @Volatile var unpairOnRoomSecret = false
 
     /** The room secret from the phone's `relayRoomSecret`; preset it for a Mac that already has one. */
     @Volatile var roomSecret: ByteArray? = null
@@ -236,18 +255,27 @@ class FakeMac(
             val pending = CompletableDeferred<Boolean>()
             verdict = pending
             awaiting.value = sasCode(responder.handshakeHash)
-            val accepted = try {
-                pending.await()
+            val accepted: Boolean? = try {
+                select {
+                    pending.onAwait { it }
+                    socket.closed.onAwait { null }
+                }
             } finally {
                 verdict = null
                 awaiting.value = null
             }
+            // The phone went away mid-entry: dismiss the entry and park again.
+            if (accepted == null) return true
             val bytes = Json.parseToJsonElement(
                 Fixtures.read("messages/confirmation/${if (accepted) "accepted" else "rejected"}.json"),
             ).jsonObject.getValue("bytes").jsonPrimitive.content.toByteArray(Charsets.UTF_8)
             send(current, bytes)
             confirmationsSent.incrementAndGet()
-            if (!accepted) return false
+            if (!accepted) {
+                // Void this pid and advertise a new one: the rejected code can never pair.
+                code = PairingCode(code.responderStaticPublicKey, "${code.pairingID}-regenerated-${++regenerations}", code.relayOrigin)
+                return true
+            }
             pinnedPhoneStatic = phoneStatic
         } else if (!pinned.contentEquals(phoneStatic)) {
             staticMismatches.incrementAndGet()
@@ -269,7 +297,11 @@ class FakeMac(
         when (payload.keys.single()) {
             "hello" -> if (answering) send(current, helloReply(requestID))
             "relayRoomSecret" -> if (answering) {
-                if (roomSecretFailures.getAndUpdate { if (it > 0) it - 1 else 0 } > 0) {
+                if (unpairOnRoomSecret) {
+                    unpairOnRoomSecret = false
+                    send(current, fixtureEnvelope("error-reply.json", requestID))
+                    send(current, fixtureEnvelope("unpaired.json", null))
+                } else if (roomSecretFailures.getAndUpdate { if (it > 0) it - 1 else 0 } > 0) {
                     send(current, fixtureEnvelope("error-reply.json", requestID))
                 } else {
                     val encoded = payload.getValue("relayRoomSecret").jsonObject.getValue("_0").jsonPrimitive.content
@@ -324,6 +356,7 @@ class OkHttpMacRelay(private val http: OkHttpClient, private val endpoints: Rela
     override suspend fun park(roomName: String, sign: ((ByteArray) -> ByteArray)?): MacPark {
         val result = CompletableDeferred<MacPark>()
         val frames = Channel<ByteArray>(Channel.UNLIMITED)
+        val closed = CompletableDeferred<Unit>()
         val request = Request.Builder()
             .url(endpoints.webSocketUrl)
             .header("x-relay-room", roomName)
@@ -346,7 +379,7 @@ class OkHttpMacRelay(private val http: OkHttpClient, private val endpoints: Rela
                     return
                 }
                 if (reply["ok"]?.jsonPrimitive?.content == "true") {
-                    result.complete(MacPark.Parked(Socket(webSocket, frames)))
+                    result.complete(MacPark.Parked(Socket(webSocket, frames, closed)))
                 } else {
                     result.complete(MacPark.Refused(reply["error"]?.jsonPrimitive?.content ?: text))
                 }
@@ -369,6 +402,7 @@ class OkHttpMacRelay(private val http: OkHttpClient, private val endpoints: Rela
             private fun ended(code: Int, reason: String) {
                 result.complete(MacPark.Refused("closed $code $reason"))
                 frames.close(RelayClosedException(code, reason))
+                closed.complete(Unit)
             }
         }
         val webSocket = http.newWebSocket(request, listener)
@@ -378,7 +412,11 @@ class OkHttpMacRelay(private val http: OkHttpClient, private val endpoints: Rela
         }
     }
 
-    private class Socket(private val webSocket: WebSocket, private val frames: Channel<ByteArray>) : MacSocket {
+    private class Socket(
+        private val webSocket: WebSocket,
+        private val frames: Channel<ByteArray>,
+        override val closed: CompletableDeferred<Unit>,
+    ) : MacSocket {
         override val incoming: ReceiveChannel<ByteArray> get() = frames
 
         override suspend fun send(frame: ByteArray) {
@@ -388,6 +426,7 @@ class OkHttpMacRelay(private val http: OkHttpClient, private val endpoints: Rela
         override fun close() {
             webSocket.close(CLOSE_NORMAL, null)
             frames.close()
+            closed.complete(Unit)
         }
     }
 
