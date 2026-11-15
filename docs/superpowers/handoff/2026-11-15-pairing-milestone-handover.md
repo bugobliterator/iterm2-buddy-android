@@ -76,6 +76,8 @@ Notes from that task:
 - Check the relay challenge nonce is 32 bytes where it is base64-decoded (Relay Connection).
 - Session layer (Companion Client): a frame that fails to decode (`WireDecodeException`) or is empty is dropped and logged, and the session stays up, as upstream does (`CompanionSession.swift:120-127`). Test that a bad frame does not close the session.
 - Session layer: every frame `NoiseChannel.encryptMessage` returns must be sent in order; if a WebSocket send fails or returns false, close the channel (the nonce has already advanced).
+- Companion Client: `requiresRescan(close)` (relay close 1000 "pairing cycle cap") means the QR is dead; show Scan again, do not back off. Pass `nextDelayMillis` only the relay's close frame from the connection that just ended.
+- Companion Client: `RegisterResult.Refused` mixes fatal 4xx and retryable 5xx (502 when the relay is down behind `tailscale serve`); branch on status. `Unreachable(TLS)` is a configuration fault (for example an expired tailnet certificate), not "Waiting for your Mac".
 
 ## Plan deviations already ruled on
 
