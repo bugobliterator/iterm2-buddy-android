@@ -1,0 +1,404 @@
+{
+  "canonical" : [
+    {
+      "domain" : "iterm2-test",
+      "encoded" : "0000000b697465726d322d74657374",
+      "fields" : [
+
+      ],
+      "name" : "domainOnly"
+    },
+    {
+      "domain" : "iterm2-test",
+      "encoded" : "0000000b697465726d322d7465737400000000",
+      "fields" : [
+        ""
+      ],
+      "name" : "emptyField"
+    },
+    {
+      "domain" : "iterm2-test",
+      "encoded" : "0000000b697465726d322d746573740000000241420000000143",
+      "fields" : [
+        "4142",
+        "43"
+      ],
+      "name" : "boundaryABThenC"
+    },
+    {
+      "domain" : "iterm2-test",
+      "encoded" : "0000000b697465726d322d746573740000000141000000024243",
+      "fields" : [
+        "41",
+        "4243"
+      ],
+      "name" : "boundaryAThenBC"
+    },
+    {
+      "domain" : "iterm2-room",
+      "encoded" : "0000000b697465726d322d726f6f6d00000020f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f10111213141516170000001066376332613162396530356434633361",
+      "fields" : [
+        "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+        "66376332613162396530356434633361"
+      ],
+      "name" : "roomPreimage"
+    },
+    {
+      "domain" : "iterm2-relay-join",
+      "encoded" : "00000011697465726d322d72656c61792d6a6f696e0000000101000000010200000020808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f00000006c3a920e29883",
+      "fields" : [
+        "01",
+        "02",
+        "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "c3a920e29883"
+      ],
+      "name" : "binaryAndUnicode"
+    },
+    {
+      "domain" : "iterm2-test",
+      "encoded" : "0000000b697465726d322d746573740000012c000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b",
+      "fields" : [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b"
+      ],
+      "name" : "longField"
+    }
+  ],
+  "joins" : [
+    {
+      "nonce" : "a0a5aaafb4b9bec3c8cdd2d7dce1e6ebf0f5faff04090e13181d22272c31363b",
+      "origin" : "https://relay.example.ts.net",
+      "role" : "phone",
+      "roomName" : "5fbc1e0ccb8b62e8ba7ec9899554008e3ce475887a0c64758a5e16c730f61238",
+      "roomSecret" : "202326292c2f3235383b3e4144474a4d505356595c5f6265686b6e7174777a7d",
+      "seed" : "26b1dfb5c057038a8d3757c74ca154c07c704eff0cc5d52bd20e111efff1485d",
+      "signature" : "55668a47bf44642e3492b66a4b9ebcb174f0e5e80d119ccbbb68ed8967648669600d4621b29e506dd1fb6a771be25d760813dda698e4a02837cfe56a5852bd06",
+      "transcript" : "00000011697465726d322d72656c61792d6a6f696e0000000101000000010200000020a0a5aaafb4b9bec3c8cdd2d7dce1e6ebf0f5faff04090e13181d22272c31363b00000040356662633165306363623862363265386261376563393839393535343030386533636534373538383761306336343735386135653136633733306636313233380000003268747470733a2f2f736964646861727468732d6d6163626f6f6b2d70726f2e7461696c6e65742d393962622e74732e6e6574",
+      "verifier" : "99f0e5c438081b410a360bf2b0f8df7027b3de3bb37e3d9ee10de72a765e1015"
+    },
+    {
+      "nonce" : "a0a5aaafb4b9bec3c8cdd2d7dce1e6ebf0f5faff04090e13181d22272c31363b",
+      "origin" : "https://relay.example.ts.net",
+      "role" : "mac",
+      "roomName" : "5fbc1e0ccb8b62e8ba7ec9899554008e3ce475887a0c64758a5e16c730f61238",
+      "roomSecret" : "202326292c2f3235383b3e4144474a4d505356595c5f6265686b6e7174777a7d",
+      "seed" : "26b1dfb5c057038a8d3757c74ca154c07c704eff0cc5d52bd20e111efff1485d",
+      "signature" : "a4cf7f16e8b7b85eebd05c4fe2ed99e40571ad98b484661cdbd302cdad061675d54243b891283265cab0e649ee7daea182d5b4a623ee7ed28030f83c254e700c",
+      "transcript" : "00000011697465726d322d72656c61792d6a6f696e0000000101000000010100000020a0a5aaafb4b9bec3c8cdd2d7dce1e6ebf0f5faff04090e13181d22272c31363b00000040356662633165306363623862363265386261376563393839393535343030386533636534373538383761306336343735386135653136633733306636313233380000003268747470733a2f2f736964646861727468732d6d6163626f6f6b2d70726f2e7461696c6e65742d393962622e74732e6e6574",
+      "verifier" : "99f0e5c438081b410a360bf2b0f8df7027b3de3bb37e3d9ee10de72a765e1015"
+    }
+  ],
+  "pairingCodes" : [
+    {
+      "androidAccepts" : true,
+      "name" : "projectRelay",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.ts.net",
+      "relayOrigin" : "https://relay.example.ts.net",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "exampleRelay",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com",
+      "relayOrigin" : "https://relay.example.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "explicitDefaultPort",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com:443",
+      "relayOrigin" : "https://relay.example.com:443",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "explicitOtherPort",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com:8443",
+      "relayOrigin" : "https://relay.example.com:8443",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "trailingSlash",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com/",
+      "relayOrigin" : "https://relay.example.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "mixedCaseHost",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://Relay.Example.COM",
+      "relayOrigin" : "https://Relay.Example.COM",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "uppercaseScheme",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=HTTPS://relay.example.com",
+      "relayOrigin" : "https://relay.example.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "percentEncodedRelay",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https%3A%2F%2Frelay.example.com",
+      "relayOrigin" : "https://relay.example.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "paddedBase64URLKey",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc=&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com",
+      "relayOrigin" : "https://relay.example.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "percentEncodedPaddingKey",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc%3D&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com",
+      "relayOrigin" : "https://relay.example.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "unpaddedBase64URLKey",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com",
+      "relayOrigin" : "https://relay.example.com",
+      "responderStaticPublicKey" : "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "standardBase64Key",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=+Pn6+/z9/v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc=&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com",
+      "relayOrigin" : "https://relay.example.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "macRenderedByUrlString",
+      "pairingID" : "f7c2 a+b&c=d/é?",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2%20a+b%26c%3Dd/%C3%A9?&relay=https://relay.example.ts.net",
+      "relayOrigin" : "https://relay.example.ts.net",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "resolverUnsupported",
+      "name" : "resolverVersionTwo",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=2&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&resolver=https://resolver.example.com/shardmap.json",
+      "resolverURL" : "https://resolver.example.com/shardmap.json",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidResolver",
+      "name" : "resolverVersionTwoWithoutResolver",
+      "qr" : "iterm2://pair?v=2&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com",
+      "upstreamError" : "invalidResolver",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "directWithStrayResolver",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com&resolver=https://resolver.example.com/",
+      "relayOrigin" : "https://relay.example.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "missingRelay",
+      "name" : "directWithoutRelay",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "unsupportedProtocol",
+      "name" : "wrongProtocol",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_SHA256&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com",
+      "upstreamError" : "unsupportedProtocol",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidResponderKey",
+      "name" : "shortResponderKey",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXg&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com",
+      "upstreamError" : "invalidResponderKey",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidResponderKey",
+      "name" : "invalidBase64Key",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=not*base64&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com",
+      "upstreamError" : "invalidResponderKey",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "unsupportedVersion",
+      "name" : "unsupportedVersion",
+      "qr" : "iterm2://pair?v=3&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com",
+      "upstreamError" : "unsupportedVersion",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "unsupportedVersion",
+      "name" : "missingVersion",
+      "qr" : "iterm2://pair?proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com",
+      "upstreamError" : "unsupportedVersion",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "missingPairingID",
+      "name" : "missingPairingID",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&relay=https://relay.example.com",
+      "upstreamError" : "missingPairingID",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "missingPairingID",
+      "name" : "emptyPairingID",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=&relay=https://relay.example.com",
+      "upstreamError" : "missingPairingID",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidRelay",
+      "name" : "plainHTTPRelay",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=http://relay.example.com",
+      "upstreamError" : "invalidRelay",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidRelay",
+      "name" : "relayWithPath",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com/room",
+      "upstreamError" : "invalidRelay",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidRelay",
+      "name" : "relayWithUserinfo",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://user@relay.example.com",
+      "upstreamError" : "invalidRelay",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "malformedURL",
+      "name" : "wrongScheme",
+      "qr" : "https://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a",
+      "upstreamError" : "malformedURL",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "malformedURL",
+      "name" : "wrongHost",
+      "qr" : "iterm2://pairing?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a",
+      "upstreamError" : "malformedURL",
+      "upstreamOk" : false
+    }
+  ],
+  "prologues" : [
+    {
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "prologue" : "697465726d322d636f6d70616e696f6e2f76312f7069643a66376332613162396530356434633361"
+    },
+    {
+      "pairingID" : "f7c2 a+b&c=d/é?",
+      "prologue" : "697465726d322d636f6d70616e696f6e2f76312f7069643a6637633220612b6226633d642fc3a93f"
+    },
+    {
+      "pairingID" : "1",
+      "prologue" : "697465726d322d636f6d70616e696f6e2f76312f7069643a31"
+    }
+  ],
+  "roomNames" : [
+    {
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "roomName" : "5fbc1e0ccb8b62e8ba7ec9899554008e3ce475887a0c64758a5e16c730f61238"
+    },
+    {
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "responderStaticPublicKey" : "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "roomName" : "5700b7d348bc6403e5130ca2db3018497a14c5ca862edd1dc07a5da1293b4d51"
+    },
+    {
+      "pairingID" : "f7c2 a+b&c=d/é?",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "roomName" : "2d71a959b9880d2241126f852f979a473515531775965cf40fc78946bee4ced9"
+    },
+    {
+      "pairingID" : "1",
+      "responderStaticPublicKey" : "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0",
+      "roomName" : "98b4a6b09a7a6a113ae87f2d0901200fd45a589a90c40e25f72f63179a0cbd52"
+    }
+  ],
+  "sas" : [
+    {
+      "code" : "764632",
+      "handshakeHash" : "0000000000000000000000000000000000000000000000000000000000000000",
+      "name" : "allZero"
+    },
+    {
+      "code" : "601041",
+      "handshakeHash" : "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "name" : "ascending"
+    },
+    {
+      "code" : "672645",
+      "handshakeHash" : "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "name" : "allOnes"
+    },
+    {
+      "code" : "986189",
+      "handshakeHash" : "899891a0f1a8db67f8bfa46b8bced371c1c25de377f20cf882fdd06fc15517fd",
+      "name" : "cacophonyXKHandshakeHash"
+    },
+    {
+      "code" : "000012",
+      "handshakeHash" : "037102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "name" : "leadingZeros"
+    }
+  ]
+}
