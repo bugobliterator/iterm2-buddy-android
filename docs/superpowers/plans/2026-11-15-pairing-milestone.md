@@ -349,7 +349,7 @@ Flow (*notes* → Relay admission, Noise, After pairing):
    - a Mac in SAS mode waits for the code to be typed (`:1034-1053, 1470-1473`).
 
    So after a fresh admit and the handshake with the stored static key, do both at once: show `ShowCode(sasCode(h))` **and** send `hello`. The plugin queues frames that arrive before the Mac reads them (`iTermCompanionPlugin.js:52-53, 68-69`), so an early `hello` is answered once the link starts. Then wait up to `confirmation` (an exception to the step 4–5 `rpc` rule) for the first Mac frame:
-   - **`HelloReply`:** the Mac had pinned this identity. Dismiss the code, save `CONFIRMED`, and continue from step 5.
+   - **`HelloReply`:** the Mac had pinned this identity. Dismiss the code, save `CONFIRMED`, apply step 4's version checks to that reply, then continue from step 5.
    - **Confirmation "accepted":** the Mac was in SAS mode. Save `CONFIRMED`; the queued `hello`'s reply that follows completes step 4.
    - **Confirmation "rejected", or the `confirmation` timeout:** wipe, as in step 3.
    - **`mac offline` or unreachable past `freshMacWait`** (for example, the Mac is still holding the old code dialog and so isn't parked): clear the store and go to `Failed(rescanNeeded=true)`.
