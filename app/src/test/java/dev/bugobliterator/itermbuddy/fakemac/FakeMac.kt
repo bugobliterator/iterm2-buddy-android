@@ -1,0 +1,399 @@
+package dev.bugobliterator.itermbuddy.fakemac
+
+import dev.bugobliterator.itermbuddy.Fixtures
+import dev.bugobliterator.itermbuddy.core.noise.NoiseChannel
+import dev.bugobliterator.itermbuddy.core.noise.NoiseException
+import dev.bugobliterator.itermbuddy.core.noise.NoiseResponder
+import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
+import dev.bugobliterator.itermbuddy.core.pairing.roomName
+import dev.bugobliterator.itermbuddy.core.pairing.sasCode
+import dev.bugobliterator.itermbuddy.core.relay.JoinRole
+import dev.bugobliterator.itermbuddy.core.relay.JoinSigner
+import dev.bugobliterator.itermbuddy.core.relay.RelayClosedException
+import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
+import dev.bugobliterator.itermbuddy.core.relay.RelaySendException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ClosedReceiveChannelException
+import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
+import kotlinx.serialization.json.put
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import okio.ByteString
+import okio.ByteString.Companion.toByteString
+import java.io.IOException
+import java.util.Base64
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
+
+/** One parked Mac socket: binary frames to and from the phone after admission. */
+interface MacSocket {
+    val incoming: ReceiveChannel<ByteArray>
+
+    suspend fun send(frame: ByteArray)
+
+    fun close()
+}
+
+sealed interface MacPark {
+    class Parked(val socket: MacSocket) : MacPark
+
+    data class Refused(val reason: String) : MacPark
+}
+
+/** Parks the Mac in a relay room; [sign] signs a challenge nonce, null for proof `{}`. */
+interface MacRelay {
+    suspend fun park(roomName: String, sign: ((ByteArray) -> ByteArray)?): MacPark
+}
+
+/**
+ * iTerm2's side of pairing, for tests, built from the real Kotlin core: the real Noise responder,
+ * the real [JoinSigner] with [JoinRole.MAC], and replies taken from the v3.7.7 golden samples.
+ *
+ * It follows upstream v3.7.7:
+ * - Before it has a room secret it parks with proof `{}`; after `relayRoomSecret` it keeps the
+ *   secret and signs its parks (`CompanionLink.swift:429-453`).
+ * - With no pinned phone it is in SAS mode: after the handshake it stays silent until
+ *   [enterCode], then sends the bare verdict (`CompanionPairingController.swift:1470-1490`). On
+ *   acceptance it pins the phone's static key; on rejection it closes and goes away, as iTerm2
+ *   regenerates the pid. Frames the phone sends before the verdict wait in the socket's queue and
+ *   are handled once the link starts, like the plugin's queue (`iTermCompanionPlugin.js:52-69`).
+ * - With a pinned phone (a reconnect) it sends nothing first and rejects any other static key
+ *   (`CompanionParkSupervisor.swift:425-437`).
+ * - Its link answers `hello`, `relayRoomSecret` and `ping`, records `unpairing`, and can send
+ *   `unpaired`. When its socket closes it parks again.
+ */
+class FakeMac(
+    private val relay: MacRelay,
+    val code: PairingCode,
+    private val macStaticPrivate: ByteArray,
+    private val scope: CoroutineScope,
+    private val reparkDelayMillis: Long = DEFAULT_REPARK_DELAY_MILLIS,
+) {
+    /** A Mac on a real relay, reached over OkHttp. */
+    constructor(
+        endpoints: RelayEndpoints,
+        code: PairingCode,
+        macStaticPrivate: ByteArray,
+        http: OkHttpClient,
+        scope: CoroutineScope,
+    ) : this(OkHttpMacRelay(http, endpoints), code, macStaticPrivate, scope)
+
+    private val room = roomName(code)
+
+    /** The hello reply's revision and minimum peer; v3.7.7 sends 15 and 11. */
+    @Volatile var revision = MAC_REVISION
+
+    @Volatile var minimumPeer = MAC_MINIMUM_PEER
+
+    /** When false, requests are recorded but never answered (a stalled Mac whose relay link is fine). */
+    @Volatile var answering = true
+
+    /** How many of the next `relayRoomSecret` requests get an `error` reply (a failed Keychain write). */
+    val roomSecretFailures = AtomicInteger(0)
+
+    /** The room secret from the phone's `relayRoomSecret`; preset it for a Mac that already has one. */
+    @Volatile var roomSecret: ByteArray? = null
+
+    @Volatile var pinnedPhoneStatic: ByteArray? = null
+
+    private val awaiting = MutableStateFlow<String?>(null)
+
+    /** The code the Mac expects while it is in SAS mode with a phone handshaken, else null. */
+    val awaitingCode: StateFlow<String?> = awaiting.asStateFlow()
+
+    /** Every decrypted message from the phone, as received. */
+    val received = CopyOnWriteArrayList<ByteArray>()
+
+    val parks = AtomicInteger()
+    val handshakes = AtomicInteger()
+    val confirmationsSent = AtomicInteger()
+    val unpairings = AtomicInteger()
+    val staticMismatches = AtomicInteger()
+
+    @Volatile private var job: Job? = null
+
+    @Volatile private var verdict: CompletableDeferred<Boolean>? = null
+
+    @Volatile private var link: Link? = null
+
+    private class Link(val socket: MacSocket, val channel: NoiseChannel) {
+        val sendLock = Mutex()
+    }
+
+    /** Received messages decoded as envelopes, in order. */
+    fun receivedEnvelopes(): List<JsonObject> = received.mapNotNull {
+        runCatching { Json.parseToJsonElement(it.decodeToString()).jsonObject }.getOrNull()
+    }
+
+    /** The payload cases of [receivedEnvelopes], in order. */
+    fun receivedCases(): List<String> = receivedEnvelopes().map { it.getValue("payload").jsonObject.keys.single() }
+
+    /** Starts parking and serving; the first park runs before this returns when the relay answers at once. */
+    fun start() {
+        check(job == null) { "already started" }
+        job = scope.launch(start = CoroutineStart.UNDISPATCHED) { runLoop() }
+    }
+
+    /** Goes offline: iTerm2 quit. */
+    fun stop() {
+        job?.cancel()
+        job = null
+        link?.socket?.close()
+    }
+
+    /** The user types the code on the Mac ([accept]) or declines it. */
+    fun enterCode(accept: Boolean) {
+        val pending = checkNotNull(verdict) { "the Mac is not waiting for a code" }
+        pending.complete(accept)
+    }
+
+    /** Closes the current socket; the relay then closes the phone's with 1001 "peer gone". */
+    fun dropSocket() {
+        link?.socket?.close()
+    }
+
+    /** Sends an unsolicited `unpaired`, as the Mac does when the user removes the phone. */
+    suspend fun sendUnpaired() {
+        val current = checkNotNull(link) { "no link" }
+        send(current, fixtureEnvelope("unpaired.json", null))
+    }
+
+    /** Sends raw [plaintext] on the link, such as a frame the phone cannot decode. */
+    suspend fun sendRaw(plaintext: ByteArray) {
+        val current = checkNotNull(link) { "no link" }
+        send(current, plaintext)
+    }
+
+    private suspend fun runLoop() {
+        while (true) {
+            val secret = roomSecret
+            val sign: ((ByteArray) -> ByteArray)? = secret?.let { s ->
+                { nonce -> JoinSigner(s, JoinRole.MAC).sign(nonce, room, code.relayOrigin) }
+            }
+            val park = relay.park(room, sign)
+            parks.incrementAndGet()
+            if (park is MacPark.Parked) {
+                val keepParking = try {
+                    serve(park.socket)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: IOException) {
+                    true
+                } catch (_: ClosedReceiveChannelException) {
+                    true
+                } catch (_: NoiseException) {
+                    true
+                } finally {
+                    link = null
+                    park.socket.close()
+                }
+                if (!keepParking) return
+            }
+            delay(reparkDelayMillis)
+        }
+    }
+
+    /** Serves one parked socket; returns false when the Mac should go away (a rejected code). */
+    private suspend fun serve(socket: MacSocket): Boolean {
+        val responder = NoiseResponder(macStaticPrivate, code.prologue)
+        val channel = try {
+            responder.readMessage1(socket.incoming.receive())
+            socket.send(responder.writeMessage2())
+            responder.readMessage3(socket.incoming.receive())
+            handshakes.incrementAndGet()
+            responder.split()
+        } finally {
+            responder.close()
+        }
+        val phoneStatic = responder.remoteStaticPublicKey
+        val current = Link(socket, channel)
+        val pinned = pinnedPhoneStatic
+        if (pinned == null) {
+            val pending = CompletableDeferred<Boolean>()
+            verdict = pending
+            awaiting.value = sasCode(responder.handshakeHash)
+            val accepted = try {
+                pending.await()
+            } finally {
+                verdict = null
+                awaiting.value = null
+            }
+            val bytes = Json.parseToJsonElement(
+                Fixtures.read("messages/confirmation/${if (accepted) "accepted" else "rejected"}.json"),
+            ).jsonObject.getValue("bytes").jsonPrimitive.content.toByteArray(Charsets.UTF_8)
+            send(current, bytes)
+            confirmationsSent.incrementAndGet()
+            if (!accepted) return false
+            pinnedPhoneStatic = phoneStatic
+        } else if (!pinned.contentEquals(phoneStatic)) {
+            staticMismatches.incrementAndGet()
+            return true
+        }
+        link = current
+        for (frame in socket.incoming) {
+            val plaintext = channel.decryptFrame(frame) ?: continue
+            received += plaintext
+            answer(current, plaintext)
+        }
+        return true
+    }
+
+    private suspend fun answer(current: Link, plaintext: ByteArray) {
+        val envelope = Json.parseToJsonElement(plaintext.decodeToString()).jsonObject
+        val requestID = (envelope["requestID"] as? JsonPrimitive)?.long
+        val payload = envelope.getValue("payload").jsonObject
+        when (payload.keys.single()) {
+            "hello" -> if (answering) send(current, helloReply(requestID))
+            "relayRoomSecret" -> if (answering) {
+                if (roomSecretFailures.getAndUpdate { if (it > 0) it - 1 else 0 } > 0) {
+                    send(current, fixtureEnvelope("error-reply.json", requestID))
+                } else {
+                    val encoded = payload.getValue("relayRoomSecret").jsonObject.getValue("_0").jsonPrimitive.content
+                    roomSecret = Base64.getDecoder().decode(encoded)
+                    send(current, fixtureEnvelope("relay-room-secret-stored.json", requestID))
+                }
+            }
+            "ping" -> if (answering) send(current, fixtureEnvelope("pong.json", requestID))
+            "unpairing" -> unpairings.incrementAndGet()
+        }
+    }
+
+    private fun helloReply(requestID: Long?): ByteArray {
+        val sample = fixtureJson("hello-mac.json")
+        val hello = sample.getValue("payload").jsonObject.getValue("hello").jsonObject
+        val body = JsonObject(hello + mapOf("revision" to JsonPrimitive(revision), "minimumPeer" to JsonPrimitive(minimumPeer)))
+        return envelope(JsonObject(mapOf("hello" to body)), requestID)
+    }
+
+    private fun fixtureEnvelope(name: String, requestID: Long?): ByteArray =
+        envelope(fixtureJson(name).getValue("payload").jsonObject, requestID)
+
+    private fun envelope(payload: JsonObject, requestID: Long?): ByteArray {
+        val map = LinkedHashMap<String, JsonElement>()
+        map["payload"] = payload
+        if (requestID != null) map["requestID"] = JsonPrimitive(requestID)
+        return JsonObject(map).toString().toByteArray(Charsets.UTF_8)
+    }
+
+    private suspend fun send(current: Link, plaintext: ByteArray) {
+        current.sendLock.withLock {
+            for (frame in current.channel.encryptMessage(plaintext)) current.socket.send(frame)
+        }
+    }
+
+    companion object {
+        const val MAC_REVISION = 15
+        const val MAC_MINIMUM_PEER = 11
+        const val DEFAULT_REPARK_DELAY_MILLIS = 50L
+
+        /** A session sample's `json` tree. */
+        fun fixtureJson(name: String): JsonObject =
+            Json.parseToJsonElement(Fixtures.read("messages/session/$name")).jsonObject.getValue("json").jsonObject
+    }
+}
+
+/**
+ * Parks the Mac on a real relay over OkHttp: Hello `{"v":1,"role":"mac"}`, the challenge, then
+ * `{}` or `{"sig":...}`, and `{"ok":true}` (a Mac gets no registration token).
+ */
+class OkHttpMacRelay(private val http: OkHttpClient, private val endpoints: RelayEndpoints) : MacRelay {
+    override suspend fun park(roomName: String, sign: ((ByteArray) -> ByteArray)?): MacPark {
+        val result = CompletableDeferred<MacPark>()
+        val frames = Channel<ByteArray>(Channel.UNLIMITED)
+        val request = Request.Builder()
+            .url(endpoints.webSocketUrl)
+            .header("x-relay-room", roomName)
+            .header("User-Agent", "FakeMac")
+            .build()
+        val listener = object : WebSocketListener() {
+            private var challenged = false
+
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                webSocket.send("""{"v":1,"role":"mac"}""")
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                val reply = Json.parseToJsonElement(text).jsonObject
+                if (!challenged) {
+                    challenged = true
+                    val nonce = Base64.getDecoder().decode(reply.getValue("nonce").jsonPrimitive.content)
+                    val proof = sign?.let { buildJsonObject { put("sig", Base64.getEncoder().encodeToString(it(nonce))) } }
+                    webSocket.send(proof?.toString() ?: "{}")
+                    return
+                }
+                if (reply["ok"]?.jsonPrimitive?.content == "true") {
+                    result.complete(MacPark.Parked(Socket(webSocket, frames)))
+                } else {
+                    result.complete(MacPark.Refused(reply["error"]?.jsonPrimitive?.content ?: text))
+                }
+            }
+
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                frames.trySend(bytes.toByteArray())
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                ended(code, reason)
+                webSocket.close(CLOSE_NORMAL, null)
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = ended(code, reason)
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) =
+                ended(CLOSE_ABNORMAL, t.toString())
+
+            private fun ended(code: Int, reason: String) {
+                result.complete(MacPark.Refused("closed $code $reason"))
+                frames.close(RelayClosedException(code, reason))
+            }
+        }
+        val webSocket = http.newWebSocket(request, listener)
+        return withTimeoutOrNull(PARK_TIMEOUT_MILLIS) { result.await() } ?: run {
+            webSocket.cancel()
+            MacPark.Refused("park timed out")
+        }
+    }
+
+    private class Socket(private val webSocket: WebSocket, private val frames: Channel<ByteArray>) : MacSocket {
+        override val incoming: ReceiveChannel<ByteArray> get() = frames
+
+        override suspend fun send(frame: ByteArray) {
+            if (!webSocket.send(frame.toByteString())) throw RelaySendException("mac socket refused the frame")
+        }
+
+        override fun close() {
+            webSocket.close(CLOSE_NORMAL, null)
+            frames.close()
+        }
+    }
+
+    private companion object {
+        const val PARK_TIMEOUT_MILLIS = 10_000L
+        const val CLOSE_NORMAL = 1000
+        const val CLOSE_ABNORMAL = 1006
+    }
+}

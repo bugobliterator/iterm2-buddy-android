@@ -62,8 +62,12 @@ sealed interface AdmissionResult {
         val close: RelayClose get() = RelayClose(code, reason)
     }
 
-    /** The WebSocket upgrade got this HTTP status instead of 101. See [isFatalHttp]. */
-    data class HttpFailure(val status: Int) : AdmissionResult
+    /**
+     * The WebSocket upgrade got this HTTP status instead of 101. See [isFatalHttp]. [body] is the
+     * start of the response body (the relay's reason, such as `{"error":"origin not allowed"}`),
+     * cut to a few KiB, or empty.
+     */
+    data class HttpFailure(val status: Int, val body: String = "") : AdmissionResult
 
     /**
      * No HTTP response: [kind] says why, [detail] is the underlying error for logs. A
@@ -402,13 +406,15 @@ class RelayConnection(
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            // Read outside the lock: the body of a refused upgrade is still open here.
+            val body = response?.takeIf { it.code != HTTP_SWITCHING_PROTOCOLS }?.let(::peekErrorBody).orEmpty()
             synchronized(lock) {
                 val cause = t.toString()
                 val beforeAdmission = when {
                     phase != Phase.CONNECTING -> AdmissionResult.Closed(CLOSE_ABNORMAL, cause)
                     response == null -> AdmissionResult.Unreachable(classifyUnreachable(t), cause)
                     response.code == HTTP_SWITCHING_PROTOCOLS -> AdmissionResult.ProtocolError("bad upgrade: $cause")
-                    else -> AdmissionResult.HttpFailure(response.code)
+                    else -> AdmissionResult.HttpFailure(response.code, body)
                 }
                 onEnded(beforeAdmission, RelayClosedException(CLOSE_ABNORMAL, cause))
             }
@@ -440,6 +446,16 @@ class RelayConnection(
         fun parseObject(text: String): JsonObject? = try {
             Json.parseToJsonElement(text) as? JsonObject
         } catch (_: IllegalArgumentException) {
+            null
+        }
+
+        const val MAX_ERROR_BODY_BYTES = 4_096L
+
+        fun peekErrorBody(response: Response): String? = try {
+            response.peekBody(MAX_ERROR_BODY_BYTES).string()
+        } catch (_: IOException) {
+            null
+        } catch (_: IllegalStateException) {
             null
         }
 
