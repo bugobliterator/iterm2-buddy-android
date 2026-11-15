@@ -16,12 +16,14 @@ relay log lines).
       listening on `127.0.0.1`.
 - [ ] iTerm2's `companionRelayOrigin` is exactly `https://siddharths-macbook-pro.tailnet-99bb.ts.net`,
       and `companionResolverURL` is empty.
-- [ ] The APKs are the ones the build reported:
+- [ ] The APKs are the ones delivered with the commit "Classify TLS aborts as connect failures
+      and extend device checks". These hashes are for that build only: any rebuilt APK has
+      different ones, so check them against the hashes reported with the rebuild instead.
 
       shasum -a 256 app-debug.apk app-debug-androidTest.apk
 
-  Expected:
-  - `app-debug.apk`: `ec9764cfb6c84bc49e804022c38b2bf4877703d14de3eecbeb3b1761cb280914`
+  Expected for the delivered build:
+  - `app-debug.apk`: `cec9ba9ba664037e971676353e90512ba67166468c841449d9f090682ee172c9`
   - `app-debug-androidTest.apk`: `611a45b4762b0fd52d1cd1891daeafb6cba4fe46861e1d2255a69d3e31058108`
 
   **Result:**
@@ -30,7 +32,7 @@ relay log lines).
   signed with another debug key (another cloud session). Uninstall it first, which also deletes
   the pairing: `adb uninstall dev.bugobliterator.itermbuddy` (and
   `adb uninstall dev.bugobliterator.itermbuddy.test` for the test APK).
-- Start a log capture before step 1 and keep it running through step 7:
+- Start a log capture before step 1 and keep it running through the last step:
 
       adb logcat -c
       adb logcat > pairing-logcat.txt
@@ -45,6 +47,15 @@ relay log lines).
 
 2. Force-stop the app (`adb shell am force-stop dev.bugobliterator.itermbuddy`) and reopen it.
    Expected: Connected without scanning.
+
+   **Result:**
+
+   Then grep the relay log for the phone's signed join, which proves the stored pairing was
+   reused and the room is locked:
+
+       grep 'admit role=phone via=signed' <relay log>
+
+   Expected: at least one line, timed after the reopen.
 
    **Result:**
 
@@ -72,6 +83,40 @@ relay log lines).
 7. Grep the relay log for `bad signature`. Expected: none.
 
    **Result:**
+
+8. **Kill mid-pairing.** Start pairing in iTerm2 and scan. When the phone shows the code, force-stop
+   the app (`adb shell am force-stop dev.bugobliterator.itermbuddy`) without typing it, then
+   reopen the app. Expected: the same code is shown again; type it on the Mac and the phone
+   reaches **Connected to iTerm2**. This runs pending recovery and the PENDING_CONFIRMATION
+   Keystore path against the real Mac.
+
+   **Result:**
+
+9. **Mac sleep and wake.** While Connected, put the Mac to sleep (Apple menu → Sleep), wait a
+   minute, then wake it. Expected: **Waiting for your Mac** or **Can't reach the relay** while it
+   sleeps, then **Connected to iTerm2** again on its own after it wakes, with no certificate error.
+
+   **Result:**
+
+10. **Screen off while Connected.** Lock the phone and leave the screen off for 5 minutes, then
+    unlock and open the app. Record whether it is still Connected or reconnects when opened, and
+    how long that takes. This is the baseline before the foreground service; no foreground service
+    is expected yet, so a drop and reconnect is acceptable.
+
+    **Result:**
+
+11. **Unpair from the Mac while connected.** While Connected, unpair the phone in iTerm2.
+    Expected: the phone shows "Unpaired on the Mac" with **Scan again**.
+
+    **Result:**
+
+12. **Unpair from the Mac while the phone is offline.** Pair again. Turn on airplane mode on the
+    phone, unpair the phone in iTerm2, then turn airplane mode off. Record what the phone shows
+    and does over a few minutes. This is a known limitation: the Mac has deleted the phone's key,
+    so the phone cannot be told and may keep waiting. Afterwards, tap **Cancel**, then **Unpair**,
+    to clear it.
+
+    **Result:**
 
 ## Extra checks
 

@@ -31,6 +31,7 @@ import java.security.cert.CertificateException
 import java.util.Base64
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLException
+import javax.net.ssl.SSLPeerUnverifiedException
 
 /** What the phone presents after the relay's challenge. */
 sealed interface Proof {
@@ -84,11 +85,11 @@ sealed interface AdmissionResult {
 enum class UnreachableKind {
     /** The host name did not resolve. */
     DNS,
-
+    /** TCP connect refused or failed, the network is unreachable, or TLS broke off with no certificate fault. */
     /** TCP connect refused or failed, or the network is unreachable. */
     CONNECT,
 
-    /** The TLS handshake or certificate check failed: a configuration error, not a wait. */
+    /** The certificate or host name was refused: a configuration error, not a wait. Other TLS failures are [CONNECT]. */
     TLS,
 
     /** No connection within the connect or admission timeout. */
@@ -98,25 +99,44 @@ enum class UnreachableKind {
     OTHER,
 }
 
-/** Classifies a failure before any HTTP response by walking [error]'s cause chain. */
+/**
+ * Classifies a failure before any HTTP response by walking [error]'s cause chain.
+ *
+ * TLS (no retry) only when the certificate or host name was refused: a [CertificateException]
+ * anywhere in the chain, or an [SSLPeerUnverifiedException]. Any other [SSLException] is a
+ * transport failure that retries: on Android, Conscrypt reports a reset or abort during or just
+ * after the handshake as `SSLHandshakeException: SSL handshake aborted` or `SSLException: Read
+ * error` with no certificate cause. OkHttp 4.12's own retry rule (`isRecoverable`) draws the same line.
+ */
 internal fun classifyUnreachable(error: Throwable): UnreachableKind {
-    var current: Throwable? = error
-    val seen = HashSet<Throwable>()
-    while (current != null && seen.add(current)) {
+    val chain = causeChain(error)
+    if (chain.any { it is CertificateException || it is SSLPeerUnverifiedException }) return UnreachableKind.TLS
+    for (current in chain) {
         when (current) {
             is UnknownHostException -> return UnreachableKind.DNS
-            is SSLException, is CertificateException -> return UnreachableKind.TLS
             is SocketTimeoutException -> return UnreachableKind.TIMEOUT
             is ConnectException, is NoRouteToHostException, is PortUnreachableException ->
                 return UnreachableKind.CONNECT
         }
-        current = current.cause
     }
     return when {
         error is InterruptedIOException && error.message == "timeout" -> UnreachableKind.TIMEOUT
+        chain.any { it is SSLException } -> UnreachableKind.CONNECT
         error is SocketException -> UnreachableKind.CONNECT
         else -> UnreachableKind.OTHER
     }
+}
+
+/** [error] and its causes, each once. */
+private fun causeChain(error: Throwable): List<Throwable> {
+    val chain = ArrayList<Throwable>()
+    val seen = HashSet<Throwable>()
+    var current: Throwable? = error
+    while (current != null && seen.add(current)) {
+        chain += current
+        current = current.cause
+    }
+    return chain
 }
 
 /**

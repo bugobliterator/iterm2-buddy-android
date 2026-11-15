@@ -78,6 +78,7 @@ Notes from that task:
 - Session layer: every frame `NoiseChannel.encryptMessage` returns must be sent in order; if a WebSocket send fails or returns false, close the channel (the nonce has already advanced).
 - Companion Client: `requiresRescan(close)` (relay close 1000 "pairing cycle cap") means the QR is dead; show Scan again, do not back off. Pass `nextDelayMillis` only the relay's close frame from the connection that just ended.
 - Companion Client: `RegisterResult.Refused` mixes fatal 4xx and retryable 5xx (502 when the relay is down behind `tailscale serve`); branch on status. `Unreachable(TLS)` is a configuration fault (for example an expired tailnet certificate), not "Waiting for your Mac".
+- Keep one project debug keystore, restored by `scripts/cloud-setup.sh`, so device installs of a new cloud build do not need an uninstall that deletes the pairing (Mythos milestone review M4). Each cloud session currently generates its own `~/.android/debug.keystore`.
 
 ## Plan deviations already ruled on
 

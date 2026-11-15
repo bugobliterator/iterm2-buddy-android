@@ -949,8 +949,14 @@ class CompanionClient internal constructor(
                 }
                 // 5xx (the relay down behind tailscale serve) and 4xx alike: keep the stage and
                 // register again on the next connect. Never save REGISTERED on a failure.
-                is RegisterResult.Refused ->
-                    log("register refused (HTTP ${result.status}): ${result.body.take(LOG_BODY_CHARS)}")
+                is RegisterResult.Refused -> {
+                    val body = result.body.take(LOG_BODY_CHARS)
+                    if (result.status >= HTTP_SERVER_ERROR) {
+                        log("register: relay unavailable (HTTP ${result.status}, 5xx), will retry: $body")
+                    } else {
+                        log("register refused (HTTP ${result.status}, 4xx), will retry: $body")
+                    }
+                }
                 is RegisterResult.TransportError -> log("register failed: ${result.cause}")
             }
         }
@@ -980,6 +986,7 @@ class CompanionClient internal constructor(
         const val EVENT_BUFFER = 64
         const val CLEAR_ATTEMPTS = 3
         const val LOG_BODY_CHARS = 200
+        const val HTTP_SERVER_ERROR = 500
         const val CLOSE_ABNORMAL = 1006
         const val LOCAL_CLOSE = "closed by client"
         const val SIGNATURE_REQUIRED = "signature required"
@@ -993,7 +1000,9 @@ class CompanionClient internal constructor(
         const val QR_EXPIRED_MESSAGE =
             "iTerm2 isn't showing that pairing code any more. Open pairing on the Mac and scan again."
         const val BAD_SIGNATURE_MESSAGE =
-            "The relay refused this phone's signature. Check the relay address matches iTerm2's companionRelayOrigin."
+            "The relay refused this phone's signature. Check the relay address matches iTerm2's " +
+                "companionRelayOrigin, or another device may have taken the relay room. If iTerm2 still " +
+                "lists this phone, unpair it on the Mac, then scan again."
         const val TLS_MESSAGE =
             "The relay's certificate was rejected. Check the relay address and its tailscale serve certificate."
         const val REJECTED_MESSAGE = "The code was rejected on your Mac. Scan again to pair."
