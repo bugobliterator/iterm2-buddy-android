@@ -108,6 +108,27 @@ class PairingCodeTest {
         }
     }
 
+    @Test
+    fun pairingCodeKeepsItsOwnKeyCopy() {
+        val key = ByteArray(32) { it.toByte() }
+        val code = PairingCode(key, "pid", "https://relay.example.com")
+        key[0] = 0x7f
+        code.responderStaticPublicKey[1] = 0x7f
+        assertArrayEquals(ByteArray(32) { it.toByte() }, code.responderStaticPublicKey)
+    }
+
+    @Test
+    fun pairingCodeRequiresThirtyTwoByteKey() {
+        for (size in listOf(0, 31, 33)) {
+            try {
+                PairingCode(ByteArray(size), "pid", "https://relay.example.com")
+                throw AssertionError("accepted a $size-byte key")
+            } catch (_: IllegalArgumentException) {
+                // expected
+            }
+        }
+    }
+
     private fun hex(text: String): ByteArray {
         require(text.length % 2 == 0) { "odd-length hex: $text" }
         return ByteArray(text.length / 2) { text.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
