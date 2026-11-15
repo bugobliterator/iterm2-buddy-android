@@ -4,8 +4,10 @@ import com.southernstorm.noise.protocol.CipherState
 import java.io.Closeable
 import java.security.GeneralSecurityException
 
+private const val TAG_BYTES = 16
+
 /** One continuation byte plus a 16-byte tag must fit in a Noise message: 65535 - 16 - 1. */
-private const val MAX_CHUNK = MAX_NOISE_MESSAGE_SIZE - 16 - 1
+private const val MAX_CHUNK = MAX_NOISE_MESSAGE_SIZE - TAG_BYTES - 1
 
 private const val LAST_CHUNK: Byte = 0
 private const val MORE_CHUNKS: Byte = 1
@@ -30,12 +32,26 @@ private const val MORE_CHUNKS: Byte = 1
  * ends the connection when `receive()` throws.
  */
 class NoiseChannel internal constructor(sender: CipherState, receiver: CipherState) : Closeable {
+    init {
+        // A keyless CipherState is a pass-through in noise-java (and noise-c): MAC length 0,
+        // plaintext out, nothing authenticated. Only split() keys, so refuse anything else.
+        require(sender.hasKey() && receiver.hasKey()) { "Noise channel needs keyed CipherStates" }
+        require(sender.macLength == TAG_BYTES && receiver.macLength == TAG_BYTES) {
+            "Noise channel needs a 16-byte MAC"
+        }
+        require(sender !== receiver) { "Noise channel needs a CipherState per direction" }
+    }
+
     private val sendLock = Any()
     private val receiveLock = Any()
     private var sender: CipherState? = sender
     private var receiver: CipherState? = receiver
 
-    /** Chunks of the message being reassembled; zeroed when handed out or on close. */
+    /**
+     * Chunks of the message being reassembled; zeroed when handed out or on close. Uncapped,
+     * as upstream (`NoiseChannel.swift:168`): every chunk must authenticate under the receive
+     * key, so only the paired Mac can grow it, never the relay.
+     */
     private var pending = ByteArray(0)
     private var pendingSize = 0
 
@@ -45,7 +61,15 @@ class NoiseChannel internal constructor(sender: CipherState, receiver: CipherSta
     val isClosed: Boolean
         get() = closed
 
-    /** Encrypts [plaintext] into one or more transport messages, one per WebSocket frame, in send order. */
+    /**
+     * Encrypts [plaintext] into one or more transport messages, one per WebSocket frame, in send order.
+     *
+     * The send nonce has advanced for every returned frame by the time this returns. The caller
+     * must send all of them, in order, before encrypting anything else. If any frame is not sent
+     * (OkHttp `WebSocket.send()` returns false, the socket closes, the send is cancelled), the
+     * caller must [close] this channel: the Mac's receive nonce can no longer catch up, so every
+     * later frame would fail on its side. On failure this returns nothing and the channel is closed.
+     */
     fun encryptMessage(plaintext: ByteArray): List<ByteArray> = failClosed(sendLock) {
         val frames = ArrayList<ByteArray>(maxOf(1, (plaintext.size + MAX_CHUNK - 1) / MAX_CHUNK))
         var offset = 0
@@ -93,6 +117,8 @@ class NoiseChannel internal constructor(sender: CipherState, receiver: CipherSta
     override fun close() {
         closed = true
         // Taken one at a time, never nested, so a failing send and a failing receive cannot deadlock.
+        // Keep the nulls: noise-java's destroy() zeroes the key but leaves haskey true, so a
+        // destroyed state still referenced here would encrypt under the all-zero key.
         synchronized(sendLock) {
             sender?.destroy()
             sender = null
@@ -121,11 +147,9 @@ class NoiseChannel internal constructor(sender: CipherState, receiver: CipherSta
         } catch (e: GeneralSecurityException) {
             close()
             throw NoiseException("Noise transport failed", e)
-        } catch (e: IllegalStateException) {
-            // noise-java: nonce exhausted.
-            close()
-            throw NoiseException("Noise transport failed", e)
-        } catch (e: IllegalArgumentException) {
+        } catch (e: RuntimeException) {
+            // noise-java: nonce exhausted (IllegalStateException), bad arguments, or anything else
+            // unexpected; the channel must not stay open with a CipherState in an unknown state.
             close()
             throw NoiseException("Noise transport failed", e)
         }

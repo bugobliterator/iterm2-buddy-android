@@ -14,6 +14,8 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.random.Random
 
 class NoiseChannelTest {
@@ -285,6 +287,119 @@ class NoiseChannelTest {
     }
 
     @Test
+    fun shortOrGarbageHandshakeFramesFailAtEveryStep() {
+        val random = Random(0x68616e64)
+        for (size in listOf(0, 1, 47, 1000)) {
+            val garbage = random.nextBytes(size)
+
+            val atMessage1 = pairing()
+            atMessage1.initiator.writeMessage1()
+            assertThrows("message 1, $size bytes", NoiseException::class.java) {
+                atMessage1.responder.readMessage1(garbage.copyOf())
+            }
+            assertThrows("message 1, $size bytes: then", IllegalStateException::class.java) {
+                atMessage1.responder.writeMessage2()
+            }
+
+            val atMessage2 = pairing()
+            atMessage2.responder.readMessage1(atMessage2.initiator.writeMessage1())
+            assertThrows("message 2, $size bytes", NoiseException::class.java) {
+                atMessage2.initiator.readMessage2(garbage.copyOf())
+            }
+            assertThrows("message 2, $size bytes: then", IllegalStateException::class.java) {
+                atMessage2.initiator.writeMessage3()
+            }
+
+            val atMessage3 = pairing()
+            atMessage3.responder.readMessage1(atMessage3.initiator.writeMessage1())
+            atMessage3.initiator.readMessage2(atMessage3.responder.writeMessage2())
+            assertThrows("message 3, $size bytes", NoiseException::class.java) {
+                atMessage3.responder.readMessage3(garbage.copyOf())
+            }
+            assertThrows("message 3, $size bytes: then", IllegalStateException::class.java) {
+                atMessage3.responder.split()
+            }
+        }
+    }
+
+    @Test
+    fun keylessCipherStatesAreRefused() {
+        // noise-java passes plaintext straight through a CipherState with no key.
+        val keyed = { Noise.createCipher("ChaChaPoly").apply { initializeKey(ByteArray(32) { 7 }, 0) } }
+        val keyless = { Noise.createCipher("ChaChaPoly") }
+        assertFalse(keyless().hasKey())
+        assertEquals(0, keyless().macLength)
+        for ((label, pair) in listOf(
+            "both keyless" to (keyless() to keyless()),
+            "keyless sender" to (keyless() to keyed()),
+            "keyless receiver" to (keyed() to keyless()),
+        )) {
+            assertThrows(label, IllegalArgumentException::class.java) { NoiseChannel(pair.first, pair.second) }
+        }
+        val shared = keyed()
+        assertThrows("one state for both directions", IllegalArgumentException::class.java) {
+            NoiseChannel(shared, shared)
+        }
+    }
+
+    @Test
+    fun nonceExhaustionMidMessageReturnsNothingAndCloses() {
+        val key = ByteArray(32) { 3 }
+        val sender = Noise.createCipher("ChaChaPoly").apply {
+            initializeKey(key, 0)
+            // 2^64 - 3: two chunks seal, the third would need the reserved nonce 2^64 - 1.
+            setNonce(-3L)
+        }
+        val receiver = Noise.createCipher("ChaChaPoly").apply { initializeKey(ByteArray(32) { 4 }, 0) }
+        val channel = NoiseChannel(sender, receiver)
+        val threeChunks = ByteArray(2 * MAX_CHUNK + 1)
+        var returned: List<ByteArray>? = null
+        assertThrows(NoiseException::class.java) { returned = channel.encryptMessage(threeChunks) }
+        assertNull("no frames handed out", returned)
+        assertTrue(channel.isClosed)
+        assertThrows(NoiseException::class.java) { channel.encryptMessage(ByteArray(0)) }
+    }
+
+    @Test
+    fun closeRacingSendAndReceiveOnlyThrowsNoiseException() {
+        val started = System.nanoTime()
+        repeat(RACE_ROUNDS) { round ->
+            val (phone, mac) = channels()
+            val inbound = List(200) { mac.encryptMessage(ByteArray(64) { it.toByte() }).single() }
+            val go = CountDownLatch(1)
+            val failures = java.util.Collections.synchronizedList(ArrayList<Throwable>())
+            fun worker(body: () -> Unit) = Thread {
+                go.await()
+                try {
+                    body()
+                } catch (e: NoiseException) {
+                    // Expected once close() lands.
+                } catch (e: Throwable) {
+                    failures += e
+                }
+            }.apply { isDaemon = true; start() }
+
+            val sending = worker { while (true) phone.encryptMessage(ByteArray(64)) }
+            val receiving = worker { for (frame in inbound) phone.decryptFrame(frame) }
+            val closing = worker {
+                Thread.yield()
+                phone.close()
+            }
+            go.countDown()
+            for (thread in listOf(sending, receiving, closing)) {
+                thread.join(TimeUnit.SECONDS.toMillis(5))
+                assertFalse("round $round: ${thread.name} still running (deadlock?)", thread.isAlive)
+            }
+            assertEquals("round $round: unexpected exceptions", emptyList<Throwable>(), failures.toList())
+            assertTrue(phone.isClosed)
+            assertThrows(NoiseException::class.java) { phone.encryptMessage(ByteArray(1)) }
+            mac.close()
+        }
+        val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+        assertTrue("race rounds took $elapsedMillis ms", elapsedMillis < 10_000)
+    }
+
+    @Test
     fun closedHandshakeRefusesUse() {
         val p = pairing()
         p.initiator.close()
@@ -338,5 +453,6 @@ class NoiseChannelTest {
     private companion object {
         const val TAG_BYTES = 16
         const val MAX_CHUNK = 65518
+        const val RACE_ROUNDS = 20
     }
 }

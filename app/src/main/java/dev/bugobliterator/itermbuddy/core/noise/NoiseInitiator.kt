@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy.core.noise
 
+import androidx.annotation.VisibleForTesting
 import com.southernstorm.noise.protocol.HandshakeState
 
 private val EMPTY_PAYLOAD = ByteArray(0)
@@ -11,8 +12,12 @@ private val EMPTY_PAYLOAD = ByteArray(0)
  * [prologue] is `"iterm2-companion/v1/pid:" + pairingID` (`PairingCode.prologue`); a
  * mismatch with the Mac's fails message 1. Steps run strictly in order:
  * [writeMessage1], [readMessage2], [writeMessage3], then [handshakeHash] and [split].
+ *
+ * The public constructor is the only production path. The internal one fixes the ephemeral
+ * key for the cacophony vectors; a fixed ephemeral in production would reuse it across
+ * handshakes and break forward secrecy.
  */
-class NoiseInitiator internal constructor(
+class NoiseInitiator @VisibleForTesting internal constructor(
     responderStatic: ByteArray,
     localStaticPrivate: ByteArray,
     prologue: ByteArray,
