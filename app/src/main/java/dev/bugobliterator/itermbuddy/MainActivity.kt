@@ -6,8 +6,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.mlkit.common.MlKitException
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
@@ -24,11 +24,20 @@ class MainActivity : ComponentActivity() {
     private val actions = object : PairingActions {
         override fun scan() = startScan()
 
-        override fun start() = app.client.start()
+        override fun start() {
+            app.clearNotices()
+            app.client.start()
+        }
 
-        override fun cancel() = app.client.cancel()
+        override fun cancel() {
+            app.clearNotices()
+            app.client.cancel()
+        }
 
-        override fun unpair() = app.unpair()
+        override fun unpair() {
+            app.clearNotices()
+            app.unpair()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -37,10 +46,12 @@ class MainActivity : ComponentActivity() {
         app.startOnce()
         enableEdgeToEdge()
         setContent {
-            val state by app.client.state.collectAsState()
-            val notice by app.scanNotice.collectAsState()
+            val state by app.client.state.collectAsStateWithLifecycle()
+            val notice by app.scanNotice.collectAsStateWithLifecycle()
+            val unpairing by app.unpairing.collectAsStateWithLifecycle()
+            val unpairFailed by app.unpairFailed.collectAsStateWithLifecycle()
             MaterialTheme {
-                PairingScreen(state, actions, scanNotice = notice)
+                PairingScreen(state, actions, scanNotice = notice, unpairing = unpairing, unpairFailed = unpairFailed)
             }
         }
     }
@@ -51,7 +62,7 @@ class MainActivity : ComponentActivity() {
      */
     private fun startScan() {
         val app = app
-        app.clearScanNotice()
+        app.clearNotices()
         val options = GmsBarcodeScannerOptions.Builder()
             .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
             .build()

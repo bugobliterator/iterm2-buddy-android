@@ -16,13 +16,24 @@ relay log lines).
       listening on `127.0.0.1`.
 - [ ] iTerm2's `companionRelayOrigin` is exactly `https://siddharths-macbook-pro.tailnet-99bb.ts.net`,
       and `companionResolverURL` is empty.
-- [ ] The APK is the one the build reported:
+- [ ] The APKs are the ones the build reported:
 
-      shasum -a 256 app-debug.apk
+      shasum -a 256 app-debug.apk app-debug-androidTest.apk
 
-  Expected: `6b1d0b69b261df6915031d862613c6feb8ffc28e6fcf16f47386953c59b9bc36`
+  Expected:
+  - `app-debug.apk`: `ec9764cfb6c84bc49e804022c38b2bf4877703d14de3eecbeb3b1761cb280914`
+  - `app-debug-androidTest.apk`: `611a45b4762b0fd52d1cd1891daeafb6cba4fe46861e1d2255a69d3e31058108`
 
   **Result:**
+
+- If `adb install -r` fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, the phone holds a build
+  signed with another debug key (another cloud session). Uninstall it first, which also deletes
+  the pairing: `adb uninstall dev.bugobliterator.itermbuddy` (and
+  `adb uninstall dev.bugobliterator.itermbuddy.test` for the test APK).
+- Start a log capture before step 1 and keep it running through step 7:
+
+      adb logcat -c
+      adb logcat > pairing-logcat.txt
 
 ## Steps
 
@@ -63,6 +74,27 @@ relay log lines).
    **Result:**
 
 ## Extra checks
+
+- **Scanning without ACCESS_NETWORK_STATE.** The app declares INTERNET only; the permission ML
+  Kit's telemetry asks for is removed from the manifest. Step 1's scan must work, and the log
+  must hold no crash from it:
+
+      grep -E 'FATAL EXCEPTION|SecurityException' pairing-logcat.txt
+
+  Expected: no `FATAL EXCEPTION`. A caught `SecurityException` logged by datatransport (tags
+  such as `JobInfoScheduler`, `Executor` or `DefaultScheduler`) is expected and harmless. If the
+  app crashed, restore the permission (delete the `tools:node="remove"` entry in
+  `app/src/main/AndroidManifest.xml`) and note it here.
+
+  **Result:**
+
+- **The QR text is never logged.** It carries the Mac's key and pairing ID.
+
+      grep -i 'iterm2://' pairing-logcat.txt
+
+  Expected: no lines.
+
+  **Result:**
 
 - **Instrumented `KeystorePairingStoreTest`** (AndroidKeyStore on the real device). Run it
   after the steps above: the test clears the app's pairing store, so the phone is unpaired

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <application>
+        <!--
+        ui-tooling (debug only, for Compose previews in the IDE) declares an exported activity
+        that would let any app on the phone launch this app's composables. Previews still render.
+        -->
+        <activity
+            android:name="androidx.compose.ui.tooling.PreviewActivity"
+            tools:node="remove" />
+    </application>
+</manifest>

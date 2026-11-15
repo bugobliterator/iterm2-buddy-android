@@ -41,6 +41,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.IOException
 import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.coroutines.CoroutineContext
@@ -795,6 +796,45 @@ class CompanionClientTest {
     }
 
     @Test
+    fun unpairRetriesAFailedClearWrite() = runTest {
+        val store = FlakyStore(InMemoryPairingStore())
+        val h = Harness(this, store = store)
+        h.stored(PairingStage.REGISTERED)
+        store.clearWriteFailures = 2
+        h.client.start()
+        h.await { it is ClientState.WaitingForMac }
+
+        h.client.unpair()
+        assertEquals(ClientState.Unpaired, h.client.state.value)
+        assertNull(h.store.load())
+    }
+
+    @Test
+    fun unpairThatCannotClearThrowsIOExceptionAndGoesIdle() = runTest {
+        val store = FlakyStore(InMemoryPairingStore())
+        val h = Harness(this, store = store)
+        h.stored(PairingStage.REGISTERED)
+        store.clearWriteFailures = Int.MAX_VALUE
+        h.client.start()
+        h.await { it is ClientState.WaitingForMac }
+
+        val thrown = runCatching { h.client.unpair() }.exceptionOrNull()
+        assertTrue("$thrown", thrown is IOException && thrown !is PairingStoreUnavailableException)
+        assertEquals(ClientState.Idle, h.client.state.value)
+        assertNotNull("the pairing is still stored", store.load())
+    }
+
+    @Test
+    fun startShowsConnectingBeforeTheStoreIsRead() = runTest {
+        val h = Harness(this, storeContext = StandardTestDispatcher(testScheduler, "store"))
+        h.stored(PairingStage.REGISTERED)
+        assertEquals(ClientState.Unpaired, h.client.state.value)
+
+        h.client.start()
+        assertEquals("set before start() returns", ClientState.Connecting, h.client.state.value)
+    }
+
+    @Test
     fun macInitiatedUnpairTearsDown() = runTest {
         val h = Harness(this)
         val record = h.stored(PairingStage.REGISTERED)
@@ -1076,6 +1116,9 @@ class CompanionClientTest {
 
         @Volatile var failSavesAt: PairingStage? = null
 
+        /** Clears that fail with a plain [IOException], as a failed SharedPreferences commit does. */
+        @Volatile var clearWriteFailures = 0
+
         /** Runs after a save of this stage lands, as if the user acted in that instant. */
         @Volatile var afterSave: Pair<PairingStage, () -> Unit>? = null
 
@@ -1099,7 +1142,13 @@ class CompanionClientTest {
             }
         }
 
-        override fun clear() = delegate.clear()
+        override fun clear() {
+            if (clearWriteFailures > 0) {
+                clearWriteFailures--
+                throw IOException("could not clear the pairing store")
+            }
+            delegate.clear()
+        }
 
         override fun <T> withLock(block: () -> T): T = delegate.withLock(block)
     }

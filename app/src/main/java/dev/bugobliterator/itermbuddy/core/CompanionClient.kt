@@ -215,8 +215,12 @@ class CompanionClient internal constructor(
     /**
      * Resumes the stored pairing. A `PENDING_CONFIRMATION` record is kept and recovered
      * (flow step 3a), because the Mac may already have pinned this phone.
+     *
+     * The state is [ClientState.Connecting] when this returns, so a UI drawn straight after never
+     * shows the initial [ClientState.Unpaired] to a paired user while the store is read.
      */
     fun start() {
+        setState(ClientState.Connecting)
         launchControl { runStored() }
     }
 
@@ -237,8 +241,9 @@ class CompanionClient internal constructor(
      * Cancels reconnect work, sends `unpairing` without waiting for a reply, clears the store and
      * goes [ClientState.Unpaired], even if the send fails or nothing is connected.
      *
-     * @throws PairingStoreUnavailableException if the store still cannot be cleared after a few
-     *   tries; the state is then [ClientState.Idle] and the pairing is still stored.
+     * @throws IOException ([PairingStoreUnavailableException] or a failed write) if the store still
+     *   cannot be cleared after a few tries; the state is then [ClientState.Idle] and the pairing
+     *   is still stored.
      * @throws CancellationException if a later [pair] or [start] superseded this unpair.
      */
     suspend fun unpair() {
@@ -259,7 +264,7 @@ class CompanionClient internal constructor(
                 clearStoreWithRetry()
                 setState(ClientState.Unpaired)
                 result.complete(Unit)
-            } catch (e: PairingStoreUnavailableException) {
+            } catch (e: IOException) {
                 setState(ClientState.Idle)
                 result.completeExceptionally(e)
             }
@@ -355,18 +360,22 @@ class CompanionClient internal constructor(
                     }
                 }
             }
-        } catch (e: PairingStoreUnavailableException) {
+        } catch (e: IOException) {
             log("could not wipe the pairing: ${e.message}")
         }
     }
 
+    /**
+     * Clears the store, retrying any [IOException]: [PairingStoreUnavailableException] and a failed
+     * write alike. Throws the last one after [CLEAR_ATTEMPTS] tries.
+     */
     private suspend fun clearStoreWithRetry() {
         var attempt = 1
         while (true) {
             try {
                 onStore { store.clear() }
                 return
-            } catch (e: PairingStoreUnavailableException) {
+            } catch (e: IOException) {
                 if (attempt >= CLEAR_ATTEMPTS) throw e
                 log("store unavailable while unpairing: ${e.message}")
                 delay(nextDelayMillis(attempt++, null, random))
@@ -801,7 +810,7 @@ class CompanionClient internal constructor(
             freshCode = null
             try {
                 clearStoreWithRetry()
-            } catch (e: PairingStoreUnavailableException) {
+            } catch (e: IOException) {
                 log("could not clear the store after the Mac unpaired: ${e.message}")
             }
             setState(ClientState.Failed(UNPAIRED_MESSAGE, rescanNeeded = true))

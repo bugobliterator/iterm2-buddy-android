@@ -16,25 +16,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.WaitReason
-
-/** What the pairing screens can ask for. */
-interface PairingActions {
-    fun scan()
-
-    fun start()
-
-    fun cancel()
-
-    fun unpair()
-}
 
 /** The screen for [state]: a thin layout of [screenContent], with no state of its own. */
 @Composable
@@ -43,8 +35,10 @@ fun PairingScreen(
     actions: PairingActions,
     modifier: Modifier = Modifier,
     scanNotice: ScanNotice? = null,
+    unpairing: Boolean = false,
+    unpairFailed: Boolean = false,
 ) {
-    ScreenLayout(screenContent(state, scanNotice), actions, modifier)
+    ScreenLayout(screenContent(state, scanNotice, unpairing, unpairFailed), actions, modifier)
 }
 
 @Composable
@@ -57,6 +51,11 @@ private fun ScreenLayout(content: ScreenContent, actions: PairingActions, modifi
         ) {
             Text(
                 text = content.title,
+                // A heading, announced politely whenever the state (and so the title) changes.
+                modifier = Modifier.semantics {
+                    heading()
+                    liveRegion = LiveRegionMode.Polite
+                },
                 style = MaterialTheme.typography.headlineSmall,
                 textAlign = TextAlign.Center,
             )
@@ -65,7 +64,6 @@ private fun ScreenLayout(content: ScreenContent, actions: PairingActions, modifi
                     text = code.text,
                     modifier = Modifier.clearAndSetSemantics { contentDescription = code.spoken },
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 56.sp,
                     style = MaterialTheme.typography.displayLarge,
                 )
             }
@@ -84,13 +82,6 @@ private fun ScreenLayout(content: ScreenContent, actions: PairingActions, modifi
             }
         }
     }
-}
-
-private fun perform(action: ButtonAction, actions: PairingActions) = when (action) {
-    ButtonAction.SCAN -> actions.scan()
-    ButtonAction.START -> actions.start()
-    ButtonAction.CANCEL -> actions.cancel()
-    ButtonAction.UNPAIR -> actions.unpair()
 }
 
 private object NoActions : PairingActions {
@@ -148,6 +139,18 @@ private fun ShowCodePreview() = PreviewOf(ClientState.ShowCode("482913"))
 @Preview(showBackground = true)
 @Composable
 private fun ConnectedPreview() = PreviewOf(ClientState.Connected(macRevision = 15))
+
+@Preview(showBackground = true)
+@Composable
+private fun UnpairingPreview() = MaterialTheme {
+    PairingScreen(ClientState.Connected(macRevision = 15), NoActions, unpairing = true)
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun UnpairFailedPreview() = MaterialTheme {
+    PairingScreen(ClientState.Idle, NoActions, unpairFailed = true)
+}
 
 @Preview(showBackground = true)
 @Composable
