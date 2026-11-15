@@ -51,7 +51,8 @@ sealed interface PairingCodeResult {
 
 /**
  * Parses a scanned QR string exactly as upstream `PairingCode.parse` (iTerm2 v3.7.7) does, then
- * applies this app's policy: only a `v=1` code that carries a `relay=` origin is accepted.
+ * applies this app's policy: only a `v=1` code that carries a `relay=` origin is accepted, and
+ * only when that origin's host is a plain hostname or a bracketed IP literal.
  */
 fun parsePairingCode(qr: String): PairingCodeResult {
     val url = UrlComponents.parse(qr) ?: return rejected(Reason.MALFORMED_URL)
@@ -79,6 +80,9 @@ fun parsePairingCode(qr: String): PairingCodeResult {
     }
     val relay = value("relay") ?: return rejected(Reason.MISSING_RELAY)
     val origin = canonicalRelayOrigin(relay) ?: return rejected(Reason.INVALID_RELAY)
+    // App policy: upstream percent-decodes the host, so it can hold '@', '/', '#', control or
+    // non-ASCII characters. Only a plain hostname or bracketed IP literal is used.
+    if (!PLAIN_RELAY_ORIGIN.matches(origin)) return rejected(Reason.INVALID_RELAY)
     return PairingCodeResult.Ok(PairingCode(key, pid, origin))
 }
 
@@ -148,3 +152,6 @@ internal const val KEY_SIZE = 32
 
 /** Swift's `Int(String)` takes only ASCII digits with an optional sign. */
 private val VERSION_PATTERN = Regex("[+-]?[0-9]+")
+
+/** A canonical origin whose host is `[A-Za-z0-9._-]+` or `[` IP literal `]`, with an optional port. */
+private val PLAIN_RELAY_ORIGIN = Regex("https://([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]+)?")
