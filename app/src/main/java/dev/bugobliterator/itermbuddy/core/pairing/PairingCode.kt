@@ -154,4 +154,4 @@ internal const val KEY_SIZE = 32
 private val VERSION_PATTERN = Regex("[+-]?[0-9]+")
 
 /** A canonical origin whose host is `[A-Za-z0-9._-]+` or `[` IP literal `]`, with an optional port. */
-private val PLAIN_RELAY_ORIGIN = Regex("https://([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]+)?")
+internal val PLAIN_RELAY_ORIGIN = Regex("https://([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]+)?")
