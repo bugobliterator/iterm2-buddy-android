@@ -8,19 +8,26 @@ Attestation is off (`ATTEST_REQUIRED=false`), so rooms are admitted in open mode
 
 ## Install
 
-Needs git, Node 20+, pnpm, jq and tailscale on PATH, and tailnet HTTPS
+Needs git, Node 20+, pnpm and tailscale on PATH, and tailnet HTTPS
 certificates enabled.
 
 ```sh
-ops/mac/install-relay.sh                 # RELAY_PORT=<port> if 8787 is taken
+ops/mac/install-relay.sh                 # RELAY_PORT=<port> if 8787 is taken; later runs keep it
 node ops/mac/check-relay.mjs https://relay.example.ts.net
 # check-relay: OK: {"ok":false,"error":"mac offline"}
 ```
 
-The script is safe to re-run: it re-pins the checkout, reinstalls, rewrites
-the env file and plist, reloads the agent, waits for the
-`relay: listening on 127.0.0.1:8787 (…, attest=false)` log line, runs
-`tailscale serve` and refuses to finish if funnel is on.
+The script is safe to re-run. Before it stops the running agent, it checks:
+- tailnet certificates exist and Funnel is off, using `tailscale serve status --json`;
+- the port is free of anything other than the agent itself;
+- the checkout is restored to the pinned commit, with tracked files reset and stray files removed;
+- `better-sqlite3` can open a database;
+- the rendered plist passes `plutil -lint`.
+
+It then reloads the agent and waits for the
+`relay: listening on 127.0.0.1:8787 (…, attest=false)` log line. Next it runs
+`tailscale serve` and checks Funnel again. If Funnel is on, it turns Funnel off,
+stops the agent and fails.
 
 ## What goes where
 
