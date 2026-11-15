@@ -361,6 +361,50 @@ class KeystorePairingStoreJvmTest {
         assertWiped("after failed generation")
     }
 
+    @Test
+    fun runtimeFailuresInSaveAndClearAreUnavailable() {
+        // keystore2 not yet re-registered after a restart: getService throws NullPointerException.
+        val record = confirmed()
+        vault.deleteFailure = NullPointerException("keystore2 service is null")
+        assertThrows(PairingStoreUnavailableException::class.java) { store.clear() }
+        assertThrows(PairingStoreUnavailableException::class.java) { beginFreshPairing(store, codeB) }
+        vault.deleteFailure = null
+        assertEquals(record, store.load())
+
+        vault.sealFailure = NullPointerException("keystore2 service is null")
+        assertThrows(PairingStoreUnavailableException::class.java) {
+            advancePairing(store, record, PairingStage.REGISTERED)
+        }
+        vault.sealFailure = null
+        assertEquals(record, store.load())
+
+        store.clear()
+        vault.createFailure = NullPointerException("keystore2 service is null")
+        assertThrows(PairingStoreUnavailableException::class.java) { beginFreshPairing(store, codeA) }
+        vault.createFailure = null
+        assertNull(store.load())
+    }
+
+    @Test
+    fun loadThrowsOnlyUnavailableWhenAWipeCannotBeWritten() {
+        confirmed()
+        vault.keys.clear()
+        file.failWrites = true
+        val thrown = assertThrows(IOException::class.java) { store.load() }
+        assertEquals(PairingStoreUnavailableException::class.java, thrown.javaClass)
+        file.failWrites = false
+        assertWipedByLoad("after the write recovers")
+    }
+
+    @Test
+    fun loadThrowsOnlyUnavailableForAnUnreadableFile() {
+        val broken = object : PairingBlobFile by file {
+            override fun read(): StoredEntry? = throw ClassCastException("String expected")
+        }
+        val thrown = assertThrows(Exception::class.java) { KeystorePairingStore(broken, vault).load() }
+        assertEquals(PairingStoreUnavailableException::class.java, thrown.javaClass)
+    }
+
     // --- Writes and locking ------------------------------------------------------------------
 
     @Test
