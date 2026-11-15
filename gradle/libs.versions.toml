@@ -7,6 +7,8 @@ lifecycle = "2.11.0"
 kotlinxSerialization = "1.13.0"
 junit = "4.13.2"
 bouncycastle = "1.87"
+# Signal's Maven Central release of rweather/noise-java (MIT); upstream was never published.
+noiseJava = "0.1.1"
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
@@ -16,6 +18,7 @@ androidx-compose-material3 = { module = "androidx.compose.material3:material3" }
 androidx-compose-ui = { module = "androidx.compose.ui:ui" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
 bouncycastle-bcprov = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
+noise-java = { module = "org.signal.forks:noise-java", version.ref = "noiseJava" }
 junit = { module = "junit:junit", version.ref = "junit" }
 
 [plugins]
