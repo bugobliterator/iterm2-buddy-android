@@ -225,6 +225,15 @@
     },
     {
       "androidAccepts" : true,
+      "name" : "duplicateRelay",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com&relay=https://siddharths-macbook-pro.tailnet-99bb.ts.net",
+      "relayOrigin" : "https://relay.example.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
       "name" : "directWithStrayResolver",
       "pairingID" : "f7c2a1b9e05d4c3a",
       "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com&resolver=https://resolver.example.com/",

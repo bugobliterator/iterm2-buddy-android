@@ -19,6 +19,13 @@ guard arguments.count == 2 else {
 let outputDirectory = URL(fileURLWithPath: arguments[1], isDirectory: true)
 try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
+func require(_ condition: Bool, _ message: String) {
+    if !condition {
+        FileHandle.standardError.write(Data("wire-fixtures: \(message)\n".utf8))
+        exit(1)
+    }
+}
+
 // MARK: - Fixed inputs
 
 func bytes(_ count: Int, startingAt first: UInt8, step: UInt8 = 1) -> Data {
@@ -191,8 +198,9 @@ func upstreamErrorName(_ error: Error) -> String {
     }
 }
 
-/// A QR exactly as the Mac renders it: built by upstream `urlString()`, with a
-/// pid that needs percent-encoding.
+/// A QR rendered by upstream `urlString()`, with a pid that needs
+/// percent-encoding. Rendered here by swift-foundation's URLComponents on
+/// Linux; the Darwin rendering is unverified until the on-device check.
 let macRenderedQR = PairingCode(responderStaticPublicKey: macStaticKey,
                                 pairingID: "f7c2 a+b&c=d/é?",
                                 relayOrigin: projectRelayOrigin).urlString()
@@ -216,6 +224,7 @@ let pairingCodeInputs: [(name: String, qr: String)] = [
     ("resolverVersionTwo", directQR(version: "2",
                                     extra: "&resolver=https://resolver.example.com/shardmap.json")),
     ("resolverVersionTwoWithoutResolver", directQR(version: "2", extra: "&relay=\(exampleRelay)")),
+    ("duplicateRelay", directQR(extra: "&relay=\(exampleRelay)&relay=\(projectRelayOrigin)")),
     ("directWithStrayResolver", directQR(extra: "&relay=\(exampleRelay)&resolver=https://resolver.example.com/")),
     ("directWithoutRelay", directQR(extra: "")),
     ("wrongProtocol", directQR(proto: "Noise_XK_25519_ChaChaPoly_SHA256", extra: "&relay=\(exampleRelay)")),
@@ -291,8 +300,11 @@ let joins = joinRoles.map { entry -> JoinVector in
     let key = RelayJoin.signingKey(roomSecret: joinRoomSecret)
     let transcript = RelayJoin.transcript(role: entry.role, nonce: joinNonce, roomName: joinRoomName, origin: joinOrigin)
     // swift-crypto's BoringSSL backend signs deterministically (RFC 8032), so
-    // the signature is stable on Linux. Darwin CryptoKit randomizes it.
+    // the signature is stable on Linux. Darwin CryptoKit randomizes it, which
+    // would silently change the vectors, so sign twice and require equality.
     let signature = try! key.signature(for: transcript)
+    let repeatSignature = try! key.signature(for: transcript)
+    require(signature == repeatSignature, "Ed25519 signing is not deterministic; generate on Linux")
     let verifier = RelayJoin.verifier(roomSecret: joinRoomSecret)
     precondition(RelayJoin.verify(signature: signature, transcript: transcript, verifier: verifier))
     return JoinVector(role: entry.name,
@@ -316,13 +328,6 @@ let prologues = prologuePairingIDs.map { pid in
 }
 
 // MARK: - Checks and output
-
-func require(_ condition: Bool, _ message: String) {
-    if !condition {
-        FileHandle.standardError.write(Data("wire-fixtures: \(message)\n".utf8))
-        exit(1)
-    }
-}
 
 require(!canonical.isEmpty, "canonical is empty")
 require(!pairingCodes.isEmpty, "pairingCodes is empty")
