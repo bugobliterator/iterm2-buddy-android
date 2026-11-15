@@ -74,6 +74,8 @@ Notes from that task:
 
 - Enable R8 for release builds (`isMinifyEnabled = true` with `proguard-android-optimize.txt`). BouncyCastle (`bcprov-jdk18on`, 7 MB) ships whole without it; a trial R8 build kept about 30 BouncyCastle classes, gave a 1.8 MB release APK and no warnings.
 - Check the relay challenge nonce is 32 bytes where it is base64-decoded (Relay Connection).
+- Session layer (Companion Client): a frame that fails to decode (`WireDecodeException`) or is empty is dropped and logged, and the session stays up, as upstream does (`CompanionSession.swift:120-127`). Test that a bad frame does not close the session.
+- Session layer: every frame `NoiseChannel.encryptMessage` returns must be sent in order; if a WebSocket send fails or returns false, close the channel (the nonce has already advanced).
 
 ## Plan deviations already ruled on
 
