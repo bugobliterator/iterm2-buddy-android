@@ -109,6 +109,9 @@ internal enum class ConfirmationMode {
  * cancelled part way), the Noise channel and the socket are closed, because the send nonce has
  * already advanced and the Mac could never decrypt anything after it.
  *
+ * A failed send closes the channel and socket but leaves ending the session to the receive loop,
+ * so a close frame the relay sent just before (say "displaced") is still reported in [ended].
+ *
  * The receive loop decrypts frames in arrival order. A frame that does not decode
  * ([WireDecodeException]) or is empty is dropped and logged and the session stays up, as
  * upstream `CompanionSession.swift:120-127` does. A Noise failure or the socket closing ends the
@@ -139,6 +142,16 @@ internal class CompanionSession(
     var endedWith: SessionEnd? = null
         private set
 
+    /** Whether any frame from the Mac has decrypted: proof the Mac is there. */
+    @Volatile
+    var heardFromMac = false
+        private set
+
+    /** Whether the session has been closed or aborted locally; [ended] follows promptly. */
+    @Volatile
+    var closing = false
+        private set
+
     /** Completes when the Mac sends an unsolicited `unpaired`. */
     val unpaired = CompletableDeferred<Unit>()
 
@@ -167,6 +180,7 @@ internal class CompanionSession(
             return select {
                 reply.onAwait { it }
                 ended.onAwait { throw CompanionRequestException("the connection closed before the reply") }
+                unpaired.onAwait { throw CompanionRequestException("the Mac unpaired this phone") }
             }
         } finally {
             pending.remove(id)
@@ -175,6 +189,7 @@ internal class CompanionSession(
 
     /** Closes the Noise channel and the socket; the receive loop then ends. Idempotent. */
     fun close() {
+        closing = true
         channel.close()
         socket.close()
         receiveJob?.cancel()
@@ -186,7 +201,7 @@ internal class CompanionSession(
             val frames = try {
                 channel.encryptMessage(encodeEnvelope(message, requestID))
             } catch (e: NoiseException) {
-                close()
+                abort()
                 throw CompanionRequestException("the connection is closed", e)
             }
             var sent = false
@@ -197,9 +212,17 @@ internal class CompanionSession(
                 throw CompanionRequestException("the frame could not be sent", e)
             } finally {
                 // The nonce advanced for every frame: one not sent desynchronises the channel.
-                if (!sent) close()
+                if (!sent) abort()
             }
         }
+    }
+
+    /** Stops the channel and the socket; the receive loop then ends the session with what it saw. */
+    private fun abort() {
+        closing = true
+        channel.close()
+        socket.close()
+        if (receiveJob == null) finish(null)
     }
 
     private suspend fun receiveLoop() {
@@ -207,6 +230,7 @@ internal class CompanionSession(
         try {
             for (frame in socket.incoming) {
                 val plaintext = channel.decryptFrame(frame) ?: continue
+                heardFromMac = true
                 handle(plaintext)
             }
         } catch (e: CancellationException) {

@@ -99,29 +99,31 @@ class RelayEndToEndTest {
         assertEquals(MacMessage.Pong, client.request(PhoneMessage.Ping))
         assertEquals("the room is locked", AdmissionResult.Rejected("signature required"), probeUnsigned(endpoints, room))
 
-        // Restart on the same database: both sides reconnect signed.
+        // The Mac's socket goes: the relay closes the phone with 1001 "peer gone"; both come back.
+        mac.dropSocket()
+        awaitState(client) { it !is ClientState.Connected }
+        awaitState(client) { it is ClientState.Connected }
+        assertEquals(MacMessage.Pong, client.request(PhoneMessage.Ping))
+
+        // Restart on the same database: the verifier survives, so reconnecting at all proves both
+        // sides joined signed (the relay refuses an unsigned join with "signature required").
         relay.stop()
         awaitState(client) { it !is ClientState.Connected }
-        val admissionsBefore = logs.count { it.startsWith("admission") }
         relay = startRelay(File(workDir, "relay.db"), port)
-        awaitState(client) { it is ClientState.Connected }
-        val reconnect = logs.filter { it.startsWith("admission") }.drop(admissionsBefore)
-        assertEquals("admission (signed): Admitted(registrationToken=<redacted>)", reconnect.last())
-        assertEquals(MacMessage.Pong, client.request(PhoneMessage.Ping))
         assertEquals("the verifier survived", AdmissionResult.Rejected("signature required"), probeUnsigned(endpoints, room))
+        awaitState(client) { it is ClientState.Connected }
+        assertEquals(MacMessage.Pong, client.request(PhoneMessage.Ping))
 
         // Restart on an empty database: the relay lost the verifier; the client registers again.
         relay.stop()
         awaitState(client) { it !is ClientState.Connected }
-        val registeredBefore = logs.count { it == "registered with the relay" }
         relay = startRelay(File(workDir, "relay-empty.db"), port)
         awaitState(client) { it is ClientState.Connected }
-        assertEquals(registeredBefore + 1, logs.count { it == "registered with the relay" })
-        assertEquals("no register failure", 0, logs.count { it.startsWith("register refused") || it.startsWith("register failed") })
-        assertEquals(MacMessage.Pong, client.request(PhoneMessage.Ping))
+        // Register runs before Connected, so the empty relay holds the verifier again by now.
         assertEquals("re-locked", AdmissionResult.Rejected("signature required"), probeUnsigned(endpoints, room))
+        assertEquals(MacMessage.Pong, client.request(PhoneMessage.Ping))
         assertEquals(PairingStage.REGISTERED, store.load()!!.stage)
-        println("relay log:\n" + relays.flatMap { it.output }.joinToString("\n"))
+        println("client log:\n" + logs.joinToString("\n") + "\nrelay log:\n" + relays.flatMap { it.output }.joinToString("\n"))
     }
 
     private suspend fun awaitState(client: CompanionClient, predicate: (ClientState) -> Boolean): ClientState =

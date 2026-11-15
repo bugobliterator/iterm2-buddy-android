@@ -34,8 +34,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -117,8 +117,10 @@ sealed interface ClientState {
     /** "Waiting for your Mac", with Cancel. Retries with backoff. */
     data class WaitingForMac(val reason: WaitReason) : ClientState
 
-    /** Show [code]; the user types it on the Mac. */
-    data class ShowCode(val code: String) : ClientState
+    /** Show [code]; the user types it on the Mac. [toString] leaves the code out, so logs never carry it. */
+    data class ShowCode(val code: String) : ClientState {
+        override fun toString(): String = "ShowCode(code=<redacted>)"
+    }
 
     /** Paired and talking; [macRevision] is the Mac's protocol revision from its `hello`. */
     data class Connected(val macRevision: Int) : ClientState
@@ -127,8 +129,8 @@ sealed interface ClientState {
      * The flow stopped. [rescanNeeded] means the UI offers Scan again; otherwise the stored pairing
      * is kept and [CompanionClient.start] tries again. Besides the cases in the plan:
      * - an `Unreachable(TLS)` admission ("The relay's certificate was rejected …"), with no retry;
-     * - a relay close 1000 "pairing cycle cap" ([requiresRescan]): an unconfirmed pairing is wiped
-     *   and [rescanNeeded] is true.
+     * - a relay close 1000 "pairing cycle cap" ([requiresRescan]) on an unconfirmed pairing: it is
+     *   wiped and [rescanNeeded] is true. A confirmed pairing just reconnects: the Mac keeps it.
      */
     data class Failed(val message: String, val rescanNeeded: Boolean) : ClientState
 }
@@ -138,8 +140,8 @@ sealed interface ClientState {
  * `hello`, the room secret and `/register` (*notes* → Relay admission, Noise, After pairing).
  * Owned by the foreground service; it holds at most one connection.
  *
- * [pair], [start], [cancel] and [unpair] are serialised: each one cancels and waits for the
- * previous one's work before it starts.
+ * [pair], [start], [cancel] and [unpair] are serialised: each one cancels the previous one's
+ * work and waits, uncancellably, for it to finish before it starts, so the chain runs in order.
  *
  * @param store the one pairing; every blocking store call runs on Dispatchers.IO.
  * @param scope where the flow runs; cancelling it stops everything, as a process kill would.
@@ -194,9 +196,12 @@ class CompanionClient internal constructor(
     @Volatile
     private var session: CompanionSession? = null
 
-    /** The record [pair] began, while it is still unconfirmed; [cancel] wipes it. */
+    /**
+     * The code [pair] is pairing, from before its record is written until the Mac confirms it;
+     * [cancel] wipes a PENDING_CONFIRMATION record for it.
+     */
     @Volatile
-    private var freshRecord: PairingRecord? = null
+    private var freshCode: PairingCode? = null
 
     /** Starts a new pairing for a scanned [code], replacing whatever is stored. */
     fun pair(code: PairingCode) {
@@ -214,14 +219,10 @@ class CompanionClient internal constructor(
     /** Stops the current attempt. A fresh pairing is wiped; a stored one stays and goes [ClientState.Idle]. */
     fun cancel() {
         launchControl {
-            val fresh = freshRecord
-            if (fresh != null) {
-                freshRecord = null
-                wipe(fresh)
-                setState(ClientState.Unpaired)
-            } else {
-                setState(if (hasStoredPairing()) ClientState.Idle else ClientState.Unpaired)
-            }
+            val fresh = freshCode
+            freshCode = null
+            if (fresh != null) wipeUnconfirmed(fresh)
+            setState(if (hasStoredPairing()) ClientState.Idle else ClientState.Unpaired)
         }
     }
 
@@ -245,8 +246,9 @@ class CompanionClient internal constructor(
                         log("unpairing was not sent: ${e.message}")
                     }
                 }
-                previous?.cancelAndJoin()
-                freshRecord = null
+                previous?.cancel()
+                withContext(NonCancellable) { previous?.join() }
+                freshCode = null
                 clearStoreWithRetry()
                 setState(ClientState.Unpaired)
                 result.complete(Unit)
@@ -298,14 +300,26 @@ class CompanionClient internal constructor(
         synchronized(jobLock) {
             val previous = job
             val next = scope.launch {
-                if (cancelPrevious) previous?.cancelAndJoin()
                 try {
+                    // Uncancellable: a job superseded while it waits must still not finish before
+                    // its own predecessor, or two flows would touch the store at once.
+                    if (cancelPrevious) {
+                        previous?.cancel()
+                        withContext(NonCancellable) { previous?.join() }
+                    }
                     block(if (cancelPrevious) null else previous)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
                     log("connect flow failed: $e")
                     setState(ClientState.Failed("Something went wrong: ${e.message}", rescanNeeded = false))
+                } finally {
+                    if (!cancelPrevious) {
+                        withContext(NonCancellable) {
+                            previous?.cancel()
+                            previous?.join()
+                        }
+                    }
                 }
             }
             job = next
@@ -320,12 +334,18 @@ class CompanionClient internal constructor(
         true
     }
 
-    /** Clears the store if it still holds [record]'s pairing. A store that is unavailable keeps it. */
-    private suspend fun wipe(record: PairingRecord) {
+    /**
+     * Clears the store only if it holds an unconfirmed pairing for [code]. A confirmed pairing is
+     * never wiped here: the Mac has pinned it. A store that is unavailable keeps it.
+     */
+    private suspend fun wipeUnconfirmed(code: PairingCode) {
         try {
             onStore {
                 store.withLock {
-                    if (store.load()?.isSamePairingAs(record) == true) store.clear()
+                    val stored = store.load()
+                    if (stored != null && stored.stage == PairingStage.PENDING_CONFIRMATION && stored.code == code) {
+                        store.clear()
+                    }
                 }
             }
         } catch (e: PairingStoreUnavailableException) {
@@ -348,6 +368,7 @@ class CompanionClient internal constructor(
     }
 
     private suspend fun runFresh(code: PairingCode) {
+        freshCode = code
         setState(ClientState.Connecting)
         val deadline = timeSource.markNow() + timeouts.freshMacWait
         var attempt = 0
@@ -366,7 +387,6 @@ class CompanionClient internal constructor(
                 delay(minOf(nextDelayMillis(++attempt, null, random), remainingMillis(deadline)))
             }
         }
-        freshRecord = record
         PairingFlow(record, fromScan = true).run()
     }
 
@@ -394,6 +414,28 @@ class CompanionClient internal constructor(
 
     private fun remainingMillis(deadline: ComparableTimeMark): Long =
         (-deadline.elapsedNow()).inWholeMilliseconds.coerceAtLeast(0)
+
+    /** Time that runs only while resumed, for how long the Mac has been absent. */
+    private class Stopwatch(private val timeSource: TimeSource.WithComparableMarks) {
+        private var accumulated = Duration.ZERO
+        private var runningSince: ComparableTimeMark? = null
+
+        val elapsed: Duration get() = accumulated + (runningSince?.elapsedNow() ?: Duration.ZERO)
+
+        fun resume() {
+            if (runningSince == null) runningSince = timeSource.markNow()
+        }
+
+        fun pause() {
+            runningSince?.let { accumulated += it.elapsedNow() }
+            runningSince = null
+        }
+
+        fun reset() {
+            accumulated = Duration.ZERO
+            runningSince = null
+        }
+    }
 
     /** The outcome of one connection attempt. */
     private sealed interface End {
@@ -432,10 +474,23 @@ class CompanionClient internal constructor(
         private var roomSecretErrors = 0
         private var proofSwitches = 0
 
-        /** While unconfirmed: when to give up on an absent Mac. Restarts at each completed handshake. */
-        private var macWaitDeadline = timeSource.markNow() + timeouts.freshMacWait
+        /**
+         * While unconfirmed: how long the Mac has been absent, measured against
+         * [ClientTimeouts.freshMacWait]. It runs from the end of an attempt that ended with no
+         * frame from the Mac (mac offline, unreachable, a failed handshake, a Mac that closed
+         * silently), pauses while the code is on screen, and resets whenever a decrypted frame
+         * from the Mac arrives. Time spent waiting for the user to type the code never counts,
+         * as upstream defers QR regeneration during a confirmation
+         * (`CompanionPairingController.swift:805-810`).
+         */
+        private val absence = Stopwatch(timeSource)
+
+        /** Whether the current attempt decrypted any frame from the Mac. */
+        private var heardThisAttempt = false
 
         private val unconfirmed get() = record.stage == PairingStage.PENDING_CONFIRMATION
+
+        private val macGoneTooLong get() = unconfirmed && absence.elapsed >= timeouts.freshMacWait
 
         suspend fun run() {
             val endpoints = endpointsFor(record.code.relayOrigin)
@@ -444,6 +499,12 @@ class CompanionClient internal constructor(
                 return
             }
             while (true) {
+                // Checked before each admission too, so an admission timeout cannot overshoot it.
+                if (macGoneTooLong) {
+                    giveUp()
+                    return
+                }
+                heardThisAttempt = false
                 val end = try {
                     connectOnce(endpoints)
                 } catch (e: StalePairingFlowException) {
@@ -460,7 +521,7 @@ class CompanionClient internal constructor(
                         proofSwitches = 0
                         attempt = 0
                         when {
-                            end.relayClose != null && requiresRescan(end.relayClose) -> rescan()
+                            end.relayClose != null && requiresRescan(end.relayClose) && unconfirmed -> rescan()
                             else -> {
                                 setState(ClientState.Connecting)
                                 backOff(null, end.relayClose)
@@ -470,7 +531,12 @@ class CompanionClient internal constructor(
                     is End.Retry -> {
                         proofSwitches = 0
                         when {
-                            end.relayClose != null && requiresRescan(end.relayClose) -> rescan()
+                            heardThisAttempt -> absence.reset()
+                            end.reason != WaitReason.STORE_UNAVAILABLE -> absence.resume()
+                        }
+                        when {
+                            // A confirmed pairing outlives a torn-down room: the Mac keeps it and re-parks.
+                            end.relayClose != null && requiresRescan(end.relayClose) && unconfirmed -> rescan()
                             else -> backOff(end.reason, end.relayClose)
                         }
                     }
@@ -484,30 +550,39 @@ class CompanionClient internal constructor(
          * unconfirmed pairing's wait for the Mac has run out; the state is then set.
          */
         private suspend fun backOff(reason: WaitReason?, relayClose: RelayClose?): Boolean {
-            if (unconfirmed && macWaitDeadline.hasPassedNow()) {
-                log("the Mac did not come back within ${timeouts.freshMacWait}; giving up on this code")
-                freshRecord = null
-                wipe(record)
-                setState(ClientState.Failed(QR_EXPIRED_MESSAGE, rescanNeeded = true))
-                return false
-            }
+            // A store failure says nothing about the Mac: never give up (and wipe) because of it.
+            if (reason != WaitReason.STORE_UNAVAILABLE && macGoneTooLong) return giveUp()
             if (reason != null) setState(ClientState.WaitingForMac(reason))
             var wait = nextDelayMillis(++attempt, relayClose, random)
-            if (unconfirmed) wait = minOf(wait, remainingMillis(macWaitDeadline))
+            if (unconfirmed) {
+                val remaining = (timeouts.freshMacWait - absence.elapsed).inWholeMilliseconds.coerceAtLeast(0)
+                wait = minOf(wait, remaining)
+            }
             log("retrying in $wait ms (attempt $attempt)")
             delay(wait)
             return true
         }
 
-        /** The relay tore the pairing room down (1000 "pairing cycle cap"): the QR is dead. */
+        /** The Mac stayed away past [ClientTimeouts.freshMacWait]: iTerm2 has replaced this code. */
+        private suspend fun giveUp(): Boolean {
+            log("the Mac was absent for ${timeouts.freshMacWait}; giving up on this code")
+            forgetUnconfirmed()
+            setState(ClientState.Failed(QR_EXPIRED_MESSAGE, rescanNeeded = true))
+            return false
+        }
+
+        /** The relay tore an unconfirmed pairing's room down (1000 "pairing cycle cap"): the QR is dead. */
         private suspend fun rescan(): Boolean {
             log("the relay tore the pairing room down; the code is dead")
-            if (unconfirmed) {
-                freshRecord = null
-                wipe(record)
-            }
+            forgetUnconfirmed()
             setState(ClientState.Failed(CYCLE_CAP_MESSAGE, rescanNeeded = true))
             return false
+        }
+
+        /** Wipes this pairing if it is still unconfirmed. */
+        private suspend fun forgetUnconfirmed() {
+            freshCode = null
+            wipeUnconfirmed(record.code)
         }
 
         private suspend fun connectOnce(endpoints: RelayEndpoints): End {
@@ -522,19 +597,21 @@ class CompanionClient internal constructor(
                     is Shake.Done -> shake
                     is Shake.Failed -> return End.Retry(WaitReason.MAC_OFFLINE, shake.relayClose)
                 }
-                macWaitDeadline = timeSource.markNow() + timeouts.freshMacWait
                 return coroutineScope {
                     val live = CompanionSession(
                         socket,
                         handshake.channel,
                         confirmationMode(),
-                        onEvent = { eventFlow.tryEmit(it) },
+                        onEvent = ::emitEvent,
                         log = log,
                     )
                     live.start(this)
                     try {
-                        converse(live, handshake.hash, endpoints, token)
+                        val end = converse(live, handshake.hash, endpoints, token)
+                        // The Mac may unpair at any point once the session is up, not only at step 7.
+                        if (end != End.Stop && live.unpaired.isCompleted) macUnpaired(live) else end
                     } finally {
+                        heardThisAttempt = heardThisAttempt || live.heardFromMac
                         session = null
                         live.close()
                     }
@@ -669,6 +746,9 @@ class CompanionClient internal constructor(
                 null -> return lost(live)
                 MacMessage.RelayRoomSecretStored -> roomSecretErrors = 0
                 is MacMessage.Error -> {
+                    // A Mac that is unpairing answers relayRoomSecret with an error, then sends
+                    // `unpaired` (CompanionLink.swift:442-453): that is not a failure to count.
+                    if (withTimeoutOrNull(UNPAIRED_GRACE) { live.unpaired.await() } != null) return lost(live)
                     roomSecretErrors++
                     log("the Mac could not store the room secret ($roomSecretErrors in a row): ${stored.code}")
                     if (roomSecretErrors >= timeouts.roomSecretErrorLimit) return fail(ROOM_SECRET_MESSAGE)
@@ -688,21 +768,24 @@ class CompanionClient internal constructor(
             session = live
             setState(ClientState.Connected(helloReply.revision.coerceIn(0, Int.MAX_VALUE.toLong()).toInt()))
             return select {
-                live.unpaired.onAwait {
-                    log("the Mac unpaired this phone")
-                    session = null
-                    live.close()
-                    freshRecord = null
-                    try {
-                        clearStoreWithRetry()
-                    } catch (e: PairingStoreUnavailableException) {
-                        log("could not clear the store after the Mac unpaired: ${e.message}")
-                    }
-                    setState(ClientState.Failed(UNPAIRED_MESSAGE, rescanNeeded = true))
-                    End.Stop
-                }
+                live.unpaired.onAwait { macUnpaired(live) }
                 live.ended.onAwait { End.Lost(it.relayClose) }
             }
+        }
+
+        /** The Mac sent `unpaired`: the same teardown as [unpair], without sending anything. */
+        private suspend fun macUnpaired(live: CompanionSession): End {
+            log("the Mac unpaired this phone")
+            session = null
+            live.close()
+            freshCode = null
+            try {
+                clearStoreWithRetry()
+            } catch (e: PairingStoreUnavailableException) {
+                log("could not clear the store after the Mac unpaired: ${e.message}")
+            }
+            setState(ClientState.Failed(UNPAIRED_MESSAGE, rescanNeeded = true))
+            return End.Stop
         }
 
         private suspend fun hello(live: CompanionSession): HelloStep =
@@ -710,7 +793,7 @@ class CompanionClient internal constructor(
 
         /** Step 3: show the code, wait for the bare verdict, save CONFIRMED at once, then `hello`. */
         private suspend fun confirmThenHello(live: CompanionSession, hash: ByteArray): HelloStep {
-            setState(ClientState.ShowCode(sasCode(hash)))
+            showCode(hash)
             macMayHavePinned = true
             val verdict: Any = withTimeoutOrNull(timeouts.confirmation) {
                 select {
@@ -732,7 +815,7 @@ class CompanionClient internal constructor(
          * in SAS mode, and its link answers the queued hello next.
          */
         private suspend fun recover(live: CompanionSession, hash: ByteArray): HelloStep = coroutineScope {
-            setState(ClientState.ShowCode(sasCode(hash)))
+            showCode(hash)
             val hello = async {
                 try {
                     live.request(PhoneMessage.Hello())
@@ -769,11 +852,16 @@ class CompanionClient internal constructor(
             step
         }
 
+        /** Shows the code; the Mac is present, so its absence stops counting. */
+        private fun showCode(hash: ByteArray) {
+            absence.pause()
+            setState(ClientState.ShowCode(sasCode(hash)))
+        }
+
         /** Rejection or timeout of the code: wipe the half-made pairing and ask for a rescan. */
         private suspend fun declined(timedOut: Boolean): End {
             log(if (timedOut) "the code was not confirmed in time" else "the Mac rejected the code")
-            freshRecord = null
-            wipe(record)
+            forgetUnconfirmed()
             setState(ClientState.Failed(if (timedOut) CONFIRMATION_TIMEOUT_MESSAGE else REJECTED_MESSAGE, rescanNeeded = true))
             return End.Stop
         }
@@ -783,7 +871,7 @@ class CompanionClient internal constructor(
             if (!unconfirmed) return true
             return try {
                 record = onStore { advancePairing(store, record, PairingStage.CONFIRMED) }
-                freshRecord = null
+                freshCode = null
                 true
             } catch (e: IOException) {
                 // PairingStoreUnavailableException or a failed write: nothing was saved.
@@ -804,9 +892,15 @@ class CompanionClient internal constructor(
             }
         }
 
-        /** The attempt ended during setup: retry, passing on the relay's close frame if it sent one. */
-        private fun lost(live: CompanionSession): End {
-            return End.Retry(WaitReason.MAC_OFFLINE, live.endedWith?.relayClose)
+        /**
+         * The attempt ended during setup: retry, passing on the relay's close frame if it sent one.
+         * A session that is already closing gets a moment to finish, so a close frame racing a
+         * failed send (such as "displaced", which means a 60 s wait) is not lost.
+         */
+        private suspend fun lost(live: CompanionSession): End {
+            val ended = live.endedWith
+                ?: if (live.closing) withTimeoutOrNull(CLOSE_GRACE) { live.ended.await() } else null
+            return End.Retry(WaitReason.MAC_OFFLINE, ended?.relayClose)
         }
 
         private suspend fun register(endpoints: RelayEndpoints, token: String) {
@@ -830,6 +924,11 @@ class CompanionClient internal constructor(
                 is RegisterResult.TransportError -> log("register failed: ${result.cause}")
             }
         }
+    }
+
+    private fun emitEvent(message: MacMessage) {
+        // With no collector the message is simply not delivered; with a slow one the buffer fills.
+        if (!eventFlow.tryEmit(message)) log("dropped an unsolicited ${message.javaClass.simpleName}: the events buffer is full")
     }
 
     private sealed interface Admission {
@@ -856,6 +955,8 @@ class CompanionClient internal constructor(
         const val SIGNATURE_REQUIRED = "signature required"
         const val TICKET_REQUIRED = "ticket required"
         const val BAD_SIGNATURE = "bad signature"
+        val CLOSE_GRACE = 1.seconds
+        val UNPAIRED_GRACE = 1.seconds
         val CLOSED = Any()
         val TIMED_OUT = Any()
 

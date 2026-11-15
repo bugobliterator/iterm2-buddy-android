@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.currentTime
@@ -42,6 +43,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.random.Random
 import kotlin.time.Duration
@@ -66,6 +68,7 @@ class CompanionClientTest {
         val relay: FakeRelay = FakeRelay(ORIGIN),
         val store: PairingStore = InMemoryPairingStore(),
         timeouts: ClientTimeouts = ClientTimeouts(),
+        storeContext: CoroutineContext = EmptyCoroutineContext,
     ) {
         val logs = CopyOnWriteArrayList<String>()
         val history = CopyOnWriteArrayList<Pair<Long, ClientState>>()
@@ -78,7 +81,7 @@ class CompanionClientTest {
             timeouts,
             Random(SEED),
             test.testScheduler.timeSource,
-            EmptyCoroutineContext,
+            storeContext,
             { logs += it },
         )
         val mac = FakeMac(relay, code, macKeys.first, test.backgroundScope)
@@ -288,6 +291,9 @@ class CompanionClientTest {
         assertTrue(failed.rescanNeeded)
         assertTrue(failed.message, failed.message.contains("rejected"))
         assertNull(h.store.load())
+        advanceTimeBy(1.seconds)
+        assertTrue("the Mac advertises a new pid", h.mac.code.pairingID != code.pairingID)
+        assertTrue(h.relay.macParked(roomName(h.mac.code)))
         val attempts = h.relay.phoneAdmissions.size
         advanceTimeBy(10.minutes)
         assertEquals(attempts, h.relay.phoneAdmissions.size)
@@ -807,6 +813,220 @@ class CompanionClientTest {
         assertEquals(attempts, h.relay.phoneAdmissions.size)
     }
 
+    // Mac absence, not pairing time (review C1)
+
+    @Test
+    fun slowCodeEntryThenStoreFailureKeepsPairing() = runTest {
+        val store = FlakyStore(InMemoryPairingStore()).apply { failSavesAt = PairingStage.CONFIRMED; saveFailures = 1 }
+        val h = Harness(this, store = store)
+        h.mac.start()
+        h.client.pair(code)
+        h.await { it is ClientState.ShowCode }
+        h.mac.awaitingCode.first { it != null }
+
+        // The user takes 130 s to type the code; the Mac accepts and pins; the save then fails once.
+        advanceTimeBy(130.seconds)
+        h.mac.enterCode(accept = true)
+        h.awaitConnected()
+        assertEquals(PairingStage.REGISTERED, h.stage())
+        assertFalse(h.states.any { it is ClientState.Failed })
+        assertTrue(h.states.contains(ClientState.WaitingForMac(WaitReason.STORE_UNAVAILABLE)))
+    }
+
+    @Test
+    fun droppedWhileShowingCodeRecoversWithoutWipe() = runTest {
+        val h = Harness(this)
+        h.mac.start()
+        h.client.pair(code)
+        h.await { it is ClientState.ShowCode }
+        h.mac.awaitingCode.first { it != null }
+
+        // The phone's connection dies 125 s into code entry; the Mac dismisses the entry and re-parks.
+        advanceTimeBy(125.seconds)
+        h.relay.dropPhone(room)
+        h.await { it is ClientState.WaitingForMac || it is ClientState.Connecting }
+        val second = h.await { it is ClientState.ShowCode } as ClientState.ShowCode
+        assertEquals(PairingStage.PENDING_CONFIRMATION, h.stage())
+        assertEquals("a new handshake, a new code", second.code, h.mac.awaitingCode.first { it != null })
+
+        h.mac.enterCode(accept = true)
+        h.awaitConnected()
+        assertEquals(PairingStage.REGISTERED, h.stage())
+        assertFalse(h.states.any { it is ClientState.Failed })
+    }
+
+    @Test
+    fun pendingRecoveryAgainstMacPinnedToAnotherKeyGivesUp() = runTest {
+        val h = Harness(this)
+        h.stored(PairingStage.PENDING_CONFIRMATION)
+        h.mac.pinnedPhoneStatic = newStaticKeyPair().second
+        h.mac.start()
+        h.client.start()
+
+        val failed = h.await { it is ClientState.Failed } as ClientState.Failed
+        assertTrue(failed.rescanNeeded)
+        assertTrue("absent long enough: $currentTime", currentTime >= 120_000)
+        assertTrue("it kept trying meanwhile", h.mac.staticMismatches.get() >= 2)
+        assertNull(h.store.load())
+    }
+
+    @Test
+    fun sasCodeIsNeverLogged() = runTest {
+        val h = Harness(this)
+        h.mac.start()
+        h.client.pair(code)
+        val shown = h.await { it is ClientState.ShowCode } as ClientState.ShowCode
+        h.mac.enterCode(accept = true)
+        h.awaitConnected()
+        assertTrue(h.logs.any { it.contains("ShowCode") })
+        assertEquals(emptyList<String>(), h.logs.filter { it.contains(shown.code) })
+    }
+
+    // The Mac unpairs before step 7 (review I2)
+
+    @Test
+    fun macUnpairDuringHelloTearsDown() = runTest {
+        val h = Harness(this)
+        val record = h.stored(PairingStage.REGISTERED)
+        h.macPinned(record)
+        h.mac.answering = false
+        h.mac.start()
+        h.client.start()
+        withTimeout(1.minutes) { while (h.mac.received.isEmpty()) advanceTimeBy(10) }
+        val sentAt = currentTime
+
+        h.mac.sendUnpaired()
+        val failed = h.await { it is ClientState.Failed } as ClientState.Failed
+        assertEquals(ClientState.Failed("Unpaired on the Mac", rescanNeeded = true), failed)
+        assertTrue("at once, not after the rpc bound", currentTime - sentAt < 15_000)
+        assertNull(h.store.load())
+        val attempts = h.relay.phoneAdmissions.size
+        advanceTimeBy(10.minutes)
+        assertEquals(attempts, h.relay.phoneAdmissions.size)
+    }
+
+    @Test
+    fun roomSecretErrorDuringMacUnpairIsNotCounted() = runTest {
+        val h = Harness(this, timeouts = ClientTimeouts(roomSecretErrorLimit = 1))
+        val record = h.stored(PairingStage.CONFIRMED)
+        h.macPinned(record)
+        h.mac.unpairOnRoomSecret = true
+        h.mac.start()
+        h.client.start()
+
+        val failed = h.await { it is ClientState.Failed } as ClientState.Failed
+        assertEquals("the unpair wins over the error", ClientState.Failed("Unpaired on the Mac", rescanNeeded = true), failed)
+        assertNull(h.store.load())
+    }
+
+    // Teardown and races (review M2-M9)
+
+    @Test
+    fun cancelDuringConfirmedSaveKeepsPairing() = runTest {
+        val store = FlakyStore(InMemoryPairingStore())
+        val h = Harness(this, store = store, storeContext = StandardTestDispatcher(testScheduler, "store"))
+        store.afterSave = PairingStage.CONFIRMED to { h.client.cancel() }
+        h.mac.start()
+        h.client.pair(code)
+        h.await { it is ClientState.ShowCode }
+        h.mac.awaitingCode.first { it != null }
+
+        h.mac.enterCode(accept = true)
+        assertEquals(ClientState.Idle, h.await { it is ClientState.Idle || it is ClientState.Unpaired })
+        assertEquals("the Mac pinned it: never wiped", PairingStage.CONFIRMED, h.stage())
+    }
+
+    @Test
+    fun cancelDuringBeginFreshPairingLeavesNothing() = runTest {
+        val store = FlakyStore(InMemoryPairingStore())
+        val h = Harness(this, store = store, storeContext = StandardTestDispatcher(testScheduler, "store"))
+        store.afterSave = PairingStage.PENDING_CONFIRMATION to { h.client.cancel() }
+        h.client.pair(code)
+
+        assertEquals(ClientState.Unpaired, h.await { it is ClientState.Idle || it is ClientState.Unpaired })
+        assertNull("no orphan PENDING record", h.store.load())
+        advanceTimeBy(10.minutes)
+        assertNull(h.store.load())
+        assertTrue(h.relay.phoneAdmissions.isEmpty())
+    }
+
+    @Test
+    fun rapidControlCallsRunInOrder() = runTest {
+        val h = Harness(this, storeContext = StandardTestDispatcher(testScheduler, "store"))
+        h.mac.start()
+        h.client.pair(code)
+        h.client.pair(code)
+        h.client.cancel()
+
+        advanceTimeBy(10.minutes)
+        assertEquals(ClientState.Unpaired, h.client.state.value)
+        assertNull("the last call wins; no superseded pairing lands after it", h.store.load())
+        assertTrue(h.relay.phoneAdmissions.isEmpty())
+    }
+
+    @Test
+    fun cancelDuringShowCodeWipes() = runTest {
+        val h = Harness(this)
+        h.mac.start()
+        h.client.pair(code)
+        h.await { it is ClientState.ShowCode }
+
+        h.client.cancel()
+        assertEquals(ClientState.Unpaired, h.await { it !is ClientState.ShowCode })
+        assertNull(h.store.load())
+        val attempts = h.relay.phoneAdmissions.size
+        advanceTimeBy(10.minutes)
+        assertEquals(attempts, h.relay.phoneAdmissions.size)
+    }
+
+    @Test
+    fun cycleCapOnConfirmedPairingReconnects() = runTest {
+        val h = Harness(this)
+        val record = h.stored(PairingStage.CONFIRMED)
+        h.macPinned(record)
+        h.relay.phoneAdmissionOverrides += AdmissionResult.Closed(1000, "pairing cycle cap")
+        h.mac.start()
+        h.client.start()
+
+        h.awaitConnected()
+        assertFalse(h.states.any { it is ClientState.Failed })
+        assertEquals(PairingStage.REGISTERED, h.stage())
+    }
+
+    @Test
+    fun displacedCloseRacingFailedSendKeepsLongWait() = runTest {
+        val h = Harness(this)
+        val record = h.stored(PairingStage.REGISTERED)
+        h.macPinned(record)
+        h.mac.start()
+        h.client.start()
+        h.awaitConnected(1)
+
+        // The relay's "displaced" close and a send meet: the send fails first.
+        h.relay.closePhone(room, 1000, "displaced")
+        val failure = runCatching { h.client.request(PhoneMessage.Ping) }.exceptionOrNull()
+        assertTrue("$failure", failure is CompanionRequestException)
+        advanceTimeBy(59.seconds)
+        assertEquals("still waits 60 s", 1, h.relay.phoneAdmissions.size)
+        h.awaitConnected(2)
+    }
+
+    @Test
+    fun unsolicitedMessagesReachEvents() = runTest {
+        val h = Harness(this)
+        val record = h.stored(PairingStage.REGISTERED)
+        h.macPinned(record)
+        h.mac.start()
+        h.client.start()
+        h.awaitConnected()
+
+        val received = CopyOnWriteArrayList<MacMessage>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { h.client.events.collect { received += it } }
+        h.mac.sendRaw("""{"payload":{"futureThing":{"x":1}}}""".toByteArray())
+        runCurrent()
+        assertEquals(listOf("futureThing"), received.map { (it as MacMessage.Unsupported).case })
+    }
+
     /** A store whose loads, or saves at one stage, fail as a busy Keystore does. */
     private class FlakyStore(private val delegate: PairingStore) : PairingStore {
         @Volatile var loadFailures = 0
@@ -814,6 +1034,9 @@ class CompanionClientTest {
         @Volatile var saveFailures = 0
 
         @Volatile var failSavesAt: PairingStage? = null
+
+        /** Runs after a save of this stage lands, as if the user acted in that instant. */
+        @Volatile var afterSave: Pair<PairingStage, () -> Unit>? = null
 
         override fun load(): PairingRecord? {
             if (loadFailures > 0) {
@@ -829,6 +1052,10 @@ class CompanionClientTest {
                 throw PairingStoreUnavailableException("keystore busy")
             }
             delegate.save(record)
+            afterSave?.takeIf { it.first == record.stage }?.let {
+                afterSave = null
+                it.second()
+            }
         }
 
         override fun clear() = delegate.clear()
