@@ -69,6 +69,11 @@ val unitTestForks = providers.gradleProperty("testForks").map(String::toInt)
 tasks.withType<Test>().configureEach {
     maxParallelForks = unitTestForks.get()
     systemProperty("fixtures.dir", rootProject.file("fixtures").path)
+    // RelayEndToEndTest runs only when scripts/relay-it.sh points RELAY_DIR at a relay checkout.
+    providers.environmentVariable("RELAY_DIR").orNull?.let { relayDir ->
+        environment("RELAY_DIR", relayDir)
+        inputs.property("relayDir", relayDir)
+    }
     // Only the committed fixtures; fixtures/harness holds the Swift generator and its build output.
     inputs.files(rootProject.fileTree("fixtures") { exclude("harness/**") })
         .withPathSensitivity(PathSensitivity.RELATIVE)
