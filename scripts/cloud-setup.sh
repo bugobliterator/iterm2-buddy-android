@@ -16,9 +16,9 @@ JDK_PARENT_DIR="${JDK_PARENT_DIR:-$HOME/jdk}"
 JDK_DIR="$JDK_PARENT_DIR/java-17-openjdk-amd64"
 
 # Keep in step with app/build.gradle.kts.
-SDK_PLATFORM="android-36"
-SDK_BUILD_TOOLS="35.0.1"
-CMDLINE_TOOLS_ZIP="commandlinetools-linux-13114758_latest.zip"
+SDK_PLATFORM="android-37.0"
+SDK_BUILD_TOOLS="37.0.0"
+CMDLINE_TOOLS_ZIP="commandlinetools-linux-16111833_latest.zip"
 FALLBACK_IMAGE="cimg/android:2025.10"
 FALLBACK_SDK_DIR="/home/circleci/android-sdk"
 FALLBACK_JDK_DIR="/usr/lib/jvm/java-17-openjdk-amd64"
