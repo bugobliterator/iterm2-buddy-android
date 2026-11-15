@@ -15,12 +15,13 @@ private const val JOIN_PROTOCOL_VERSION: Byte = 0x01
 private const val JOIN_DOMAIN = "iterm2-relay-join"
 private val JOIN_KEY_INFO = "relay-auth-ed25519".toByteArray(Charsets.UTF_8)
 private const val SEED_BYTES = 32
+private const val ROOM_SECRET_BYTES = 32
 
 /**
  * The bytes a join signs, as upstream `RelayJoin.transcript`:
  * canonical("iterm2-relay-join", [version, role, nonce, roomName, origin]).
  */
-fun joinTranscript(role: JoinRole, nonce: ByteArray, roomName: String, origin: String): ByteArray =
+internal fun joinTranscript(role: JoinRole, nonce: ByteArray, roomName: String, origin: String): ByteArray =
     canonical(
         JOIN_DOMAIN,
         listOf(
@@ -35,12 +36,22 @@ fun joinTranscript(role: JoinRole, nonce: ByteArray, roomName: String, origin: S
 /**
  * Signs relay room joins with the Ed25519 key both devices derive from the room secret:
  * seed = HKDF-SHA256(roomSecret, salt = empty, info = "relay-auth-ed25519", 32).
- * Signatures are deterministic RFC 8032, so they equal upstream's byte for byte.
+ *
+ * Signing is deterministic RFC 8032; it matches the Linux-generated fixtures. The Mac's
+ * CryptoKit randomises its signatures, and the relay only verifies, so the two need not be
+ * byte-equal on a Mac.
+ *
+ * The local seed buffer is zeroed after use, but BouncyCastle keeps its own copy of the seed
+ * inside the private key for this signer's lifetime. Hold one JoinSigner per connection and
+ * drop it afterwards.
+ *
+ * @param roomSecret the 32-byte phone-minted room secret.
  */
 class JoinSigner(roomSecret: ByteArray, private val role: JoinRole = JoinRole.PHONE) {
     private val signingKey: Ed25519PrivateKeyParameters
 
     init {
+        require(roomSecret.size == ROOM_SECRET_BYTES) { "roomSecret must be 32 bytes" }
         val seed = ByteArray(SEED_BYTES)
         HKDFBytesGenerator(SHA256Digest()).run {
             init(HKDFParameters(roomSecret, null, JOIN_KEY_INFO))

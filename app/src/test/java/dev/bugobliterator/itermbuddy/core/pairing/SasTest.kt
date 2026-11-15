@@ -7,6 +7,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -34,6 +35,16 @@ class SasTest {
     fun sasKeepsLeadingZeros() {
         val (label, entry) = vectors.single { (_, entry) -> entry.string("name") == "leadingZeros" }
         assertEquals(label, "000012", sasCode(hex(entry.string("handshakeHash"))))
+    }
+
+    @Test
+    fun handshakeHashMustBeThirtyTwoBytes() {
+        for (size in listOf(0, 31, 33, 64)) {
+            val error = assertThrows("handshakeHash of $size bytes", IllegalArgumentException::class.java) {
+                sasCode(ByteArray(size))
+            }
+            assertEquals("handshakeHash of $size bytes", "handshakeHash must be 32 bytes", error.message)
+        }
     }
 
     private fun hex(text: String): ByteArray {
