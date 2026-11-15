@@ -239,7 +239,29 @@ let pairingCodeInputs: [(name: String, qr: String)] = [
     ("relayWithPath", directQR(extra: "&relay=https://relay.example.com/room")),
     ("relayWithUserinfo", directQR(extra: "&relay=https://user@relay.example.com")),
     ("wrongScheme", "https://pair?v=1&proto=\(protocolName)&rs=\(base64URL(macStaticKey))&pid=\(pairingID)"),
-    ("wrongHost", "iterm2://pairing?v=1&proto=\(protocolName)&rs=\(base64URL(macStaticKey))&pid=\(pairingID)")
+    ("wrongHost", "iterm2://pairing?v=1&proto=\(protocolName)&rs=\(base64URL(macStaticKey))&pid=\(pairingID)"),
+    // Relay origin edge forms. Their results are swift-corelibs-foundation's on
+    // Linux; Darwin Foundation may differ on the exotic hosts.
+    ("relayEmptyPort", directQR(extra: "&relay=https://h:")),
+    ("relayLeadingZeroPort", directQR(extra: "&relay=https://h:0443")),
+    ("relayIPv6Literal", directQR(extra: "&relay=https://[::1]:8443")),
+    ("relayPortOutOfRange", directQR(extra: "&relay=https://h:65536")),
+    ("relayEmptyFragment", directQR(extra: "&relay=https://h%23")),
+    ("relayEmptyQuery", directQR(extra: "&relay=https://h%3F")),
+    ("relayUnderscoreHost", directQR(extra: "&relay=https://my_relay.lan")),
+    ("relayEmptyLabelHost", directQR(extra: "&relay=https://h..com")),
+    ("relayLeadingHyphenHost", directQR(extra: "&relay=https://-h.com")),
+    ("relayPercentEncodedHost", directQR(extra: "&relay=https://relay%252Eexample.com")),
+    ("relayEmptyUserinfo", directQR(extra: "&relay=https://@h")),
+    ("unrelatedInvalidUTF8Item", directQR(extra: "&relay=\(exampleRelay)&x=%FF")),
+    ("relayInvalidUTF8", directQR(extra: "&relay=%FF")),
+    // Two faults: the result names the one upstream checks first.
+    ("wrongProtocolAndInvalidKey", directQR(rs: "not*base64", proto: "Noise_XK_25519_ChaChaPoly_SHA256",
+                                            extra: "&relay=\(exampleRelay)")),
+    ("missingPairingIDAndInvalidRelay", directQR(pid: nil, extra: "&relay=http://relay.example.com")),
+    // The last base64url character carries two unused bits; here they are not zero.
+    ("nonZeroTrailingBitsKey", directQR(rs: String(base64URL(macStaticKey).dropLast()) + "d",
+                                        extra: "&relay=\(exampleRelay)"))
 ]
 let pairingCodes = pairingCodeInputs.map { input -> PairingCodeVector in
     let result = Result { try PairingCode.parse(input.qr) }

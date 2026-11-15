@@ -58,6 +58,12 @@ docker run --rm -v "$PWD/fixtures/harness:/harness" -w /harness swift:6.2-noble 
   (upstream keeps a literal `+`), so Android parses the raw query with its own
   `&`/`=` splitter plus percent-decoding, never `Uri.getQueryParameter` or
   `URLDecoder`.
+  The relay-origin edge entries (`relayEmptyPort` through `relayInvalidUTF8`:
+  empty or leading-zero ports, an IPv6 literal, an out-of-range port,
+  underscores, empty labels, leading hyphens, a percent-encoded host, an empty
+  query, fragment or userinfo, invalid UTF-8) record what swift-corelibs
+  Foundation on Linux does. Darwin Foundation may differ on the exotic hosts;
+  the Mac never renders those, so only the common forms must agree there.
 - `messages/session/*.json` (generated): session envelopes from v3.7.7, each
   `{"direction", "swiftValue", "json"}`. `json` is the envelope as upstream
   `WireCoding` encodes it, built the way the real flow builds it (iOS
