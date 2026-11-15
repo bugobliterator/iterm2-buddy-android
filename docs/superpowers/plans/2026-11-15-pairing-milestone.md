@@ -34,7 +34,7 @@
 1. **Origin spelling.** A QR whose `relay=` has an explicit `:443`, a trailing `/`, or a mixed-case host must canonicalise exactly as upstream: keep the port, keep case, drop a bare `/`. A wrong form connects and then fails every signed join with "bad signature". Three such rejections in a row end in a visible failure, never a silent retry loop. Pinned in *Pairing Code and Room Name* and *Companion Client*.
 2. **Mac not there.** There are two cases: iTerm2 closed (the relay answers `mac offline`), and Mac asleep (the relay runs on the Mac, so the connection or DNS lookup fails). For a stored pairing, both show "Waiting for your Mac" and retry with backoff. For a fresh pairing they retry for up to 120 s; iTerm2 replaces an idle QR after 120 s (`CompanionPairingController.swift:262, 799-823`). After that the phone shows **Scan again**. Every waiting screen has Cancel. Pinned in *Companion Client*.
 3. **Code rejected or never typed.** The Mac sends `{"pairing":"rejected"}`, or 180 s pass with no confirmation. The phone says so, wipes the half-made pairing and offers to scan again. Pinned in *Companion Client*.
-4. **App killed mid-pairing.** Android can kill the process after the Mac accepts the code but before registration. The phone must still reconnect, because the Mac already pinned it (`CompanionPairingController.swift:1511-1531`). That holds even if the kill lands between the Mac's "accepted" and the phone saving it. Pending credentials are recovered, not wiped, unless the Mac is gone or still asking for the code. Re-scanning replaces every old secret. Pinned in *Pairing Store* and *Companion Client*.
+4. **App killed mid-pairing.** Android can kill the process after the Mac accepts the code but before registration. The phone must still reconnect, because the Mac already pinned it (`CompanionPairingController.swift:1511-1531`). That holds even if the kill lands between the Mac's "accepted" and the phone saving it. Pending credentials are recovered, not wiped, unless the Mac is gone, or still holding the old code dialog and so not parked. Re-scanning replaces every old secret. Pinned in *Pairing Store* and *Companion Client*.
 5. **Relay lost its state.** The relay's database can be deleted, re-cloned or reaped after 30 idle days. With attestation off, the relay then admits signed joins in open mode and never says "ticket required" (`room.js:410-458`). The phone re-registers on every connect, so the room is locked again on the next connect. The test for this case is `relayLostVerifierIsRelocked`, pinned in *Companion Client*.
 
 ---
@@ -344,10 +344,15 @@ Flow (*notes* → Relay admission, Noise, After pairing):
    - `badSignatureLimit` "bad signature" rejections in a row → `Failed("The relay refused this phone's signature. Check the relay address matches iTerm2's companionRelayOrigin.", rescanNeeded=true)`.
 2. **Noise handshake.** The timeout is `handshakeFresh` or `handshakeReconnect`.
 3. **Fresh only: confirmation.** Show `ShowCode(sasCode(h))` and wait up to `confirmation` for it. On "accepted", **save `CONFIRMED` immediately**: the Mac has now pinned this phone. On rejection or timeout, clear the store and go to `Failed(rescanNeeded=true)`.
-3a. **Pending recovery** (`start()` on a `PENDING_CONFIRMATION` record). The Mac may have sent "accepted" and pinned this phone (`CompanionPairingController.swift:1472-1473, 1516-1531`) before Android saved `CONFIRMED`. A Mac still in SAS mode stays silent until the code is typed (`:1470-1473`), so silence alone proves nothing. Admit fresh, do the handshake with the stored static key, and send `hello` at once:
-   - **`HelloReply` within `rpc`:** the Mac pinned this identity. Save `CONFIRMED` and continue from step 5.
-   - **No reply within `rpc`:** the Mac is waiting for the code. Show `ShowCode(sasCode(h))` for this handshake and continue as step 3, waiting up to `confirmation` for the verdict. The pending `hello` stays outstanding: a reply arriving after "accepted" is taken as the step-4 reply.
-   - **`mac offline` or unreachable past `freshMacWait`:** clear the store and go to `Failed(rescanNeeded=true)`.
+3a. **Pending recovery** (`start()` on a `PENDING_CONFIRMATION` record). The Mac may have sent "accepted" and pinned this phone (`CompanionPairingController.swift:1472-1473, 1516-1531`) before Android saved `CONFIRMED`. In both possible Mac states it sends nothing first:
+   - a pinned Mac re-parks, handshakes, checks the pinned key and waits for `hello` (`CompanionParkSupervisor.swift:431-437`);
+   - a Mac in SAS mode waits for the code to be typed (`:1034-1053, 1470-1473`).
+
+   So after a fresh admit and the handshake with the stored static key, do both at once: show `ShowCode(sasCode(h))` **and** send `hello`. The plugin queues frames that arrive before the Mac reads them (`iTermCompanionPlugin.js:52-53, 68-69`), so an early `hello` is answered once the link starts. Then wait up to `confirmation` (an exception to the step 4–5 `rpc` rule) for the first Mac frame:
+   - **`HelloReply`:** the Mac had pinned this identity. Dismiss the code, save `CONFIRMED`, and continue from step 5.
+   - **Confirmation "accepted":** the Mac was in SAS mode. Save `CONFIRMED`; the queued `hello`'s reply that follows completes step 4.
+   - **Confirmation "rejected", or the `confirmation` timeout:** wipe, as in step 3.
+   - **`mac offline` or unreachable past `freshMacWait`** (for example, the Mac is still holding the old code dialog and so isn't parked): clear the store and go to `Failed(rescanNeeded=true)`.
 
    Pending credentials are only discarded on an explicit rejection, a timeout with the Mac present, or that deadline.
 4. **`hello` request.** If our revision < the Mac's `minimumPeer`, fail "Update the app". If the Mac's revision < `MINIMUM_PEER`, fail "Update iTerm2".
@@ -367,8 +372,8 @@ Flow (*notes* → Relay admission, Noise, After pairing):
     - `cancelDuringFreshWaitWipes`, `cancelDuringStoredWaitKeepsPairing`.
   - Confirmation: `rejectedCodeWipesStoreAndAsksRescan`, `confirmationTimeoutWipesStore`.
   - Process death:
-    - `killAfterMacAcceptBeforeCheckpointRecovers`: the FakeMac has accepted and pinned, and the store is still `PENDING_CONFIRMATION`. start() recovers with the same static key, saves `CONFIRMED` and reaches `Connected` with no `ShowCode`.
-    - `pendingRecoveryWhileMacStillInSasShowsCode`: the FakeMac is still in SAS mode and silent until simulated code entry. start() shows the code after `rpc`, then reaches `Connected` once the FakeMac accepts. The late `hello` reply completes step 4.
+    - `killAfterMacAcceptBeforeCheckpointRecovers`: the FakeMac has accepted and pinned, and the store is still `PENDING_CONFIRMATION`. start() recovers with the same static key, replaces `ShowCode` within the `hello` round trip, saves `CONFIRMED` and reaches `Connected`.
+    - `pendingRecoveryWhileMacStillInSasShowsCode`: the FakeMac is still in SAS mode and silent until simulated code entry. start() shows the code at once. After `fakeMac.enterCode(accept = true)` it reaches `Connected`, with the queued `hello` answered after the verdict.
     - `pendingRecoveryWithMacGoneClears`: `mac offline` past `freshMacWait` clears the store.
     - `killAfterConfirmationReconnectsWithoutCode`: start() on `CONFIRMED` connects fresh with no `ShowCode`, registers, and reaches `REGISTERED`.
     - `lostRegisterResponseSelfHeals`: the server registered but the phone stayed `CONFIRMED`. The fresh admit gets "signature required", the phone retries signed and reaches `Connected`.
