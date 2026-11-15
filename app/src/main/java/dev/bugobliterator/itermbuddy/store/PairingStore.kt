@@ -81,9 +81,12 @@ class PairingStoreUnavailableException(message: String, cause: Throwable? = null
 
 /**
  * [advancePairing] was called by a flow that is behind the store: the pairing it holds was
- * cleared or replaced, or another flow already moved it past the requested stage.
+ * cleared, replaced or wiped as bad data, or another flow already moved it past the requested
+ * stage.
  *
- * Client contract: abort that flow. The stored pairing, if any, is intact and is not lost.
+ * Client contract: abort this flow; call [PairingStore.load] to see what is stored now. That may
+ * be a later stage of the same pairing, a newer pairing, or nothing (then show Scan again):
+ * a proof-based wipe inside the load that [advancePairing] does can precede this exception.
  */
 class StalePairingFlowException(message: String) : IllegalStateException(message)
 
@@ -99,8 +102,8 @@ class StalePairingFlowException(message: String) : IllegalStateException(message
  *   at the same or the next stage. A new pairing therefore always goes through [clear].
  *   A disallowed save throws [IllegalStateException] and changes nothing.
  * - [load] returns null when nothing is stored, or when there is proof that what is stored is
- *   bad (it then clears the store). Any other failure throws [PairingStoreUnavailableException]
- *   and leaves everything in place.
+ *   bad (it then clears the store). It throws only [PairingStoreUnavailableException]: on any
+ *   other failure, and when the clearing of proof-bad data cannot finish; the next load retries.
  * - Every method runs under [withLock], whose lock covers every instance over the same storage,
  *   so [beginFreshPairing] and [advancePairing] are atomic however many instances exist.
  */
@@ -202,8 +205,9 @@ fun beginFreshPairing(store: PairingStore, code: PairingCode): PairingRecord = s
  * synchronous commit (see [PairingStore.save]).
  *
  * - [expected] is the record the caller is working on. If the store no longer holds that pairing
- *   (cleared or re-scanned), or already holds it at a later stage, this throws
- *   [StalePairingFlowException]: the caller aborts its flow; nothing is changed or lost.
+ *   (cleared, re-scanned or wiped as bad data), or already holds it at a later stage, this throws
+ *   [StalePairingFlowException]: the caller aborts this flow and calls [PairingStore.load] to see
+ *   what is stored now.
  * - [to] equal to the stored stage is a no-op with no write.
  * - Skipping a stage is a programming error and throws [IllegalStateException].
  */

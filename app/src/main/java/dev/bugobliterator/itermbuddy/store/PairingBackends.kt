@@ -6,7 +6,8 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import androidx.core.content.edit
 import java.security.KeyStore
-import java.security.ProviderException
+import android.security.keystore.BackendBusyException
+import android.security.keystore.StrongBoxUnavailableException
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 
@@ -102,23 +103,19 @@ internal class SharedPrefsBlobFile(context: Context) : PairingBlobFile {
  * the screen locked. The trade-off: on a live rooted or compromised device, code running as this
  * app can use the key; the key is non-exportable, so a copied blob or an offline image is useless.
  *
- * Keys are made in StrongBox (the Pixel's Titan M2) when possible, else in the TEE: generation
- * falls back on any [ProviderException], which covers `StrongBoxUnavailableException` (no
- * StrongBox) and a busy or unreachable StrongBox. StrongBox is slower per operation, but this
- * store does a handful of small operations per connect, and the key then never leaves the secure
- * element.
+ * Keys are made in StrongBox (the Pixel's Titan M2), or in the TEE only on a device without one
+ * (see [generatePreferringStrongBox]). A busy StrongBox is retried once; any other generation
+ * failure surfaces as [PairingStoreUnavailableException] from the store, and after
+ * [beginFreshPairing]'s clear that means no pairing is left and the client shows Scan again.
+ * StrongBox is slower per operation, but this store does a handful of small operations per
+ * connect, and the key then never leaves the secure element.
  */
 internal class AndroidKeyVault : PairingKeyVault {
     private fun keyStore(): KeyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
 
     override fun find(alias: String): SecretKey? = keyStore().getKey(alias, null) as? SecretKey
 
-    override fun create(alias: String): SecretKey =
-        try {
-            generate(alias, strongBox = true)
-        } catch (_: ProviderException) {
-            generate(alias, strongBox = false)
-        }
+    override fun create(alias: String): SecretKey = generatePreferringStrongBox({ generate(alias, it) })
 
     override fun delete(alias: String) = keyStore().deleteEntry(alias)
 
@@ -141,5 +138,34 @@ internal class AndroidKeyVault : PairingKeyVault {
     companion object {
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val KEY_BITS = 256
+    }
+}
+
+/** The longest a key generation waits on a [BackendBusyException]'s back-off hint. */
+internal const val MAX_KEY_GENERATION_BACKOFF_MILLIS = 500L
+
+/**
+ * Makes a key in StrongBox, falling back to the TEE only when the device has no StrongBox
+ * ([StrongBoxUnavailableException]). A [BackendBusyException] is retried once, on the same
+ * security level, after its back-off hint (clamped to 0..[MAX_KEY_GENERATION_BACKOFF_MILLIS]).
+ * Every other failure, and a second busy, is thrown: a busy or unreachable StrongBox never
+ * silently downgrades a pairing key to the TEE.
+ */
+internal fun generatePreferringStrongBox(
+    generate: (strongBox: Boolean) -> SecretKey,
+    sleep: (Long) -> Unit = Thread::sleep,
+    backOffHint: (BackendBusyException) -> Long = { it.backOffHintMillis },
+): SecretKey {
+    fun attempt(strongBox: Boolean): SecretKey =
+        try {
+            generate(strongBox)
+        } catch (e: BackendBusyException) {
+            sleep(backOffHint(e).coerceIn(0L, MAX_KEY_GENERATION_BACKOFF_MILLIS))
+            generate(strongBox)
+        }
+    return try {
+        attempt(strongBox = true)
+    } catch (_: StrongBoxUnavailableException) {
+        attempt(strongBox = false)
     }
 }

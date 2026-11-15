@@ -38,9 +38,19 @@ import javax.crypto.SecretKey
  * KeyStoreConnectException), UserNotAuthenticatedException (how a locked or uninitialised
  * StrongBox surfaces), a Keystore system or transient error, and anything unknown, throws
  * [PairingStoreUnavailableException] and leaves the blob and the key untouched.
- * Known gap: AndroidKeyStore turns KEY_PERMANENTLY_INVALIDATED from `getKey` into an
- * [UnrecoverableKeyException] with no cause, which is classed as unavailable. That cannot happen
- * to these keys, which are not bound to user authentication; and Scan again always works.
+ * [load] throws nothing else: a clear that a proof-based wipe cannot finish is unavailable too.
+ *
+ * Retry forever, by design. Some permanent failures cannot be told apart from passing ones and
+ * are therefore classed unavailable, so [load] keeps throwing on every connect:
+ * - AndroidKeyStore turns KEY_PERMANENTLY_INVALIDATED from `getKey` into an
+ *   [UnrecoverableKeyException] with no cause. That cannot happen to these keys, which are not
+ *   bound to user authentication.
+ * - A permanently dead key: KM_ERROR_INVALID_KEY_BLOB at `Cipher.init` (KeyMint can no longer
+ *   unwrap the key, say after a secure-element firmware change) arrives as a general KeyMint
+ *   error, and key metadata without an algorithm as `UnrecoverableKeyException("Key algorithm
+ *   unknown")` with no cause. The same codes also occur transiently, so they are not proof.
+ * The user leaves that state through Scan again or Cancel, which every waiting screen offers;
+ * wiping on such ambiguous errors would instead lose working pairings to passing faults.
  *
  * Every method holds one process-wide lock, so any number of instances is safe.
  */
@@ -56,7 +66,16 @@ class KeystorePairingStore internal constructor(
 
     override fun <T> withLock(block: () -> T): T = synchronized(LOCK) { block() }
 
-    override fun load(): PairingRecord? = withLock { readCurrent()?.record }
+    /** Throws only [PairingStoreUnavailableException]. */
+    override fun load(): PairingRecord? = withLock {
+        try {
+            readCurrent()?.record
+        } catch (e: PairingStoreUnavailableException) {
+            throw e
+        } catch (e: Exception) {
+            throw PairingStoreUnavailableException("the pairing store is unavailable", e)
+        }
+    }
 
     /**
      * Throws [IllegalStateException] for a disallowed stage change, [PairingStoreUnavailableException]
@@ -131,8 +150,15 @@ class KeystorePairingStore internal constructor(
         throw PairingStoreUnavailableException("the pairing store is unavailable", e)
     }
 
+    /** Clears proof-bad data; a clear that cannot finish is a passing failure, retried on the next load. */
     private fun wipe(): Current? {
-        clear()
+        try {
+            clear()
+        } catch (e: PairingStoreUnavailableException) {
+            throw e
+        } catch (e: IOException) {
+            throw PairingStoreUnavailableException("could not clear bad pairing data", e)
+        }
         return null
     }
 
@@ -178,13 +204,17 @@ class KeystorePairingStore internal constructor(
                 else -> false
             }
 
-        /** Runs a Keystore step, turning its failure into [PairingStoreUnavailableException]. */
+        /**
+         * Runs a Keystore step, turning its failure into [PairingStoreUnavailableException]. That
+         * includes any [RuntimeException]: while keystore2 restarts, `getService` throws
+         * NullPointerException, and [ProviderException] is one too.
+         */
         private inline fun <T> keystore(what: String, block: () -> T): T =
             try {
                 block()
             } catch (e: GeneralSecurityException) {
                 throw PairingStoreUnavailableException("could not $what", e)
-            } catch (e: ProviderException) {
+            } catch (e: RuntimeException) {
                 throw PairingStoreUnavailableException("could not $what", e)
             }
     }
