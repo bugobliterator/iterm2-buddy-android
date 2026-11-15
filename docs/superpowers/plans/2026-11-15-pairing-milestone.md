@@ -66,7 +66,7 @@ Locations:
 
 - [ ] **Step: Preflight.** `lsof -iTCP:8787 -sTCP:LISTEN` should be empty; otherwise pick a free port and use it everywhere. `tailscale status --json | jq .CertDomains` should list `siddharths-macbook-pro.tailnet-99bb.ts.net`. `node -v` should be ≥ 20.
 - [ ] **Step: Install with the native build allowed.** pnpm 11 (11.3.0 on the Mac) refuses unlisted dependency builds (`strictDepBuilds`), and `better-sqlite3` needs its build to fetch the native binary. `install-relay.sh` writes `pnpm-workspace.yaml` in the checkout containing `allowBuilds:` / `  better-sqlite3: true`, which is valid on pnpm ≥ 10.26 and 11. It then runs `pnpm install --prod`; `pnpm install` has no `--allow-build` flag, and `onlyBuiltDependencies` was removed in pnpm 11. Then `node -e "require('better-sqlite3')"` must exit 0.
-- [ ] **Step: Run the relay's own tests.** Run `pnpm install && pnpm test` (with the same `pnpm-workspace.yaml`) in a throwaway copy of the checkout. Expected: all pass on Node 24. If any fail only on 24, install Node 20 via nvm and use its absolute path in the plist.
+- [ ] **Step: Run the relay's own tests.** In a throwaway copy of the checkout, write `pnpm-workspace.yaml` with `allowBuilds` set to true for `better-sqlite3`, `esbuild` and `fsevents`, since the dev dependencies (Vitest/Vite) bring build scripts too. Then run `pnpm install && pnpm test`. Expected: all pass on Node 24. If any fail only on 24, install Node 20 via nvm and use its absolute path in the plist. Production installs list only `better-sqlite3`.
 - [ ] **Step: Run `ops/mac/install-relay.sh`.** Expected log line: `relay: listening on 127.0.0.1:8787 (db=…, mode=direct, attest=false)`.
 - [ ] **Step: Publish on the tailnet.** Run `tailscale serve --bg --https=443 http://127.0.0.1:8787`. `tailscale serve status` should show the mapping and `tailscale funnel status` nothing.
 - [ ] **Step: Probe admission.** Run `node ops/mac/check-relay.mjs https://siddharths-macbook-pro.tailnet-99bb.ts.net`. It loads `ws` with `createRequire(<checkout>/package.json)`, because Node's global `WebSocket` cannot set `x-relay-room`. It sends `x-relay-room` set to 64 random hex characters, then `{"v":1,"role":"phone"}`, receives `{"nonce":…}`, sends `{}`, and expects `{"ok":false,"error":"mac offline"}`. It exits 0 on that, non-zero otherwise.
@@ -332,7 +332,7 @@ The connect flow, owned later by the foreground service. No UI in this task.
   - `suspend fun request(message: PhoneMessage): MacMessage`, `fun notify(message: PhoneMessage)` (fire-and-forget), `val events: SharedFlow<MacMessage>` for unsolicited messages.
 - Produces: `class FakeMac(endpoints: RelayEndpoints, code: PairingCode, macStaticPrivate: ByteArray)` in test sources.
   - Before it has a room secret, it admits as `{"v":1,"role":"mac"}` with proof `{}`. After `relayRoomSecret` it keeps the secret and signs with `JoinSigner(secret, JoinRole.MAC)`.
-  - It runs the Noise responder and sends the bare confirmation, accepted or rejected, after a configurable delay. On reconnects it sends no confirmation.
+  - It runs the Noise responder and stays silent until a simulated code entry (`fakeMac.enterCode(accept: Boolean)`), then sends the bare confirmation, accepted or rejected, as the real Mac does. On reconnects it sends no confirmation.
   - It answers `hello`, `relayRoomSecret` and `ping`, records `unpairing`, can send `unpaired`, and can drop its socket.
 
 Flow (*notes* → Relay admission, Noise, After pairing):
@@ -344,9 +344,9 @@ Flow (*notes* → Relay admission, Noise, After pairing):
    - `badSignatureLimit` "bad signature" rejections in a row → `Failed("The relay refused this phone's signature. Check the relay address matches iTerm2's companionRelayOrigin.", rescanNeeded=true)`.
 2. **Noise handshake.** The timeout is `handshakeFresh` or `handshakeReconnect`.
 3. **Fresh only: confirmation.** Show `ShowCode(sasCode(h))` and wait up to `confirmation` for it. On "accepted", **save `CONFIRMED` immediately**: the Mac has now pinned this phone. On rejection or timeout, clear the store and go to `Failed(rescanNeeded=true)`.
-3a. **Pending recovery** (`start()` on a `PENDING_CONFIRMATION` record). The Mac may have sent "accepted" and pinned this phone (`CompanionPairingController.swift:1472-1473, 1516-1531`) before Android saved `CONFIRMED`. Admit fresh and do the handshake with the stored static key, then wait up to `rpc` for the first frame:
-   - **A pairing confirmation:** the Mac is still in SAS mode. Continue as a fresh pairing from step 3 (`ShowCode` with the new hash).
-   - **Nothing:** the Mac treats this as a reconnect, so send `hello`. If a `HelloReply` arrives, the Mac has pinned this identity: save `CONFIRMED` and continue from step 4.
+3a. **Pending recovery** (`start()` on a `PENDING_CONFIRMATION` record). The Mac may have sent "accepted" and pinned this phone (`CompanionPairingController.swift:1472-1473, 1516-1531`) before Android saved `CONFIRMED`. A Mac still in SAS mode stays silent until the code is typed (`:1470-1473`), so silence alone proves nothing. Admit fresh, do the handshake with the stored static key, and send `hello` at once:
+   - **`HelloReply` within `rpc`:** the Mac pinned this identity. Save `CONFIRMED` and continue from step 5.
+   - **No reply within `rpc`:** the Mac is waiting for the code. Show `ShowCode(sasCode(h))` for this handshake and continue as step 3, waiting up to `confirmation` for the verdict. The pending `hello` stays outstanding: a reply arriving after "accepted" is taken as the step-4 reply.
    - **`mac offline` or unreachable past `freshMacWait`:** clear the store and go to `Failed(rescanNeeded=true)`.
 
    Pending credentials are only discarded on an explicit rejection, a timeout with the Mac present, or that deadline.
@@ -368,7 +368,7 @@ Flow (*notes* → Relay admission, Noise, After pairing):
   - Confirmation: `rejectedCodeWipesStoreAndAsksRescan`, `confirmationTimeoutWipesStore`.
   - Process death:
     - `killAfterMacAcceptBeforeCheckpointRecovers`: the FakeMac has accepted and pinned, and the store is still `PENDING_CONFIRMATION`. start() recovers with the same static key, saves `CONFIRMED` and reaches `Connected` with no `ShowCode`.
-    - `pendingRecoveryWhileMacStillInSasShowsCode`: the FakeMac is still in SAS mode, and start() shows a code again.
+    - `pendingRecoveryWhileMacStillInSasShowsCode`: the FakeMac is still in SAS mode and silent until simulated code entry. start() shows the code after `rpc`, then reaches `Connected` once the FakeMac accepts. The late `hello` reply completes step 4.
     - `pendingRecoveryWithMacGoneClears`: `mac offline` past `freshMacWait` clears the store.
     - `killAfterConfirmationReconnectsWithoutCode`: start() on `CONFIRMED` connects fresh with no `ShowCode`, registers, and reaches `REGISTERED`.
     - `lostRegisterResponseSelfHeals`: the server registered but the phone stayed `CONFIRMED`. The fresh admit gets "signature required", the phone retries signed and reaches `Connected`.
