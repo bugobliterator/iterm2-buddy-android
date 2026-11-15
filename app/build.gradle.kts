@@ -14,7 +14,9 @@ android {
         minSdk = 34
         targetSdk = 37
         // CI passes -PciVersionCode / -PciVersionName; Firebase App Distribution shows them.
-        versionCode = providers.gradleProperty("ciVersionCode").orNull?.toInt() ?: 1
+        versionCode = providers.gradleProperty("ciVersionCode").orNull?.let {
+            it.toIntOrNull() ?: throw GradleException("ciVersionCode must be an integer, got '$it'")
+        } ?: 1
         versionName = providers.gradleProperty("ciVersionName").orNull ?: "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

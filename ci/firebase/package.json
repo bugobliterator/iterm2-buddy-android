@@ -1,0 +1,8 @@
+{
+  "name": "itermbuddy-ci-firebase",
+  "private": true,
+  "description": "Pinned Firebase CLI for the Android build workflow's App Distribution upload.",
+  "dependencies": {
+    "firebase-tools": "15.36.0"
+  }
+}
