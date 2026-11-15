@@ -17,4 +17,13 @@ object Fixtures {
         check(file.isFile) { "No fixture at $file" }
         return file.readText(Charsets.UTF_8)
     }
+
+    /** Returns the paths, relative to `fixtures/`, of the `.json` files in [dir], sorted by name. */
+    fun list(dir: String): List<String> {
+        val directory = fixturesDir.resolve(dir)
+        check(directory.isDirectory) { "No fixture directory at $directory" }
+        return directory.listFiles { file -> file.isFile && file.name.endsWith(".json") }!!
+            .map { "$dir/${it.name}" }
+            .sorted()
+    }
 }
