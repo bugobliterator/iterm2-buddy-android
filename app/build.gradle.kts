@@ -42,6 +42,8 @@ dependencies {
     implementation(libs.noise.java)
     // JSON tree API (JsonObject) for the wire envelope; no serialization compiler plugin.
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.okhttp)
+    implementation(libs.kotlinx.coroutines.core)
     constraints {
         // activity-compose pulls lifecycle 2.9.x, whose bundled lint checks use APIs
         // the current lint no longer has (ObsoleteLintCustomCheck). 2.11.0 is current stable.
@@ -49,6 +51,8 @@ dependencies {
     }
 
     testImplementation(libs.junit)
+    testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.kotlinx.coroutines.test)
 }
 
 // -PtestForks=1 runs unit tests serially, for timing comparisons.
