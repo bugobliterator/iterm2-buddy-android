@@ -6,4 +6,13 @@ A Kotlin port of the iOS iTerm2 Buddy app (`Companion/` in the [iTerm2 source](h
 
 Status: design in progress.
 
+## Build
+
+In a fresh cloud session, run `scripts/cloud-setup.sh` first. It installs JDK 17 and the Android SDK under `$HOME` and writes `local.properties`. Then build with JDK 17:
+
+```sh
+export JAVA_HOME="$HOME/jdk/java-17-openjdk-amd64"
+./gradlew testDebugUnitTest lint assembleDebug
+```
+
 License: GPL-2.0, as iTerm2.
