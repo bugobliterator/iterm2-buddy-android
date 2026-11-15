@@ -14,17 +14,46 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SessionMessagesTest {
-    private class Sample(val path: String, val direction: String, val json: JsonObject) {
+    /** [bytes] is the sample's `json` text exactly as the fixture file holds it, escapes included. */
+    private class Sample(val path: String, val direction: String, val json: JsonObject, val bytes: ByteArray) {
         val name: String get() = path.substringAfterLast('/').removeSuffix(".json")
-        val bytes: ByteArray get() = json.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    /**
+     * Slices the raw `json` value out of a fixture file. The generator writes it last,
+     * embedded verbatim: `"json" : {...}` then the file's closing `}`.
+     */
+    private fun rawJson(path: String, text: String): String {
+        val marker = "\"json\" : "
+        check(text.indexOf(marker) == text.lastIndexOf(marker) && marker in text) { "$path: no single json key" }
+        val rest = text.substringAfter(marker).trimEnd()
+        check(rest.endsWith("}")) { "$path: file does not end with }" }
+        val raw = rest.dropLast(1).trimEnd()
+        check(raw.endsWith("}")) { "$path: json is not the last value" }
+        return raw
+    }
+
+    /** Runs [check] on each sample; any failure becomes an AssertionError naming the sample. */
+    private fun forEachSample(samples: List<Sample>, check: (Sample) -> Unit) {
+        for (sample in samples) {
+            try {
+                check(sample)
+            } catch (e: Throwable) {
+                throw AssertionError("${sample.path}: $e", e)
+            }
+        }
     }
 
     private val samples: List<Sample> by lazy {
         val paths = Fixtures.list("messages/session")
         assertTrue("messages/session is empty", paths.isNotEmpty())
         paths.map { path ->
-            val file = Json.parseToJsonElement(Fixtures.read(path)).jsonObject
-            Sample(path, file.getValue("direction").jsonPrimitive.content, file.getValue("json").jsonObject)
+            val text = Fixtures.read(path)
+            val file = Json.parseToJsonElement(text).jsonObject
+            val json = file.getValue("json").jsonObject
+            val raw = rawJson(path, text)
+            assertEquals("$path: sliced json", json, Json.parseToJsonElement(raw))
+            Sample(path, file.getValue("direction").jsonPrimitive.content, json, raw.toByteArray(Charsets.UTF_8))
         }
     }
 
@@ -47,8 +76,8 @@ class SessionMessagesTest {
 
     /** Every macToPhone sample, with the request ID and message it decodes to. */
     private fun expectedMacMessage(sample: Sample): Pair<Long?, MacMessage>? = when (sample.name) {
-        "hello-mac" -> 1L to MacMessage.HelloReply(15, 11, body(sample, "hello"))
-        "hello-mac-with-alerts" -> 1L to MacMessage.HelloReply(15, 11, body(sample, "hello"))
+        "hello-mac" -> 1L to MacMessage.HelloReply(15L, 11L, body(sample, "hello"))
+        "hello-mac-with-alerts" -> 1L to MacMessage.HelloReply(15L, 11L, body(sample, "hello"))
         "relay-room-secret-stored" -> 2L to MacMessage.RelayRoomSecretStored
         "pong" -> 3L to MacMessage.Pong
         "unpaired" -> null to MacMessage.Unpaired
@@ -62,7 +91,7 @@ class SessionMessagesTest {
     fun phoneSamplesEncodeExactly() {
         val phoneSamples = samples("phoneToMac")
         assertEquals("phone samples vs messages", phoneMessages.keys, phoneSamples.map { it.name }.toSet())
-        for (sample in phoneSamples) {
+        forEachSample(phoneSamples) { sample ->
             val (message, requestID) = phoneMessages.getValue(sample.name)
             assertEquals(sample.path, sample.json, tree(encodeEnvelope(message, requestID)))
         }
@@ -70,7 +99,7 @@ class SessionMessagesTest {
 
     @Test
     fun phoneSampleRequestIdsFollowAndroidOrder() {
-        for (sample in samples("phoneToMac")) {
+        forEachSample(samples("phoneToMac")) { sample ->
             val expected = phoneMessages.getValue(sample.name).second
             val actual = sample.json["requestID"]?.jsonPrimitive?.content?.toLong()
             assertEquals(sample.path, expected, actual)
@@ -103,10 +132,16 @@ class SessionMessagesTest {
 
     @Test
     fun macSamplesDecode() {
-        for (sample in samples("macToPhone")) {
+        forEachSample(samples("macToPhone")) { sample ->
             val expected = expectedMacMessage(sample) ?: throw AssertionError("${sample.path}: no expectation")
             assertEquals(sample.path, expected, decodeEnvelope(sample.bytes))
         }
+    }
+
+    @Test
+    fun rawSampleTextKeepsSlashEscapes() {
+        val secret = samples.single { it.name == "relay-room-secret" }
+        assertTrue(secret.path, "\\/" in secret.bytes.decodeToString())
     }
 
     @Test
@@ -190,7 +225,9 @@ class SessionMessagesTest {
             """{"requestID":1,"payload":{"hello":{"minimumPeer":11}}}""",
             """{"requestID":1,"payload":{"hello":{"revision":"15","minimumPeer":11}}}""",
             """{"requestID":1,"payload":{"hello":{"revision":15.5,"minimumPeer":11}}}""",
-            """{"requestID":1,"payload":{"hello":{"revision":4294967296,"minimumPeer":11}}}""",
+            // Deliberate deviation: Swift's JSONDecoder may take 15.0 as an Int; the Mac writes literals.
+            """{"requestID":1,"payload":{"hello":{"revision":15.0,"minimumPeer":11}}}""",
+            """{"requestID":1,"payload":{"hello":{"revision":9223372036854775808,"minimumPeer":11}}}""",
             """{"requestID":1,"payload":{"hello":{"revision":15,"minimumPeer":null}}}""",
             """{"requestID":1,"payload":{"hello":{"revision":15,"minimumPeer":11,"aiAvailable":"yes"}}}""",
             """{"requestID":1,"payload":{"hello":{"revision":15,"minimumPeer":11,"wantsNotificationPermission":1}}}""",
@@ -204,8 +241,9 @@ class SessionMessagesTest {
             """{"requestID":2,"payload":{"error":{"_0":"boom"}}}""",
             """{"requestID":2,"payload":{"error":{"_0":{"code":1,"message":"m"}}}}""",
             """{"requestID":2,"payload":{"error":{"_0":{"code":"internalError"}}}}""",
-            // Upstream's synthesized enum decode wants exactly one key; with several, its
-            // outcome depends on hash order, so Android always throws.
+            // Upstream decides on the FIRST key in document order, and the synthesized decode's
+            // allKeys hides unknown keys, so upstream reads the first as `.pong` and the second
+            // as `.unsupported`. Android deliberately throws on any payload without one key.
             """{"payload":{"pong":{},"futureThing":{}}}""",
             """{"payload":{"newA":{},"newB":{}}}""",
             """{"payload":{}}""",
@@ -223,6 +261,18 @@ class SessionMessagesTest {
         val invalidUtf8 = """{"payload":{"pong":{}},"x":"?"}""".toByteArray().also { it[it.size - 3] = 0xC3.toByte() }
         assertThrows("invalid UTF-8", WireDecodeException::class.java) { decodeEnvelope(invalidUtf8) }
         assertThrows("empty", WireDecodeException::class.java) { decodeEnvelope(ByteArray(0)) }
+        val pong = """{"payload":{"pong":{}}}"""
+        val bom = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()) + pong.toByteArray()
+        assertThrows("BOM", WireDecodeException::class.java) { decodeEnvelope(bom) }
+        assertThrows("UTF-16", WireDecodeException::class.java) { decodeEnvelope(pong.toByteArray(Charsets.UTF_16LE)) }
+    }
+
+    @Test
+    fun helloRevisionsAreSixtyFourBit() {
+        val text = """{"requestID":1,"payload":{"hello":{"revision":4294967296,"minimumPeer":-1}}}"""
+        val reply = decodeEnvelope(text.toByteArray()).second as MacMessage.HelloReply
+        assertEquals(4294967296L, reply.revision)
+        assertEquals(-1L, reply.minimumPeer)
     }
 
     @Test
@@ -262,6 +312,9 @@ class SessionMessagesTest {
             "\"accepted\"",
             "accepted",
             """{"pairing":"accepted"""",
+            // Upstream's JSONSerialization keeps the last duplicate and would accept this.
+            """{"pairing":"rejected","pairing":"accepted"}""",
+            """{"pairing":"accepted","pairing":"accepted"}""",
             "",
         )
         for (text in nearMisses) {
