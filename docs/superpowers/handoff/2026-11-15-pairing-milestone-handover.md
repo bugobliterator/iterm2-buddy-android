@@ -38,8 +38,8 @@ This is a Kotlin Android port of the iOS iTerm2 Buddy companion app, for the own
 | Wire Fixtures | Crypto Vectors | **Done** (`9225e0f`, `1604a6f`). Opus review clean. |
 | Wire Fixtures | Session Message Samples | **Done** (`7b1891d`, `7385893`). Opus review clean after fixes. |
 | Android Skeleton | Gradle Project | **Done** (`22887e8`, `4831a68`, `449e740`, `58cb693`). Opus review clean after fixes. AGP 9.5.1, Kotlin 2.4.21, Gradle 9.9.1, SDK 37, min 34. |
-| Pairing | Pairing Code and Room Name; SAS and Join Signature; Noise Channel; Wire Envelope and Session Messages; Relay Connection; Pairing Store; Companion Client | Not started, in this order |
-| Pairing | Pairing Screens | Not started; it ends with an on-device check by the owner on the Mac and Pixel |
+| Pairing | Pairing Code and Room Name; SAS and Join Signature; Noise Channel; Wire Envelope and Session Messages; Relay Connection; Pairing Store; Companion Client | **Done.** Opus review per task; Mythos for Noise, Pairing Store and Companion Client. |
+| Pairing | Pairing Screens | **Code done**; whole-milestone Mythos review clean (no Critical). Waiting on the owner's on-device check (`docs/reports/pairing-on-device.md`). |
 
 ## Closed: Linux build of the harness
 
