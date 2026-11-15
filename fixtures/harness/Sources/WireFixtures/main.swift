@@ -359,16 +359,28 @@ print("wire-fixtures: wrote \(destination.path): canonical=\(canonical.count) pa
 // MARK: - Session message samples
 //
 // Each sample is an envelope exactly as the real flow builds it, encoded with
-// upstream `WireCoding`. Request IDs follow the phone's `CompanionSession`,
-// which numbers requests from 1 per connection. On a relay connect the phone
-// sends `relayRoomSecret` first (AppModel `lockRelayRoom`, awaited inside
-// `establish`), then `hello` (`loadHome` -> `handshakeVersion`), then pings.
+// upstream `WireCoding`. Request IDs follow the Android client's order on one
+// connection, numbered from 1 as the phone's `CompanionSession` numbers them:
+// `hello` first, then `relayRoomSecret`, then a `ping`. The Mac does not
+// depend on that order: CompanionLink `handle` answers both whenever they
+// arrive (iOS sends `relayRoomSecret` first, from AppModel `lockRelayRoom`).
 // The Mac copies the request's ID onto its reply (CompanionLink `send(_:requestID:)`).
 
-let relayRoomSecretRequestID: UInt64 = 1
-let helloRequestID: UInt64 = 2
+/// The revision the Android app advertises in this milestone (Global
+/// Constraints: "Advertise protocol revision 11 with minimum peer 11"). It is
+/// the Mac's floor, `CompanionProtocolVersion.minimumPeer` at v3.7.7.
+let appAdvertisedRevision = 11
+let appAdvertisedMinimumPeer = 11
+require(appAdvertisedRevision == CompanionProtocolVersion.minimumPeer, "app revision is not the Mac's floor")
+require(CompanionProtocolVersion.evaluate(peerRevision: appAdvertisedRevision,
+                                          peerMinimumPeer: appAdvertisedMinimumPeer) == .compatible,
+        "a v3.7.7 Mac refuses the app's revision")
+require(appAdvertisedRevision < CompanionProtocolVersion.modalAlertRevision,
+        "the app's revision now gets macStatus; update hello-mac")
+
+let helloRequestID: UInt64 = 1
+let relayRoomSecretRequestID: UInt64 = 2
 let pingRequestID: UInt64 = 3
-let unsupportedRequestID: UInt64 = 4
 
 /// The phone-minted room secret couriered in `relayRoomSecret`. Chosen so its
 /// standard base64 contains both '+' and '/' (which upstream escapes as "\/").
@@ -449,47 +461,85 @@ func hostSample(_ name: String, _ envelope: HostEnvelope) throws -> SessionSampl
     try makeSample(name, .macToPhone, envelope)
 }
 
+// CompanionClient.handshakeVersion (iOS), with the app's revision.
+let helloPhone = ClientEnvelope(requestID: helloRequestID,
+                                payload: .hello(revision: appAdvertisedRevision,
+                                                minimumPeer: appAdvertisedMinimumPeer))
+
+/// The `macStatus` CompanionLink.handleHello puts in its reply: only for a
+/// compatible phone at `modalAlertRevision` or later.
+func macStatusRule(peerRevision: Int, status: CompanionMacStatus) -> CompanionMacStatus? {
+    let compatible = CompanionProtocolVersion.evaluate(peerRevision: peerRevision,
+                                                       peerMinimumPeer: appAdvertisedMinimumPeer) == .compatible
+    return (compatible && peerRevision >= CompanionProtocolVersion.modalAlertRevision) ? status : nil
+}
+
+func macHello(requestID: UInt64, peerRevision: Int, wantsNotificationPermission: Bool, aiAvailable: Bool,
+              status: CompanionMacStatus) -> HostEnvelope {
+    // CompanionLink.handleHello: the Mac always sets both booleans.
+    HostEnvelope(requestID: requestID,
+                 payload: .hello(revision: CompanionProtocolVersion.current,
+                                 minimumPeer: CompanionProtocolVersion.minimumPeer,
+                                 wantsNotificationPermission: wantsNotificationPermission,
+                                 aiAvailable: aiAvailable,
+                                 macStatus: macStatusRule(peerRevision: peerRevision, status: status)))
+}
+
+// The Mac's real reply to the app's hello: no macStatus below revision 14.
+let helloMac = macHello(requestID: helloRequestID, peerRevision: appAdvertisedRevision,
+                        wantsNotificationPermission: false, aiAvailable: true,
+                        status: CompanionMacStatus(modalAlerts: [], mainBlocked: false))
+// Reference: the reply to a phone at modalAlertRevision or later (not this milestone).
+let helloMacWithAlerts = macHello(requestID: helloRequestID,
+                                  peerRevision: CompanionProtocolVersion.modalAlertRevision,
+                                  wantsNotificationPermission: true, aiAvailable: false,
+                                  status: CompanionMacStatus(modalAlerts: [sampleModalAlert], mainBlocked: true))
+// CompanionClient.registerRoomSecret (iOS) and its ack in CompanionLink.handle.
+let relayRoomSecret = ClientEnvelope(requestID: relayRoomSecretRequestID,
+                                     payload: .relayRoomSecret(sampleRoomSecret))
+let relayRoomSecretStored = HostEnvelope(requestID: relayRoomSecret.requestID, payload: .relayRoomSecretStored)
+// CompanionClient.ping (iOS) and CompanionLink.handle's `.pong`.
+let ping = ClientEnvelope(requestID: pingRequestID, payload: .ping)
+let pong = HostEnvelope(requestID: ping.requestID, payload: .pong)
+// CompanionLink.handle, `.relayRoomSecret` failure: the store throws
+// RoomSecretStorageStopped once an unpair has begun, and the Mac replies with
+// `"\(error)"`, that error's description.
+let errorReply = HostEnvelope(requestID: relayRoomSecret.requestID,
+                              payload: .error(CompanionError(code: .internalError,
+                                                             message: "This Mac is no longer paired.")))
+// CompanionClient.sendUnpairing (iOS): `session.send`, so no requestID.
+let unpairing = ClientEnvelope(requestID: nil, payload: .unpairing)
+// CompanionLink.sendFarewellAndClose: unsolicited, no requestID.
+let unpaired = HostEnvelope(requestID: nil, payload: .unpaired)
+
+func hasMacStatus(_ envelope: HostEnvelope) -> Bool {
+    if case .hello(_, _, _, _, let status) = envelope.payload {
+        return status != nil
+    }
+    return false
+}
+
+// Call-site rules.
+require(!hasMacStatus(helloMac), "hello-mac: macStatus sent to a phone below modalAlertRevision")
+require(hasMacStatus(helloMacWithAlerts), "hello-mac-with-alerts: macStatus missing")
+require(helloMac.requestID == helloPhone.requestID && helloMacWithAlerts.requestID == helloPhone.requestID,
+        "hello replies must echo the hello's requestID")
+require(pong.requestID == ping.requestID, "pong must echo the ping's requestID")
+require(relayRoomSecretStored.requestID == relayRoomSecret.requestID, "ack must echo the relayRoomSecret's requestID")
+require(errorReply.requestID == relayRoomSecret.requestID, "error-reply must echo the relayRoomSecret's requestID")
+require(unpairing.requestID == nil && unpaired.requestID == nil, "unpairing and unpaired carry no requestID")
+
 let sessionSamples: [SessionSample] = [
-    // CompanionClient.handshakeVersion (iOS): the phone's own revision.
-    try clientSample("hello-phone", ClientEnvelope(
-        requestID: helloRequestID,
-        payload: .hello(revision: CompanionProtocolVersion.current,
-                        minimumPeer: CompanionProtocolVersion.minimumPeer))),
-    // CompanionLink.handleHello: reply to a revision-15 phone. The Mac always
-    // sets wantsNotificationPermission and aiAvailable; macStatus only for a
-    // compatible phone at modalAlertRevision or later.
-    try hostSample("hello-mac", HostEnvelope(
-        requestID: helloRequestID,
-        payload: .hello(revision: CompanionProtocolVersion.current,
-                        minimumPeer: CompanionProtocolVersion.minimumPeer,
-                        wantsNotificationPermission: false,
-                        aiAvailable: true,
-                        macStatus: CompanionMacStatus(modalAlerts: [], mainBlocked: false)))),
-    try hostSample("hello-mac-with-alerts", HostEnvelope(
-        requestID: helloRequestID,
-        payload: .hello(revision: CompanionProtocolVersion.current,
-                        minimumPeer: CompanionProtocolVersion.minimumPeer,
-                        wantsNotificationPermission: true,
-                        aiAvailable: false,
-                        macStatus: CompanionMacStatus(modalAlerts: [sampleModalAlert], mainBlocked: true)))),
-    // CompanionClient.registerRoomSecret (iOS) and its ack in CompanionLink.handle.
-    try clientSample("relay-room-secret", ClientEnvelope(
-        requestID: relayRoomSecretRequestID,
-        payload: .relayRoomSecret(sampleRoomSecret))),
-    try hostSample("relay-room-secret-stored", HostEnvelope(
-        requestID: relayRoomSecretRequestID,
-        payload: .relayRoomSecretStored)),
-    // CompanionClient.ping (iOS) and CompanionLink.handle's `.pong`.
-    try clientSample("ping", ClientEnvelope(requestID: pingRequestID, payload: .ping)),
-    try hostSample("pong", HostEnvelope(requestID: pingRequestID, payload: .pong)),
-    // CompanionHostBridge's reply to a client message it decoded as `.unsupported`.
-    try hostSample("error-reply", HostEnvelope(
-        requestID: unsupportedRequestID,
-        payload: .error(CompanionError(code: .badRequest, message: "Unsupported request; app upgrade required")))),
-    // CompanionClient.sendUnpairing (iOS): `session.send`, so no requestID.
-    try clientSample("unpairing", ClientEnvelope(requestID: nil, payload: .unpairing)),
-    // CompanionLink.sendFarewellAndClose: unsolicited, no requestID.
-    try hostSample("unpaired", HostEnvelope(requestID: nil, payload: .unpaired))
+    try clientSample("hello-phone", helloPhone),
+    try hostSample("hello-mac", helloMac),
+    try hostSample("hello-mac-with-alerts", helloMacWithAlerts),
+    try clientSample("relay-room-secret", relayRoomSecret),
+    try hostSample("relay-room-secret-stored", relayRoomSecretStored),
+    try clientSample("ping", ping),
+    try hostSample("pong", pong),
+    try hostSample("error-reply", errorReply),
+    try clientSample("unpairing", unpairing),
+    try hostSample("unpaired", unpaired)
 ]
 
 /// A JSON string literal, as JSONEncoder writes a String.
@@ -516,6 +566,8 @@ func jsonTree(_ data: Data) throws -> NSDictionary? {
 
 for sample in sessionSamples {
     // Upstream's own bytes and the sorted bytes are the same JSON tree.
+    // NSDictionary equality conflates true and 1; the decode round-trip below
+    // compares typed values and catches that.
     let wireTree = try jsonTree(sample.wire)
     let sortedTree = try jsonTree(sample.sortedWire)
     require(wireTree != nil && wireTree == sortedTree,
