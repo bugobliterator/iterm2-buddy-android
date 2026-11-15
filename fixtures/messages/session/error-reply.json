@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: Optional(4), payload: WireFixtures.CompanionHostMessage.error(CompanionProtocol.CompanionError(code: CompanionProtocol.CompanionError.Code.badRequest, message: \"Unsupported request; app upgrade required\")))",
+  "json" : {"payload":{"error":{"_0":{"code":"badRequest","message":"Unsupported request; app upgrade required"}}},"requestID":4}
+}

@@ -355,3 +355,223 @@ let destination = outputDirectory.appendingPathComponent("crypto-vectors.json")
 try json.write(to: destination, options: .atomic)
 print("wire-fixtures: wrote \(destination.path): canonical=\(canonical.count) pairingCodes=\(pairingCodes.count) "
       + "roomNames=\(roomNames.count) sas=\(sas.count) joins=\(joins.count) prologues=\(prologues.count)")
+
+// MARK: - Session message samples
+//
+// Each sample is an envelope exactly as the real flow builds it, encoded with
+// upstream `WireCoding`. Request IDs follow the phone's `CompanionSession`,
+// which numbers requests from 1 per connection. On a relay connect the phone
+// sends `relayRoomSecret` first (AppModel `lockRelayRoom`, awaited inside
+// `establish`), then `hello` (`loadHome` -> `handshakeVersion`), then pings.
+// The Mac copies the request's ID onto its reply (CompanionLink `send(_:requestID:)`).
+
+let relayRoomSecretRequestID: UInt64 = 1
+let helloRequestID: UInt64 = 2
+let pingRequestID: UInt64 = 3
+let unsupportedRequestID: UInt64 = 4
+
+/// The phone-minted room secret couriered in `relayRoomSecret`. Chosen so its
+/// standard base64 contains both '+' and '/' (which upstream escapes as "\/").
+let sampleRoomSecret = bytes(32, startingAt: 0xf0, step: 3)
+
+/// A modal alert as CompanionLink `currentStatus()` reports it. The id is a
+/// UUID's `uuidString` (uppercase), as the Mac sends it.
+let sampleModalAlert = CompanionModalAlert(
+    id: "6F1C2B3A-4D5E-4F60-8172-93A4B5C6D7E8",
+    heading: "Close Session?",
+    body: "A job is still running in this session.",
+    buttons: [
+        CompanionModalAlert.Button(title: "OK", isCancel: false, isDestructive: true, rememberable: true),
+        CompanionModalAlert.Button(title: "Cancel", isCancel: true, isDestructive: false, rememberable: false),
+        CompanionModalAlert.Button(title: "Show Details", isCancel: false, isDestructive: false,
+                                   rememberable: false, offered: false)
+    ],
+    suppressionLabel: "Do not ask again",
+    inputs: [
+        CompanionModalAlert.Input(id: "name", label: "Name", kind: CompanionModalAlert.Input.textKind,
+                                  value: "build"),
+        CompanionModalAlert.Input(id: "password", label: nil, kind: CompanionModalAlert.Input.secretKind,
+                                  value: ""),
+        CompanionModalAlert.Input(id: "count", label: "Count", kind: CompanionModalAlert.Input.integerKind,
+                                  value: "3", minimum: 1, maximum: 10)
+    ],
+    hasAccessory: false,
+    isAppModal: true,
+    sessionGuids: ["w0t0p0:2B5D1E7A-0C9F-4E3B-A1D2-3C4B5A697887"],
+    suppressionDefault: false)
+
+enum SampleDirection: String {
+    case phoneToMac
+    case macToPhone
+}
+
+/// Upstream's own encoder (`WireCoding.makeEncoder()`) with sorted keys.
+/// `WireCoding.encode` emits keys in hash order, which changes from run to run
+/// (Swift seeds its hasher per process), so the samples store the same tree
+/// with keys sorted. Every value encoding (dates, Data, escaping) is upstream's.
+func sortedWireEncoder() -> JSONEncoder {
+    let encoder = WireCoding.makeEncoder()
+    encoder.outputFormatting.insert(.sortedKeys)
+    return encoder
+}
+
+struct SessionSample {
+    let name: String
+    let direction: SampleDirection
+    let swiftValue: String
+    /// Exactly what `WireCoding.encode` sent, in this run's key order.
+    let wire: Data
+    /// The same JSON with keys sorted; stored in the sample's `json`.
+    let sortedWire: Data
+    /// Decodes with upstream `WireCoding` and returns the decoded envelope's
+    /// debug description and its sorted re-encoding.
+    let roundTrip: (Data) throws -> (swiftValue: String, sortedWire: Data)
+}
+
+func makeSample<Payload>(_ name: String, _ direction: SampleDirection,
+                         _ envelope: CompanionEnvelope<Payload>) throws -> SessionSample {
+    SessionSample(name: name,
+                  direction: direction,
+                  swiftValue: String(reflecting: envelope),
+                  wire: try WireCoding.encode(envelope),
+                  sortedWire: try sortedWireEncoder().encode(envelope),
+                  roundTrip: { data in
+                      let decoded = try WireCoding.decode(CompanionEnvelope<Payload>.self, from: data)
+                      return (String(reflecting: decoded), try sortedWireEncoder().encode(decoded))
+                  })
+}
+
+func clientSample(_ name: String, _ envelope: ClientEnvelope) throws -> SessionSample {
+    try makeSample(name, .phoneToMac, envelope)
+}
+
+func hostSample(_ name: String, _ envelope: HostEnvelope) throws -> SessionSample {
+    try makeSample(name, .macToPhone, envelope)
+}
+
+let sessionSamples: [SessionSample] = [
+    // CompanionClient.handshakeVersion (iOS): the phone's own revision.
+    try clientSample("hello-phone", ClientEnvelope(
+        requestID: helloRequestID,
+        payload: .hello(revision: CompanionProtocolVersion.current,
+                        minimumPeer: CompanionProtocolVersion.minimumPeer))),
+    // CompanionLink.handleHello: reply to a revision-15 phone. The Mac always
+    // sets wantsNotificationPermission and aiAvailable; macStatus only for a
+    // compatible phone at modalAlertRevision or later.
+    try hostSample("hello-mac", HostEnvelope(
+        requestID: helloRequestID,
+        payload: .hello(revision: CompanionProtocolVersion.current,
+                        minimumPeer: CompanionProtocolVersion.minimumPeer,
+                        wantsNotificationPermission: false,
+                        aiAvailable: true,
+                        macStatus: CompanionMacStatus(modalAlerts: [], mainBlocked: false)))),
+    try hostSample("hello-mac-with-alerts", HostEnvelope(
+        requestID: helloRequestID,
+        payload: .hello(revision: CompanionProtocolVersion.current,
+                        minimumPeer: CompanionProtocolVersion.minimumPeer,
+                        wantsNotificationPermission: true,
+                        aiAvailable: false,
+                        macStatus: CompanionMacStatus(modalAlerts: [sampleModalAlert], mainBlocked: true)))),
+    // CompanionClient.registerRoomSecret (iOS) and its ack in CompanionLink.handle.
+    try clientSample("relay-room-secret", ClientEnvelope(
+        requestID: relayRoomSecretRequestID,
+        payload: .relayRoomSecret(sampleRoomSecret))),
+    try hostSample("relay-room-secret-stored", HostEnvelope(
+        requestID: relayRoomSecretRequestID,
+        payload: .relayRoomSecretStored)),
+    // CompanionClient.ping (iOS) and CompanionLink.handle's `.pong`.
+    try clientSample("ping", ClientEnvelope(requestID: pingRequestID, payload: .ping)),
+    try hostSample("pong", HostEnvelope(requestID: pingRequestID, payload: .pong)),
+    // CompanionHostBridge's reply to a client message it decoded as `.unsupported`.
+    try hostSample("error-reply", HostEnvelope(
+        requestID: unsupportedRequestID,
+        payload: .error(CompanionError(code: .badRequest, message: "Unsupported request; app upgrade required")))),
+    // CompanionClient.sendUnpairing (iOS): `session.send`, so no requestID.
+    try clientSample("unpairing", ClientEnvelope(requestID: nil, payload: .unpairing)),
+    // CompanionLink.sendFarewellAndClose: unsolicited, no requestID.
+    try hostSample("unpaired", HostEnvelope(requestID: nil, payload: .unpaired))
+]
+
+/// A JSON string literal, as JSONEncoder writes a String.
+func jsonString(_ text: String) throws -> String {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.withoutEscapingSlashes]
+    return String(decoding: try encoder.encode(text), as: UTF8.self)
+}
+
+/// The sample file. Written by hand so `json` holds the sorted upstream bytes
+/// verbatim, including upstream's escaping of '/' as "\/".
+func sampleFile(_ sample: SessionSample) throws -> Data {
+    let text = "{\n"
+        + "  \"direction\" : \(try jsonString(sample.direction.rawValue)),\n"
+        + "  \"swiftValue\" : \(try jsonString(sample.swiftValue)),\n"
+        + "  \"json\" : \(String(decoding: sample.sortedWire, as: UTF8.self))\n"
+        + "}\n"
+    return Data(text.utf8)
+}
+
+func jsonTree(_ data: Data) throws -> NSDictionary? {
+    try JSONSerialization.jsonObject(with: data) as? NSDictionary
+}
+
+for sample in sessionSamples {
+    // Upstream's own bytes and the sorted bytes are the same JSON tree.
+    let wireTree = try jsonTree(sample.wire)
+    let sortedTree = try jsonTree(sample.sortedWire)
+    require(wireTree != nil && wireTree == sortedTree,
+            "\(sample.name): sorted encoding differs from WireCoding.encode")
+    // Both decode with upstream WireCoding back to the same value.
+    for data in [sample.wire, sample.sortedWire] {
+        let decoded = try sample.roundTrip(data)
+        require(decoded.swiftValue == sample.swiftValue, "\(sample.name): decoded value differs from the sample")
+        require(decoded.sortedWire == sample.sortedWire, "\(sample.name): re-encoding differs from the sample")
+    }
+    require(!sample.swiftValue.contains(".unsupported"), "\(sample.name): sample is unsupported")
+    // The file parses, and its `json` is the same tree, and decodes the same.
+    let file = try JSONSerialization.jsonObject(with: try sampleFile(sample)) as? NSDictionary
+    let embedded = file?["json"] as? NSDictionary
+    require(embedded != nil && embedded == wireTree, "\(sample.name): embedded json differs from the wire bytes")
+    let embeddedData = try JSONSerialization.data(withJSONObject: embedded ?? [:])
+    let embeddedValue = try sample.roundTrip(embeddedData).swiftValue
+    require(embeddedValue == sample.swiftValue,
+            "\(sample.name): embedded json does not decode to the sample")
+}
+require(Set(sessionSamples.map(\.name)).count == sessionSamples.count, "duplicate session sample name")
+
+let sessionDirectory = outputDirectory.appendingPathComponent("messages/session", isDirectory: true)
+try FileManager.default.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
+for sample in sessionSamples {
+    try sampleFile(sample).write(to: sessionDirectory.appendingPathComponent("\(sample.name).json"), options: .atomic)
+}
+
+// MARK: - Pairing confirmation
+
+struct ConfirmationSample: Encodable {
+    let bytes: String
+}
+
+let confirmationDirectory = outputDirectory.appendingPathComponent("messages/confirmation", isDirectory: true)
+try FileManager.default.createDirectory(at: confirmationDirectory, withIntermediateDirectories: true)
+let confirmations: [(name: String, value: PairingConfirmation)] = [("accepted", .accepted), ("rejected", .rejected)]
+for confirmation in confirmations {
+    let wire = confirmation.value.encoded()
+    require(PairingConfirmation.decode(wire) == confirmation.value, "\(confirmation.name): does not round-trip")
+    var file = try encoder.encode(ConfirmationSample(bytes: String(decoding: wire, as: UTF8.self)))
+    file.append(0x0a)
+    try file.write(to: confirmationDirectory.appendingPathComponent("\(confirmation.name).json"), options: .atomic)
+}
+
+// MARK: - Protocol revision
+
+struct RevisionSample: Encodable {
+    let revision: Int
+    let minimumPeer: Int
+}
+
+var revisionFile = try encoder.encode(RevisionSample(revision: CompanionProtocolVersion.current,
+                                                     minimumPeer: CompanionProtocolVersion.minimumPeer))
+revisionFile.append(0x0a)
+let messagesDirectory = outputDirectory.appendingPathComponent("messages", isDirectory: true)
+try revisionFile.write(to: messagesDirectory.appendingPathComponent("revision.json"), options: .atomic)
+print("wire-fixtures: wrote \(messagesDirectory.path): session=\(sessionSamples.count) "
+      + "confirmation=\(confirmations.count) revision=\(CompanionProtocolVersion.current)")

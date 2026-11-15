@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: Optional(3), payload: WireFixtures.CompanionHostMessage.pong)",
+  "json" : {"payload":{"pong":{}},"requestID":3}
+}
