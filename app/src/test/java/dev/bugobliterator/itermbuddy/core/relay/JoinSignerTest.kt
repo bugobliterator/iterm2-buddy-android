@@ -10,6 +10,7 @@ import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -76,12 +77,23 @@ class JoinSignerTest {
 
     @Test
     fun defaultRoleIsPhone() {
-        assertEquals(0x02.toByte(), JoinRole.PHONE.byte)
-        assertEquals(0x01.toByte(), JoinRole.MAC.byte)
-        val (_, entry) = vectors.first { (_, entry) -> entry.string("role") == "phone" }
+        assertEquals("phone role byte", 0x02.toByte(), JoinRole.PHONE.byte)
+        assertEquals("mac role byte", 0x01.toByte(), JoinRole.MAC.byte)
+        val (label, entry) = vectors.first { (_, entry) -> entry.string("role") == "phone" }
         val signer = JoinSigner(hex(entry.string("roomSecret")))
         val signature = signer.sign(hex(entry.string("nonce")), entry.string("roomName"), entry.string("origin"))
-        assertEquals(entry.string("signature"), signature.toHex())
+        assertEquals("$label default-role signature", entry.string("signature"), signature.toHex())
+    }
+
+    @Test
+    fun roomSecretMustBeThirtyTwoBytes() {
+        for (size in listOf(0, 31, 33)) {
+            val error = assertThrows("roomSecret of $size bytes", IllegalArgumentException::class.java) {
+                JoinSigner(ByteArray(size))
+            }
+            assertEquals("roomSecret of $size bytes", "roomSecret must be 32 bytes", error.message)
+        }
+        JoinSigner(ByteArray(32))
     }
 
     @Test

@@ -8,12 +8,16 @@ private val SAS_INFO = "iterm2-sas-v1".toByteArray(Charsets.UTF_8)
 private const val SAS_DIGITS = 6
 private const val SAS_MODULUS = 1_000_000uL
 
+/** Noise handshake hash length: BLAKE2s output. */
+private const val HANDSHAKE_HASH_BYTES = 32
+
 /**
  * The 6-digit Short Authentication String, as upstream `PairingSAS.code`:
  * HKDF-SHA256(ikm = handshakeHash, salt = empty, info = "iterm2-sas-v1") to 8 bytes,
  * read big-endian as an unsigned 64-bit value, mod 10^6, zero-padded.
  */
 fun sasCode(handshakeHash: ByteArray): String {
+    require(handshakeHash.size == HANDSHAKE_HASH_BYTES) { "handshakeHash must be 32 bytes" }
     val derived = ByteArray(Long.SIZE_BYTES)
     HKDFBytesGenerator(SHA256Digest()).run {
         init(HKDFParameters(handshakeHash, null, SAS_INFO))
