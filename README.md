@@ -15,4 +15,17 @@ export JAVA_HOME="$HOME/jdk/java-17-openjdk-amd64"
 ./gradlew testDebugUnitTest lint assembleDebug
 ```
 
+## Installing with Obtainium
+
+Every push to `main` publishes a GitHub pre-release named `build-<short sha>` with a debug APK signed with the project's shared debug key. To install and update it on a phone with [Obtainium](https://github.com/ImranR98/Obtainium):
+
+1. In Obtainium, tap **Add App** and enter `https://github.com/bugobliterator/iterm2-buddy-android`.
+2. Turn on **Include prereleases**.
+3. Set the APK filter regex to `itermbuddy-debug-.*\.apk`.
+4. Tap **Add**, then **Install**.
+
+Example: after a push of commit `5c99c6a`, Obtainium shows an update to version `0.1.0-5c99c6a` and installs `itermbuddy-debug-5c99c6a.apk`.
+
+The first install of a shared-key build fails if the phone holds a build signed with another key (from a cloud session or `adb install`). Uninstall that build first; this deletes the pairing, so pair again afterwards. Later updates keep the pairing.
+
 License: GPL-2.0, as iTerm2.

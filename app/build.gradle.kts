@@ -13,8 +13,9 @@ android {
         applicationId = "dev.bugobliterator.itermbuddy"
         minSdk = 34
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        // CI passes -PciVersionCode / -PciVersionName so Obtainium can detect updates.
+        versionCode = providers.gradleProperty("ciVersionCode").orNull?.toInt() ?: 1
+        versionName = providers.gradleProperty("ciVersionName").orNull ?: "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

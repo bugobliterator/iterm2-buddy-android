@@ -16,15 +16,14 @@ relay log lines).
       listening on `127.0.0.1`.
 - [ ] iTerm2's `companionRelayOrigin` is exactly `https://relay.example.ts.net`,
       and `companionResolverURL` is empty.
-- [ ] The APKs are the ones delivered with the commit "Classify TLS aborts as connect failures
-      and extend device checks". These hashes are for that build only: any rebuilt APK has
-      different ones, so check them against the hashes reported with the rebuild instead.
+- [ ] The APKs come from the "Android build" GitHub Actions run for the commit under test:
+      download its `pairing-apks-<short sha>` artifact. Check them against the hashes in that
+      run's `apk-sha256.txt` (also shown in the run's job summary):
 
       shasum -a 256 app-debug.apk app-debug-androidTest.apk
 
-  Expected for the delivered build:
-  - `app-debug.apk`: `cec9ba9ba664037e971676353e90512ba67166468c841449d9f090682ee172c9`
-  - `app-debug-androidTest.apk`: `611a45b4762b0fd52d1cd1891daeafb6cba4fe46861e1d2255a69d3e31058108`
+  The hashes of the build delivered with "Classify TLS aborts as connect failures and extend
+  device checks" are superseded and no longer apply.
 
   **Result:**
 
