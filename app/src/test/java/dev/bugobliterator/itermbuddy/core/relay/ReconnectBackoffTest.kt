@@ -11,7 +11,7 @@ class ReconnectBackoffTest {
     @Test
     fun backoffBoundsPerAttempt() {
         // Full jitter: rand(0, attempt == 1 ? 3 : min(30, 2^attempt)) seconds.
-        val capsMillis = mapOf(1 to 3_000L, 2 to 4_000L, 5 to 30_000L, 9 to 30_000L)
+        val capsMillis = mapOf(1 to 3_000L, 2 to 4_000L, 3 to 8_000L, 4 to 16_000L, 5 to 30_000L, 9 to 30_000L)
         for ((attempt, cap) in capsMillis) {
             val random = Random(attempt * 7919)
             val delays = List(2_000) { nextDelayMillis(attempt, null, random) }
@@ -36,22 +36,40 @@ class ReconnectBackoffTest {
     @Test
     fun displacedWaitsSixtySeconds() {
         for (attempt in listOf(1, 2, 9)) {
-            assertEquals(60_000L, nextDelayMillis(attempt, "displaced", Random(attempt)))
+            assertEquals(60_000L, nextDelayMillis(attempt, RelayClose(1000, "displaced"), Random(attempt)))
+            assertEquals(60_000L, nextDelayMillis(attempt, RelayClose(1000, "Displaced by newer"), Random(attempt)))
         }
+    }
+
+    @Test
+    fun longWaitsNeedTheMatchingCode() {
+        // The relay overloads 1000 and 1008; the reason alone never selects a long wait.
+        val closes = listOf(RelayClose(1008, "displaced"), RelayClose(1006, "displaced"), RelayClose(1000, "daily quota exceeded"))
+        for (close in closes) assertTrue("$close", nextDelayMillis(1, close, Random(5)) <= 3_000L)
     }
 
     @Test
     fun quotaWaitsThirtyMinutes() {
         for (attempt in listOf(1, 2, 9)) {
-            assertEquals(30 * 60_000L, nextDelayMillis(attempt, "daily quota exceeded", Random(attempt)))
+            assertEquals(30 * 60_000L, nextDelayMillis(attempt, RelayClose(1008, "daily quota exceeded"), Random(attempt)))
+            assertEquals(30 * 60_000L, nextDelayMillis(attempt, RelayClose(1008, "Daily Quota"), Random(attempt)))
         }
     }
 
     @Test
     fun otherCloseReasonsUseJitter() {
-        for (reason in listOf("peer gone", "mac offline", "")) {
-            assertTrue(reason, nextDelayMillis(1, reason, Random(3)) <= 3_000L)
+        for (close in listOf(RelayClose(1001, "peer gone"), RelayClose(1008, "mac offline"), RelayClose(1000, ""), null)) {
+            assertTrue("$close", nextDelayMillis(1, close, Random(3)) <= 3_000L)
         }
+    }
+
+    @Test
+    fun pairingCycleCapRequiresRescan() {
+        assertTrue(requiresRescan(RelayClose(1000, "pairing cycle cap")))
+        assertTrue(requiresRescan(RelayClose(1000, "Pairing Cycle Cap")))
+        assertFalse(requiresRescan(RelayClose(1008, "pairing cycle cap")))
+        assertFalse(requiresRescan(RelayClose(1000, "displaced")))
+        assertFalse(requiresRescan(RelayClose(1000, "room deleted")))
     }
 
     @Test
