@@ -37,7 +37,7 @@ This is a Kotlin Android port of the iOS iTerm2 Buddy companion app, for the own
 | Wire Fixtures | Upstream Harness | **Done** (`939cd02`). Linux build verified in the cloud (see below). |
 | Wire Fixtures | Crypto Vectors | **Done** (`9225e0f`, `1604a6f`). Opus review clean. |
 | Wire Fixtures | Session Message Samples | **Done** (`7b1891d`, `7385893`). Opus review clean after fixes. |
-| Android Skeleton | Gradle Project | Next, after the owner's OK |
+| Android Skeleton | Gradle Project | **Done** (`22887e8`, `4831a68`, `449e740`, `58cb693`). Opus review clean after fixes. AGP 9.5.1, Kotlin 2.4.21, Gradle 9.9.1, SDK 37, min 34. |
 | Pairing | Pairing Code and Room Name; SAS and Join Signature; Noise Channel; Wire Envelope and Session Messages; Relay Connection; Pairing Store; Companion Client | Not started, in this order |
 | Pairing | Pairing Screens | Not started; it ends with an on-device check by the owner on the Mac and Pixel |
 
@@ -63,6 +63,12 @@ Notes from that task:
 - Work lands on `main` (fast-forward) once reviewed.
 - Per-task review is by an Opus subagent (read-only), in place of Codex Sol. Mythos is reserved for critical or large reviews.
 - Codex is not reachable from the cloud session (api.openai.com is blocked).
+
+## Cloud environment notes
+
+- The network policy must allow `dl.google.com` (Google Maven and SDK). The full domain list used so far is in the session report; `scripts/cloud-setup.sh` installs the SDK and JDK 17 into `$HOME`.
+- Swift runs in Docker (`swift:6.2-noble`); start `dockerd` first if it is not running.
+- Maven Central (`repo.maven.apache.org`) intermittently answers 429 or a spurious 404 through the proxy. Gradle caches those misses, so a failed resolve may need `--refresh-dependencies` and a retry.
 
 ## Plan deviations already ruled on
 
