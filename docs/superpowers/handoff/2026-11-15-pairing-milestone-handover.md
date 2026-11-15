@@ -34,14 +34,14 @@ This is a Kotlin Android port of the iOS iTerm2 Buddy companion app, for the own
 | Phase | Task | State |
 |---|---|---|
 | Relay Setup | Relay Service on the Mac | **Running on the Mac** (local by design). The implementer stops before the iTerm2 settings steps, which need the owner to quit iTerm2. It pushes `ops/mac/*` when done. Not a cloud task. |
-| Wire Fixtures | Upstream Harness | **Code done** (`939cd02`). Codex Sol: code clean, with one Important item open (see below). |
-| Wire Fixtures | Crypto Vectors | Next |
-| Wire Fixtures | Session Message Samples | Not started |
-| Android Skeleton | Gradle Project | Not started |
+| Wire Fixtures | Upstream Harness | **Done** (`939cd02`). Linux build verified in the cloud (see below). |
+| Wire Fixtures | Crypto Vectors | **Done** (`9225e0f`, `1604a6f`). Opus review clean. |
+| Wire Fixtures | Session Message Samples | **Done** (`7b1891d`, `7385893`). Opus review clean after fixes. |
+| Android Skeleton | Gradle Project | Next, after the owner's OK |
 | Pairing | Pairing Code and Room Name; SAS and Join Signature; Noise Channel; Wire Envelope and Session Messages; Relay Connection; Pairing Store; Companion Client | Not started, in this order |
 | Pairing | Pairing Screens | Not started; it ends with an on-device check by the owner on the Mac and Pixel |
 
-## Open item: first thing to do in the cloud
+## Closed: Linux build of the harness
 
 Codex Sol's review of Upstream Harness has one Important finding: the Linux build ran in local Docker (`swift:6.2-noble` on the Mac), not in a cloud Linux session. In the cloud session:
 
@@ -51,10 +51,18 @@ cd fixtures/harness && ./sync-upstream.sh && swift build && swift run wire-fixtu
 
 Expected: "Synced 39 files from v3.7.7 (e0025340…)", "Build complete!" with zero `warning:` lines, and the stub message. Record the toolchain version and output. That closes the task.
 
+Result (cloud session, 2026-11-15): Swift 6.2.4 (`swift:6.2-noble`) on Ubuntu 24.04, kernel 6.18. `sync-upstream.sh` synced 39 files from v3.7.7 (e0025340…), a clean `swift build` completed with 0 warnings, and `wire-fixtures` printed its stub message. The cloud container has no Swift toolchain (download.swift.org is blocked), so it ran in Docker after starting `dockerd`.
+
 Notes from that task:
 - The plan's CompanionProtocol file list was missing three upstream files, now included and commented in `upstream-files.txt`: `DataHex`, `CompanionSyncItem` and `Wire/CompanionError`.
 - Linux needs two small shims, under `Sources/WireFixtures/Shims/` and only on non-Darwin: `String(localized:defaultValue:comment:)` and `NSMutableString()`.
 - `Sources/*/Upstream/` is generated and not committed; run `sync-upstream.sh` first.
+
+## Review setup from 2026-11-15 (owner's instruction)
+
+- Work lands on `main` (fast-forward) once reviewed.
+- Per-task review is by an Opus subagent (read-only), in place of Codex Sol. Mythos is reserved for critical or large reviews.
+- Codex is not reachable from the cloud session (api.openai.com is blocked).
 
 ## Plan deviations already ruled on
 
