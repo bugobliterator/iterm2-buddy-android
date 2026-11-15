@@ -34,7 +34,7 @@
 1. **Origin spelling.** A QR whose `relay=` has an explicit `:443`, a trailing `/`, or a mixed-case host must canonicalise exactly as upstream: keep the port, keep case, drop a bare `/`. A wrong form connects and then fails every signed join with "bad signature". Three such rejections in a row end in a visible failure, never a silent retry loop. Pinned in *Pairing Code and Room Name* and *Companion Client*.
 2. **Mac not there.** There are two cases: iTerm2 closed (the relay answers `mac offline`), and Mac asleep (the relay runs on the Mac, so the connection or DNS lookup fails). For a stored pairing, both show "Waiting for your Mac" and retry with backoff. For a fresh pairing they retry for up to 120 s; iTerm2 replaces an idle QR after 120 s (`CompanionPairingController.swift:262, 799-823`). After that the phone shows **Scan again**. Every waiting screen has Cancel. Pinned in *Companion Client*.
 3. **Code rejected or never typed.** The Mac sends `{"pairing":"rejected"}`, or 180 s pass with no confirmation. The phone says so, wipes the half-made pairing and offers to scan again. Pinned in *Companion Client*.
-4. **App killed mid-pairing.** Android can kill the process after the Mac accepts the code but before registration. The phone must still reconnect, because the Mac already pinned it (`CompanionPairingController.swift:1511-1531`). A kill before confirmation leaves nothing behind. Re-scanning replaces every old secret. Pinned in *Pairing Store* and *Companion Client*.
+4. **App killed mid-pairing.** Android can kill the process after the Mac accepts the code but before registration. The phone must still reconnect, because the Mac already pinned it (`CompanionPairingController.swift:1511-1531`). That holds even if the kill lands between the Mac's "accepted" and the phone saving it. Pending credentials are recovered, not wiped, unless the Mac is gone or still asking for the code. Re-scanning replaces every old secret. Pinned in *Pairing Store* and *Companion Client*.
 5. **Relay lost its state.** The relay's database can be deleted, re-cloned or reaped after 30 idle days. With attestation off, the relay then admits signed joins in open mode and never says "ticket required" (`room.js:410-458`). The phone re-registers on every connect, so the room is locked again on the next connect. The test for this case is `relayLostVerifierIsRelocked`, pinned in *Companion Client*.
 
 ---
@@ -65,8 +65,8 @@ Locations:
 - **launchd:** launchd cannot source an env file and has no nvm `node` on its PATH. The install script renders the env values into the plist's `EnvironmentVariables`, writes the absolute `node` path into `ProgramArguments`, and sets `KeepAlive`, `RunAtLoad` and a log at `~/Library/Logs/iterm2-companion-relay.log`.
 
 - [ ] **Step: Preflight.** `lsof -iTCP:8787 -sTCP:LISTEN` should be empty; otherwise pick a free port and use it everywhere. `tailscale status --json | jq .CertDomains` should list `siddharths-macbook-pro.tailnet-99bb.ts.net`. `node -v` should be ≥ 20.
-- [ ] **Step: Install with the native build allowed.** pnpm ≥ 10 skips dependency build scripts, which leaves `better-sqlite3` without its binary. Run `pnpm install --prod --allow-build=better-sqlite3`, or list it in `onlyBuiltDependencies` in a `pnpm-workspace.yaml` in the checkout. Then `node -e "require('better-sqlite3')"` must exit 0.
-- [ ] **Step: Run the relay's own tests.** Run `pnpm install --allow-build=better-sqlite3 && pnpm test` in a throwaway copy of the checkout. Expected: all pass on Node 24. If any fail only on 24, install Node 20 via nvm and use its absolute path in the plist.
+- [ ] **Step: Install with the native build allowed.** pnpm 11 (11.3.0 on the Mac) refuses unlisted dependency builds (`strictDepBuilds`), and `better-sqlite3` needs its build to fetch the native binary. `install-relay.sh` writes `pnpm-workspace.yaml` in the checkout containing `allowBuilds:` / `  better-sqlite3: true`, which is valid on pnpm ≥ 10.26 and 11. It then runs `pnpm install --prod`; `pnpm install` has no `--allow-build` flag, and `onlyBuiltDependencies` was removed in pnpm 11. Then `node -e "require('better-sqlite3')"` must exit 0.
+- [ ] **Step: Run the relay's own tests.** Run `pnpm install && pnpm test` (with the same `pnpm-workspace.yaml`) in a throwaway copy of the checkout. Expected: all pass on Node 24. If any fail only on 24, install Node 20 via nvm and use its absolute path in the plist.
 - [ ] **Step: Run `ops/mac/install-relay.sh`.** Expected log line: `relay: listening on 127.0.0.1:8787 (db=…, mode=direct, attest=false)`.
 - [ ] **Step: Publish on the tailnet.** Run `tailscale serve --bg --https=443 http://127.0.0.1:8787`. `tailscale serve status` should show the mapping and `tailscale funnel status` nothing.
 - [ ] **Step: Probe admission.** Run `node ops/mac/check-relay.mjs https://siddharths-macbook-pro.tailnet-99bb.ts.net`. It loads `ws` with `createRequire(<checkout>/package.json)`, because Node's global `WebSocket` cannot set `x-relay-room`. It sends `x-relay-room` set to 64 random hex characters, then `{"v":1,"role":"phone"}`, receives `{"nonce":…}`, sends `{}`, and expects `{"ok":false,"error":"mac offline"}`. It exits 0 on that, non-zero otherwise.
@@ -99,9 +99,10 @@ Try in a cloud session on Linux first. Fall back to the Mac if the patched sourc
 `upstream-files.txt` holds:
 - the CompanionProtocol files cited in *notes*: `CanonicalEncoding.swift`, `PairingCode.swift`, `RelayRoom.swift`, `PairingSAS.swift`, `RelayJoin.swift`, `PairingConfirmation.swift`, `WireCoding.swift`, `CompanionProtocolVersion.swift`, and `Transport/MessageTransport.swift` (for `CompanionLog`)
 - `sources/Companion/Shared/CompanionMessages.swift` and `CompanionSession.swift`
-- whatever those pull in from `sources/AITerm/` and `sources/ClaudeCode/`, plus the shims in `Companion/iTerm2Companion/Satellites/`
+- the rest of the iOS target's shared sources at `v3.7.7`, including `sources/Categories/{Data+BigEndian,Result+iTerm,NSDictionaryCodableBox}.swift`, `sources/Companion/{CompanionMessageSubstance,MentionPlainTextRenderer}.swift`, the `sources/AITerm/` and `sources/ClaudeCode/` files, and the shims in `Companion/iTerm2Companion/Satellites/`
+- **excluded:** `sources/Companion/Shared/CompanionHEVCSampleBuilder.swift` (`CoreMedia`) and `CompanionTouchMapper.swift` (`CoreGraphics`). Neither exists on Linux, and `CompanionMessages.swift` needs neither; it defines `CompanionSelectionPoint` itself.
 
-Take that set from the iOS target's source list in the companion Xcode project at `v3.7.7`, so the harness compiles the files the iOS app compiles. The only change to upstream source is `linux.patch`.
+Enumerate every file explicitly in `upstream-files.txt`, starting from the iOS target's source list in the companion Xcode project at `v3.7.7`, so the harness compiles the files the iOS app compiles. The only change to upstream source is `linux.patch`.
 
 - [ ] **Step: `sync-upstream.sh` then `swift build`.** Expected: builds. Any extra shim for a Darwin-only API goes in `Sources/WireFixtures/Shims/`, each with a one-line `// shim:` comment naming what it stands in for.
 - [ ] **Step: Commit** ("Add upstream wire-fixture harness").
@@ -318,14 +319,14 @@ The connect flow, owned later by the foreground service. No UI in this task.
 **Files:**
 - Create: `core/CompanionClient.kt`
 - Test: `core/CompanionClientTest.kt` (fake relay in-process), `fakemac/FakeMac.kt`, `fakemac/RelayEndToEndTest.kt`
-- Create: `scripts/relay-it.sh`. It clones the relay at `b8aa2f9` into a temp dir, runs `pnpm install --prod --allow-build=better-sqlite3`, checks `better-sqlite3` loads, and runs `./gradlew testDebugUnitTest --tests '*RelayEndToEndTest*'` with `RELAY_DIR` set.
+- Create: `scripts/relay-it.sh`. It clones the relay at `b8aa2f9` into a temp dir, writes the same `allowBuilds` `pnpm-workspace.yaml`, runs `pnpm install --prod`, checks `better-sqlite3` loads, and runs `./gradlew testDebugUnitTest --tests '*RelayEndToEndTest*'` with `RELAY_DIR` set.
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: `data class ClientTimeouts(val handshakeFresh: Duration = 15.s, val handshakeReconnect: Duration = 6.s, val confirmation: Duration = 180.s, val freshMacWait: Duration = 120.s, val badSignatureLimit: Int = 3)`
+- Produces: `data class ClientTimeouts(val handshakeFresh: Duration = 15.s, val handshakeReconnect: Duration = 6.s, val confirmation: Duration = 180.s, val freshMacWait: Duration = 120.s, val rpc: Duration = 15.s, val badSignatureLimit: Int = 3, val roomSecretErrorLimit: Int = 3)`. `rpc` bounds each request/reply, matching upstream's 15 s `hello` race.
 - Produces: `class CompanionClient(store: PairingStore, http: OkHttpClient, scope: CoroutineScope, endpointsFor: (String) -> RelayEndpoints = RelayEndpoints::forOrigin, timeouts: ClientTimeouts = ClientTimeouts())`
-  - `val state: StateFlow<ClientState>`, where `ClientState` is `Unpaired`, `Connecting`, `WaitingForMac`, `ShowCode(code: String)`, `Connected(macRevision: Int)` or `Failed(message: String, rescanNeeded: Boolean)`.
-  - `fun pair(code: PairingCode)` and `fun start()`. `start()` resumes a stored pairing; a stored `PENDING_CONFIRMATION` record is cleared and the state goes to `Unpaired`.
+  - `val state: StateFlow<ClientState>`, where `ClientState` is `Unpaired`, `Connecting`, `WaitingForMac(reason: WaitReason)` (`WaitReason` is `MAC_OFFLINE` or `RELAY_UNREACHABLE`), `ShowCode(code: String)`, `Connected(macRevision: Int)` or `Failed(message: String, rescanNeeded: Boolean)`.
+  - `fun pair(code: PairingCode)` and `fun start()`. `start()` resumes a stored pairing. A stored `PENDING_CONFIRMATION` record is kept and goes through **pending recovery** (flow step 3a), because the Mac may already have pinned it.
   - `fun cancel()`: stops the current attempt. A fresh pairing is wiped (`Unpaired`); a stored pairing stays stored and goes idle until `start()`.
   - `suspend fun unpair()`: cancels reconnect work, sends `Unpairing` without waiting for a reply, then clears the store and goes to `Unpaired`, even if the send fails.
   - `suspend fun request(message: PhoneMessage): MacMessage`, `fun notify(message: PhoneMessage)` (fire-and-forget), `val events: SharedFlow<MacMessage>` for unsolicited messages.
@@ -336,13 +337,23 @@ The connect flow, owned later by the foreground service. No UI in this task.
 
 Flow (*notes* → Relay admission, Noise, After pairing):
 1. **Admit.** Use `Fresh` unless `stage == REGISTERED`, otherwise `Signed`.
-   - `mac offline` or `Unreachable` → `WaitingForMac`, retry with backoff. A fresh pairing stops after `freshMacWait` with `Failed("iTerm2 isn't showing that pairing code any more. Open pairing on the Mac and scan again.", rescanNeeded=true)`. A stored pairing retries indefinitely.
+   - `mac offline` → `WaitingForMac(MAC_OFFLINE)`; `Unreachable` → `WaitingForMac(RELAY_UNREACHABLE)`. Retry with backoff. A fresh pairing stops after `freshMacWait` with `Failed("iTerm2 isn't showing that pairing code any more. Open pairing on the Mac and scan again.", rescanNeeded=true)`. A stored pairing retries indefinitely.
    - Self-heal: a fresh admit rejected "signature required" → treat as `REGISTERED` and retry signed. A signed admit rejected "ticket required" → treat as `CONFIRMED` and retry fresh.
+   - Any other `Rejected` or `Closed` (for example "rate limited", "slot occupied" or "admission timeout"), or an `HttpFailure` where `isFatalHttp` is false (429, 5xx): treat as `mac offline`. Retry with backoff; a fresh pairing is bounded by `freshMacWait`.
+   - `HttpFailure` where `isFatalHttp` is true (403, 413, other 4xx): `Failed("The relay refused the connection (HTTP <status>): <body>", rescanNeeded=false)`, with no retry. This catches a `tailscale serve` misroute or a stray `Origin` header.
    - `badSignatureLimit` "bad signature" rejections in a row → `Failed("The relay refused this phone's signature. Check the relay address matches iTerm2's companionRelayOrigin.", rescanNeeded=true)`.
 2. **Noise handshake.** The timeout is `handshakeFresh` or `handshakeReconnect`.
 3. **Fresh only: confirmation.** Show `ShowCode(sasCode(h))` and wait up to `confirmation` for it. On "accepted", **save `CONFIRMED` immediately**: the Mac has now pinned this phone. On rejection or timeout, clear the store and go to `Failed(rescanNeeded=true)`.
+3a. **Pending recovery** (`start()` on a `PENDING_CONFIRMATION` record). The Mac may have sent "accepted" and pinned this phone (`CompanionPairingController.swift:1472-1473, 1516-1531`) before Android saved `CONFIRMED`. Admit fresh and do the handshake with the stored static key, then wait up to `rpc` for the first frame:
+   - **A pairing confirmation:** the Mac is still in SAS mode. Continue as a fresh pairing from step 3 (`ShowCode` with the new hash).
+   - **Nothing:** the Mac treats this as a reconnect, so send `hello`. If a `HelloReply` arrives, the Mac has pinned this identity: save `CONFIRMED` and continue from step 4.
+   - **`mac offline` or unreachable past `freshMacWait`:** clear the store and go to `Failed(rescanNeeded=true)`.
+
+   Pending credentials are only discarded on an explicit rejection, a timeout with the Mac present, or that deadline.
 4. **`hello` request.** If our revision < the Mac's `minimumPeer`, fail "Update the app". If the Mac's revision < `MINIMUM_PEER`, fail "Update iTerm2".
 5. **`relayRoomSecret`**, then wait for `relayRoomSecretStored`.
+
+   Every request in steps 4–5 is bounded by `rpc`. A timeout, an `error` reply, an unexpected reply or a closed connection all close this attempt, keep the stored stage, and retry with backoff. WebSocket pongs prove only the relay link, not that the Mac is answering. An `error` reply to `relayRoomSecret` (the Mac failed to persist it, `CompanionLink.swift:429-453`) `roomSecretErrorLimit` times in a row ends in `Failed("Your Mac couldn't save the pairing. Check iTerm2, then reconnect.", rescanNeeded=false)`.
 6. **`register` on every connect**, with this connection's token. It is idempotent: an established room answers 403 "already registered", which counts as success. This also re-locks a relay that lost its state.
    - `Registered` → save `REGISTERED` if not already.
    - `Refused` or `TransportError` → keep the stage, stay connected, and retry `register` on the next connect. Never save `REGISTERED` on failure.
@@ -356,7 +367,9 @@ Flow (*notes* → Relay admission, Noise, After pairing):
     - `cancelDuringFreshWaitWipes`, `cancelDuringStoredWaitKeepsPairing`.
   - Confirmation: `rejectedCodeWipesStoreAndAsksRescan`, `confirmationTimeoutWipesStore`.
   - Process death:
-    - `killBeforeConfirmationLeavesNothing`: start() on `PENDING_CONFIRMATION` gives `Unpaired`.
+    - `killAfterMacAcceptBeforeCheckpointRecovers`: the FakeMac has accepted and pinned, and the store is still `PENDING_CONFIRMATION`. start() recovers with the same static key, saves `CONFIRMED` and reaches `Connected` with no `ShowCode`.
+    - `pendingRecoveryWhileMacStillInSasShowsCode`: the FakeMac is still in SAS mode, and start() shows a code again.
+    - `pendingRecoveryWithMacGoneClears`: `mac offline` past `freshMacWait` clears the store.
     - `killAfterConfirmationReconnectsWithoutCode`: start() on `CONFIRMED` connects fresh with no `ShowCode`, registers, and reaches `REGISTERED`.
     - `lostRegisterResponseSelfHeals`: the server registered but the phone stayed `CONFIRMED`. The fresh admit gets "signature required", the phone retries signed and reaches `Connected`.
   - Registration:
@@ -365,8 +378,12 @@ Flow (*notes* → Relay admission, Noise, After pairing):
   - Self-heal and failures:
     - `signatureRequiredSelfHealsToSigned`, `ticketRequiredSelfHealsToFresh`.
     - `badSignatureSurfacesAfterThreeRejections`.
+    - `fatalHttpFailsWithoutRetry`, `unknownRejectionRetries`.
   - Reconnects: `droppedSocketReconnectsSigned`, `displacedWaitsBeforeReconnect`.
   - Version: `macTooOldFailsWithUpdateITerm2`.
+  - Stalled Mac:
+    - `helloTimeoutRetriesKeepingPairing`: the FakeMac stops answering while pongs continue. The attempt closes after `rpc`, the stage is kept, and the phone retries.
+    - `roomSecretErrorRetriesThenFails`.
   - Unpair:
     - `unpairSendsFarewellAndClearsWithoutReply`.
     - `unpairClearsEvenWhenOffline`.
@@ -394,9 +411,10 @@ Screens, one per `ClientState`:
 - `Unpaired`: a **Scan to pair** button.
   - It opens `GmsBarcodeScanning.getClient(context)` restricted to `FORMAT_QR_CODE`, so no camera permission is needed.
   - The scanned text goes to `parsePairingCode`; a `Rejected` result shows its reason.
-  - If the scanner module is still downloading on first use (`MlKitException` UNAVAILABLE), show "The scanner is still installing; try again in a moment" with a **Try again** button.
+  - If the scanner module is still downloading on first use (`MlKitException.CODE_SCANNER_UNAVAILABLE`; check the constant names against the `play-services-code-scanner` reference), show "The scanner is still installing; try again in a moment" with a **Try again** button. Backing out of the scanner (`addOnCanceledListener`, or `CODE_SCANNER_CANCELLED`) returns quietly to the button with no error.
 - `Connecting`: "Connecting…", with **Cancel**.
-- `WaitingForMac`: "Waiting for your Mac. Is iTerm2 running?", with **Cancel**.
+- `WaitingForMac(MAC_OFFLINE)`: "Waiting for your Mac. Is iTerm2 running?", with **Cancel**.
+- `WaitingForMac(RELAY_UNREACHABLE)`: "Can't reach the relay. Is Tailscale connected on this phone, and is the Mac awake?", with **Cancel**.
 - `ShowCode`: "Type this code on your Mac", with the code as `482 913` (3+3, monospace, large) and **Cancel**.
 - `Connected`: "Connected to iTerm2", with **Unpair**, which calls `client.unpair()`.
 - `Failed`: the message, plus **Scan again** when `rescanNeeded`.
@@ -409,7 +427,7 @@ On launch the app calls `start()`. Background connection is not part of this mil
   2. Force-stop the app and reopen it. Expected: Connected without scanning.
   3. Quit iTerm2. Expected: **Waiting for your Mac**. Relaunch iTerm2. Expected: Connected.
   4. Unpair on the phone. Expected: the phone shows Scan to pair, and iTerm2 shows the phone as unpaired.
-  5. Pair again, then type a wrong code on the Mac. Expected: a failure with **Scan again**.
+  5. Pair again, then type a wrong code three times on the Mac, or cancel the Mac's code dialog. One wrong code only shows "That code doesn't match" on the Mac (`CompanionPairingController.swift:1038-1053`). Expected: a failure with **Scan again** on the phone.
   6. Scan a QR, then wait more than 2 minutes with iTerm2's pairing window closed. Expected: **Scan again**, not an endless wait.
   7. Grep the relay log for `bad signature`. Expected: none.
 
