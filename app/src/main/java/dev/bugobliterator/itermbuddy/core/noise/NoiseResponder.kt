@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy.core.noise
 
+import androidx.annotation.VisibleForTesting
 import com.southernstorm.noise.protocol.HandshakeState
 
 private val EMPTY_PAYLOAD = ByteArray(0)
@@ -8,8 +9,11 @@ private val EMPTY_PAYLOAD = ByteArray(0)
  * The Mac's side of the XK handshake, used by the fake Mac in tests. It learns the phone's
  * static key from message 3 ([remoteStaticPublicKey]). Steps run strictly in order:
  * [readMessage1], [writeMessage2], [readMessage3], then [handshakeHash] and [split].
+ *
+ * The public constructor is the only production path; the internal one fixes the ephemeral
+ * key for the cacophony vectors.
  */
-class NoiseResponder internal constructor(
+class NoiseResponder @VisibleForTesting internal constructor(
     localStaticPrivate: ByteArray,
     prologue: ByteArray,
     fixedEphemeralPrivate: ByteArray?,

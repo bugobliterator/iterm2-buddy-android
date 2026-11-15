@@ -170,9 +170,9 @@ sealed class NoiseHandshake(
             block()
         } catch (e: GeneralSecurityException) {
             fail(e)
-        } catch (e: IllegalArgumentException) {
-            fail(e)
-        } catch (e: IllegalStateException) {
+        } catch (e: RuntimeException) {
+            // noise-java signals nonce exhaustion and bad arguments with runtime exceptions;
+            // any other one must still destroy the handshake rather than escape with it live.
             fail(e)
         }
 

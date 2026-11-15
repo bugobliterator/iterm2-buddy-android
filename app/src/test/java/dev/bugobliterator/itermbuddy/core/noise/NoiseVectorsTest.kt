@@ -1,5 +1,7 @@
 package dev.bugobliterator.itermbuddy.core.noise
 
+import com.southernstorm.noise.crypto.Blake2sMessageDigest
+import com.southernstorm.noise.protocol.Noise
 import dev.bugobliterator.itermbuddy.Fixtures
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -8,7 +10,9 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.junit.Test
+import java.security.Security
 
 /** cacophony's `Noise_XK_25519_ChaChaPoly_BLAKE2s` vectors, driven through the app's initiator and responder. */
 class NoiseVectorsTest {
@@ -24,7 +28,37 @@ class NoiseVectorsTest {
 
     @Test
     fun cacophonyXkVectorsPass() {
-        for ((label, vector) in vectors) {
+        runVectors("default BLAKE2s")
+    }
+
+    /** noise-java's own BLAKE2s, which runs whenever no JCA provider offers `BLAKE2S-256` (Android today). */
+    @Test
+    fun cacophonyXkVectorsPassWithFallbackBlake2s() {
+        Noise.setForceFallbacks(true)
+        try {
+            assertTrue(Noise.createHash("BLAKE2s") is Blake2sMessageDigest)
+            runVectors("fallback BLAKE2s")
+        } finally {
+            Noise.setForceFallbacks(false)
+        }
+    }
+
+    /** BouncyCastle's `BLAKE2S-256`, which noise-java prefers once BC is a registered JCA provider. */
+    @Test
+    fun cacophonyXkVectorsPassWithBouncyCastleBlake2s() {
+        val added = Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null &&
+            Security.addProvider(BouncyCastleProvider()) != -1
+        try {
+            assertEquals(BouncyCastleProvider.PROVIDER_NAME, Noise.createHash("BLAKE2s").provider.name)
+            runVectors("BouncyCastle BLAKE2s")
+        } finally {
+            if (added) Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME)
+        }
+    }
+
+    private fun runVectors(path: String) {
+        for ((vectorLabel, vector) in vectors) {
+            val label = "$vectorLabel ($path)"
             assertEquals("$label protocol_name", NOISE_PROTOCOL_NAME, vector.string("protocol_name"))
             val messages = vector.getValue("messages").jsonArray.map { it.jsonObject }
             assertTrue("$label has fewer than 3 messages", messages.size >= 3)
@@ -75,7 +109,7 @@ class NoiseVectorsTest {
     }
 
     private fun publicKeyOf(privateKey: ByteArray): ByteArray {
-        val dh = com.southernstorm.noise.protocol.Noise.createDH("25519")
+        val dh = Noise.createDH("25519")
         try {
             dh.setPrivateKey(privateKey, 0)
             return ByteArray(dh.publicKeyLength).also { dh.getPublicKey(it, 0) }
