@@ -29,6 +29,10 @@ It then reloads the agent and waits for the
 `tailscale serve` and checks Funnel again. If Funnel is on, it turns Funnel off,
 stops the agent and fails.
 
+`install-relay-helpers.mjs` holds the parts the script does in node rather than
+bash. It reads the Funnel state from the serve-status JSON, both top-level and
+foreground configs. It also renders the plist with XML escaping.
+
 ## What goes where
 
 | What | Where |
