@@ -7,7 +7,8 @@ import java.nio.charset.CodingErrorAction
 
 /**
  * The parts of `URLComponents(string:)` that upstream's pairing-code parse reads, modelled on
- * swift-corelibs-foundation (Swift 6.2, Linux), which produced the fixtures. Splits per RFC 3986
+ * swift-foundation (`FoundationEssentials`) as shipped with Swift 6.2 on Linux, which produced
+ * the fixtures; Darwin Foundation may differ on exotic hosts. Splits per RFC 3986
  * Appendix B and then follows Foundation's leniency:
  * - an invalid scheme, host or port makes the whole string unparseable ([parse] returns null);
  * - a host or userinfo is percent-decoded, and is null when that does not give valid UTF-8;

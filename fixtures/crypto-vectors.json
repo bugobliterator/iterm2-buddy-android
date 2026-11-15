@@ -484,6 +484,126 @@
       "relayOrigin" : "https://relay.example.com",
       "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
       "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidRelay",
+      "name" : "relayEncodedAtSignHost",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://good.com%2540evil.com",
+      "relayOrigin" : "https://good.com@evil.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidRelay",
+      "name" : "relayEncodedSlashHost",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://evil.com%252Fgood",
+      "relayOrigin" : "https://evil.com/good",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidRelay",
+      "name" : "relayEncodedNewlineHost",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://h%250A.evil",
+      "relayOrigin" : "https://h\n.evil",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidRelay",
+      "name" : "relayEncodedNulHost",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://h%2500",
+      "relayOrigin" : "https://h\u0000",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidRelay",
+      "name" : "relayEncodedHashHost",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://a%2523b",
+      "relayOrigin" : "https://a#b",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidRelay",
+      "name" : "relayNonASCIIHost",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://r%25C3%25A9lay.com",
+      "relayOrigin" : "https://rélay.com",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidRelay",
+      "name" : "rawQueryEncodedRelay",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=a|b&relay=https%3A%2F%2Fh",
+      "upstreamError" : "invalidRelay",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "rawQueryPairingID",
+      "pairingID" : "%41|",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=%41|&relay=https://siddharths-macbook-pro.tailnet-99bb.ts.net",
+      "relayOrigin" : "https://siddharths-macbook-pro.tailnet-99bb.ts.net",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "relayUndecodableUserinfo",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://%25FF@h",
+      "relayOrigin" : "https://h",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "relayPortOverflow",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://h:9223372036854775808",
+      "relayOrigin" : "https://h",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : true,
+      "name" : "relayUndecodablePath",
+      "pairingID" : "f7c2a1b9e05d4c3a",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://h/%25FF",
+      "relayOrigin" : "https://h",
+      "responderStaticPublicKey" : "f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f1011121314151617",
+      "upstreamOk" : true
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "unsupportedVersion",
+      "name" : "unsupportedVersionAndProtocol",
+      "qr" : "iterm2://pair?v=3&proto=X&rs=-Pn6-_z9_v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhc&pid=f7c2a1b9e05d4c3a&relay=https://relay.example.com",
+      "upstreamError" : "unsupportedVersion",
+      "upstreamOk" : false
+    },
+    {
+      "androidAccepts" : false,
+      "androidReason" : "invalidResponderKey",
+      "name" : "invalidKeyAndMissingPairingID",
+      "qr" : "iterm2://pair?v=1&proto=Noise_XK_25519_ChaChaPoly_BLAKE2s&rs=not*base64&relay=https://relay.example.com",
+      "upstreamError" : "invalidResponderKey",
+      "upstreamOk" : false
     }
   ],
   "prologues" : [
