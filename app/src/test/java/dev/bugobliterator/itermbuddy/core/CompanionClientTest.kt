@@ -524,6 +524,8 @@ class CompanionClientTest {
         val failed = h.await { it is ClientState.Failed } as ClientState.Failed
         assertTrue(failed.rescanNeeded)
         assertTrue(failed.message, failed.message.contains("companionRelayOrigin"))
+        assertTrue(failed.message, failed.message.contains("another device may have taken the relay room"))
+        assertTrue(failed.message, failed.message.contains("unpair it on the Mac"))
         assertEquals(3, h.relay.phoneAdmissions.size)
         assertTrue(h.relay.phoneAdmissions.all { it.result.contains("bad signature") })
         advanceTimeBy(10.minutes)

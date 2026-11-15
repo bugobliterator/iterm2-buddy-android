@@ -35,6 +35,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.NoRouteToHostException
 import java.net.Socket
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.security.cert.CertificateException
@@ -43,6 +44,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLException
 import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLPeerUnverifiedException
 
@@ -237,7 +239,15 @@ class RelayConnectionTest {
             NoRouteToHostException("no route") to UnreachableKind.CONNECT,
             SocketTimeoutException("connect timed out") to UnreachableKind.TIMEOUT,
             InterruptedIOException("timeout") to UnreachableKind.TIMEOUT,
-            SSLHandshakeException("PKIX path building failed") to UnreachableKind.TLS,
+            SSLHandshakeException("PKIX path building failed").apply {
+                initCause(CertificateException("unable to find valid certification path"))
+            } to UnreachableKind.TLS,
+            // Conscrypt's reset or abort around the handshake: no certificate cause, so it retries.
+            SSLHandshakeException("SSL handshake aborted").apply {
+                initCause(SocketException("Connection reset by peer"))
+            } to UnreachableKind.CONNECT,
+            SSLException("Read error") to UnreachableKind.CONNECT,
+            SSLHandshakeException("handshake failed") to UnreachableKind.CONNECT,
             SSLPeerUnverifiedException("Hostname not verified") to UnreachableKind.TLS,
             IOException("wrapped", CertificateException("expired")) to UnreachableKind.TLS,
             IOException("wrapped", UnknownHostException("x")) to UnreachableKind.DNS,

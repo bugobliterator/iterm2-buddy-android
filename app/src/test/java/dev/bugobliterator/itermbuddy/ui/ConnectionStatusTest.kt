@@ -263,7 +263,9 @@ class ConnectionStatusTest {
             ClientState.Failed("The relay refused the connection (HTTP 403): forbidden", rescanNeeded = false),
             // Three bad signatures in a row.
             ClientState.Failed(
-                "The relay refused this phone's signature. Check the relay address matches iTerm2's companionRelayOrigin.",
+                "The relay refused this phone's signature. Check the relay address matches iTerm2's " +
+                    "companionRelayOrigin, or another device may have taken the relay room. If iTerm2 still " +
+                    "lists this phone, unpair it on the Mac, then scan again.",
                 rescanNeeded = true,
             ),
             ClientState.Failed("Update the app: this iTerm2 needs a newer iTerm2 Buddy.", rescanNeeded = false),
