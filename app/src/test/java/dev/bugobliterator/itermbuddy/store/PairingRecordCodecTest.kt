@@ -9,6 +9,8 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.fail
 import org.junit.Test
 
@@ -102,6 +104,37 @@ class PairingRecordCodecTest {
         for (key in valid.keys) {
             assertRejected("missing $key", with(key, null))
             assertRejected("null $key", with(key, JsonNull))
+        }
+    }
+
+    @Test
+    fun rejectionsNeverCarrySecretText() {
+        val secret = Base64.getEncoder().encodeToString(ByteArray(32) { (0x40 + it).toByte() })
+        val room = Base64.getEncoder().encodeToString(ByteArray(32) { (0x80 + it).toByte() })
+        val text = valid.toString()
+        val cases = listOf(
+            // Malformed JSON right next to, and inside, the secrets: kotlinx quotes the input near the error.
+            text.replace("\"$secret\"", "$secret"),
+            text.replace("\"$room\"", "\"$room"),
+            text.replace("\"$room\"", "\"${room.take(20)}\u0001${room.drop(20)}\""),
+            text.dropLast(1),
+            text.replace(secret, secret.take(10) + "!" + secret.drop(11)),
+        )
+        for (case in cases) {
+            val error = try {
+                PairingRecordCodec.decode(case.toByteArray())
+                fail("accepted: case ${cases.indexOf(case)}")
+                return
+            } catch (e: PairingRecordFormatException) {
+                e
+            }
+            assertNull(error.cause)
+            val message = error.message.orEmpty()
+            for (value in listOf(secret, room)) {
+                for (window in value.windowed(8)) {
+                    assertFalse("case ${cases.indexOf(case)} message '$message' quotes a secret", message.contains(window))
+                }
+            }
         }
     }
 

@@ -10,6 +10,8 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import org.junit.Test
 
 class InMemoryPairingStoreTest {
@@ -99,13 +101,76 @@ class InMemoryPairingStoreTest {
     }
 
     @Test
+    fun skippingAStageIsNotAStaleFlow() {
+        val store = InMemoryPairingStore()
+        val pending = beginFreshPairing(store, codeA)
+        val thrown = assertThrows(IllegalStateException::class.java) {
+            advancePairing(store, pending, PairingStage.REGISTERED)
+        }
+        assertFalse(thrown is StalePairingFlowException)
+    }
+
+    @Test
+    fun sharedViewsUseOneLock() {
+        val store = InMemoryPairingStore()
+        val other = store.sharedView()
+        val record = beginFreshPairing(store, codeA)
+        assertEquals(record, other.load())
+        val started = CountDownLatch(1)
+        var fresh: PairingRecord? = null
+        val thread = Thread {
+            started.countDown()
+            fresh = beginFreshPairing(other, codeB)
+        }
+        store.withLock {
+            thread.start()
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            thread.join(200)
+            assertTrue("beginFreshPairing on the other view ran inside this lock", thread.isAlive)
+            assertEquals(record, store.load())
+            assertEquals(PairingStage.CONFIRMED, advancePairing(store, record, PairingStage.CONFIRMED).stage)
+        }
+        thread.join(5_000)
+        assertFalse(thread.isAlive)
+        assertEquals(fresh, store.load())
+        assertThrows(StalePairingFlowException::class.java) { advancePairing(store, record, PairingStage.REGISTERED) }
+    }
+
+    @Test
+    fun racingAdvanceAndFreshPairingNeverMixPairings() {
+        val store = InMemoryPairingStore()
+        val other = store.sharedView()
+        repeat(200) {
+            val record = beginFreshPairing(store, codeA)
+            val advancer = Thread {
+                try {
+                    advancePairing(store, record, PairingStage.CONFIRMED)
+                    advancePairing(store, record, PairingStage.REGISTERED)
+                } catch (_: StalePairingFlowException) {
+                    // Lost the race to the re-scan: abort, as the client does.
+                }
+            }
+            var fresh: PairingRecord? = null
+            val rescanner = Thread { fresh = beginFreshPairing(other, codeB) }
+            advancer.start()
+            rescanner.start()
+            advancer.join()
+            rescanner.join()
+            val stored = checkNotNull(store.load())
+            assertTrue("old pairing's progress landed on the new one", stored.isSamePairingAs(checkNotNull(fresh)))
+            assertEquals(codeB, stored.code)
+            assertEquals(PairingStage.PENDING_CONFIRMATION, stored.stage)
+        }
+    }
+
+    @Test
     fun stagesNeverMoveBackward() {
         val store = InMemoryPairingStore()
         val pending = beginFreshPairing(store, codeA)
         advancePairing(store, pending, PairingStage.CONFIRMED)
         val registered = advancePairing(store, pending, PairingStage.REGISTERED)
         for (earlier in listOf(PairingStage.CONFIRMED, PairingStage.PENDING_CONFIRMATION)) {
-            assertThrows(earlier.name, IllegalStateException::class.java) {
+            assertThrows(earlier.name, StalePairingFlowException::class.java) {
                 advancePairing(store, pending, earlier)
             }
             assertThrows(earlier.name, IllegalStateException::class.java) {
@@ -120,7 +185,7 @@ class InMemoryPairingStoreTest {
         val store = InMemoryPairingStore()
         val old = beginFreshPairing(store, codeA)
         val fresh = beginFreshPairing(store, codeA)
-        assertThrows(IllegalStateException::class.java) {
+        assertThrows(StalePairingFlowException::class.java) {
             advancePairing(store, old, PairingStage.CONFIRMED)
         }
         assertEquals(fresh, store.load())
@@ -131,7 +196,7 @@ class InMemoryPairingStoreTest {
         val store = InMemoryPairingStore()
         val record = beginFreshPairing(store, codeA)
         store.clear()
-        assertThrows(IllegalStateException::class.java) {
+        assertThrows(StalePairingFlowException::class.java) {
             advancePairing(store, record, PairingStage.CONFIRMED)
         }
         assertNull(store.load())

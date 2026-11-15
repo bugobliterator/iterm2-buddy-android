@@ -6,6 +6,12 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
+ * A blob that is not a [PairingBlobCipher] envelope at all: unknown envelope version or too short
+ * to hold an IV and a tag. Raised before any key is used, so it is proof the stored data is bad.
+ */
+class PairingBlobFormatException(message: String) : GeneralSecurityException(message)
+
+/**
  * The encrypted envelope around a [PairingRecordCodec] plaintext:
  *
  * ```
@@ -16,6 +22,12 @@ import javax.crypto.spec.GCMParameterSpec
  * `setRandomizedEncryptionRequired(true)` refuse a caller-chosen one), and stored in the blob.
  * The associated data is [AAD], `"itermbuddy-pairing-v1"`, binding the blob to this purpose and
  * format version: a blob sealed for another slot or version fails the tag check.
+ *
+ * Keystore operations: `Cipher.init` starts one. If a step after it fails before `doFinal` is
+ * reached, the operation is finished with a throwaway `doFinal()` so it does not hold a StrongBox
+ * slot. When `doFinal` itself throws, Keystore has already ended the operation. If the
+ * throwaway `doFinal()` fails too, keystore2 prunes the abandoned operation later; nothing more
+ * can be done from the public API.
  */
 internal object PairingBlobCipher {
     const val ENVELOPE_VERSION: Byte = 1
@@ -33,9 +45,12 @@ internal object PairingBlobCipher {
     fun seal(key: SecretKey, plaintext: ByteArray, aad: ByteArray = AAD): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key)
-        val iv = cipher.iv
-        if (iv == null || iv.size != IV_SIZE) throw GeneralSecurityException("cipher chose an unexpected IV size")
-        cipher.updateAAD(aad)
+        val iv: ByteArray? = cipher.iv
+        if (iv == null || iv.size != IV_SIZE) {
+            cipher.abandon()
+            throw GeneralSecurityException("cipher chose an unexpected IV size")
+        }
+        cipher.finishOnFailure { cipher.updateAAD(aad) }
         val sealed = cipher.doFinal(plaintext)
         // The provider's default GCM tag is 128 bits; the size check pins it.
         if (sealed.size != plaintext.size + TAG_SIZE) throw GeneralSecurityException("unexpected GCM tag size")
@@ -47,16 +62,35 @@ internal object PairingBlobCipher {
     }
 
     /**
-     * Decrypts a [seal]ed blob. Throws [GeneralSecurityException] for any blob that is not one:
-     * wrong envelope version, too short, wrong key, other associated data, or tampered bytes.
-     * The returned plaintext is the caller's to wipe.
+     * Decrypts a [seal]ed blob. Throws [PairingBlobFormatException] for a blob of another envelope
+     * version or too short, and the provider's exception otherwise: `AEADBadTagException` for a
+     * wrong key, other associated data or tampered bytes. The returned plaintext is the caller's
+     * to wipe.
      */
     fun open(key: SecretKey, blob: ByteArray, aad: ByteArray = AAD): ByteArray {
-        if (blob.size < HEADER_SIZE + TAG_SIZE) throw GeneralSecurityException("pairing blob is too short")
-        if (blob[0] != ENVELOPE_VERSION) throw GeneralSecurityException("unknown pairing blob version")
+        if (blob.size < HEADER_SIZE + TAG_SIZE) throw PairingBlobFormatException("pairing blob is too short")
+        if (blob[0] != ENVELOPE_VERSION) throw PairingBlobFormatException("unknown pairing blob version")
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_BITS, blob, 1, IV_SIZE))
-        cipher.updateAAD(aad)
+        cipher.finishOnFailure { cipher.updateAAD(aad) }
         return cipher.doFinal(blob, HEADER_SIZE, blob.size - HEADER_SIZE)
+    }
+
+    private inline fun Cipher.finishOnFailure(block: () -> Unit) {
+        try {
+            block()
+        } catch (e: Exception) {
+            abandon()
+            throw e
+        }
+    }
+
+    /** Ends a started operation whose result is not wanted. */
+    private fun Cipher.abandon() {
+        try {
+            doFinal()
+        } catch (_: Exception) {
+            // Best effort: the operation is ended either way.
+        }
     }
 }

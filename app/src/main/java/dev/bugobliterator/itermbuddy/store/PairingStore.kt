@@ -2,6 +2,7 @@ package dev.bugobliterator.itermbuddy.store
 
 import dev.bugobliterator.itermbuddy.core.noise.newStaticKeyPair
 import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
+import java.io.IOException
 import java.security.MessageDigest
 import java.security.SecureRandom
 
@@ -70,19 +71,38 @@ class PairingRecord(
 }
 
 /**
+ * The store cannot be read or written right now (Keystore busy, restarting or unreachable, or
+ * any failure that is not proof the stored data is bad). Nothing was wiped or changed.
+ *
+ * Client contract: treat it as "Waiting for your Mac"; back off and retry. Never re-pair
+ * because of it: the stored pairing is intact and the Mac still pins this phone's key.
+ */
+class PairingStoreUnavailableException(message: String, cause: Throwable? = null) : IOException(message, cause)
+
+/**
+ * [advancePairing] was called by a flow that is behind the store: the pairing it holds was
+ * cleared or replaced, or another flow already moved it past the requested stage.
+ *
+ * Client contract: abort that flow. The stored pairing, if any, is intact and is not lost.
+ */
+class StalePairingFlowException(message: String) : IllegalStateException(message)
+
+/**
  * Persistent storage for the phone's single pairing.
  *
  * Contract for every implementation:
  * - [save] returns only once the record is durable (it survives an immediate process kill),
- *   and throws if it could not be written.
+ *   and throws if it could not be written ([IOException], or [PairingStoreUnavailableException]
+ *   for a passing failure).
  * - [save] enforces the stage order (see [checkStageTransition]): into an empty store only a
  *   [PairingStage.PENDING_CONFIRMATION] record; over an existing record only the same pairing
  *   at the same or the next stage. A new pairing therefore always goes through [clear].
  *   A disallowed save throws [IllegalStateException] and changes nothing.
- * - [load] returns null when nothing is stored, or when what is stored cannot be read (it then
- *   clears the store).
- * - Implementations lock on the store instance, and [beginFreshPairing] and [advancePairing]
- *   take the same lock, so their read-modify-write is atomic. Keep one instance per process.
+ * - [load] returns null when nothing is stored, or when there is proof that what is stored is
+ *   bad (it then clears the store). Any other failure throws [PairingStoreUnavailableException]
+ *   and leaves everything in place.
+ * - Every method runs under [withLock], whose lock covers every instance over the same storage,
+ *   so [beginFreshPairing] and [advancePairing] are atomic however many instances exist.
  */
 interface PairingStore {
     fun load(): PairingRecord?
@@ -90,6 +110,9 @@ interface PairingStore {
     fun save(record: PairingRecord)
 
     fun clear()
+
+    /** Runs [block] holding the lock every method of every instance over this storage takes. */
+    fun <T> withLock(block: () -> T): T
 }
 
 /**
@@ -111,33 +134,42 @@ internal fun checkStageTransition(current: PairingRecord?, next: PairingRecord) 
 /**
  * A [PairingStore] in memory, for tests. It keeps the record in its encoded form, so every
  * save and load goes through [PairingRecordCodec] as the Keystore store's does.
+ * [sharedView] gives a second instance over the same storage and lock, as two
+ * `KeystorePairingStore`s in one process are.
  */
-class InMemoryPairingStore : PairingStore {
-    private var encoded: ByteArray? = null
+class InMemoryPairingStore private constructor(private val storage: Storage) : PairingStore {
+    constructor() : this(Storage())
 
-    @Synchronized
-    override fun load(): PairingRecord? {
-        val bytes = encoded ?: return null
-        return try {
-            PairingRecordCodec.decode(bytes)
-        } catch (_: PairingRecordFormatException) {
-            clear()
-            null
+    private class Storage {
+        var encoded: ByteArray? = null
+    }
+
+    /** Another instance over the same storage and lock. */
+    fun sharedView(): InMemoryPairingStore = InMemoryPairingStore(storage)
+
+    override fun <T> withLock(block: () -> T): T = synchronized(storage) { block() }
+
+    override fun load(): PairingRecord? = withLock {
+        storage.encoded?.let { bytes ->
+            try {
+                PairingRecordCodec.decode(bytes)
+            } catch (_: PairingRecordFormatException) {
+                clear()
+                null
+            }
         }
     }
 
-    @Synchronized
-    override fun save(record: PairingRecord) {
+    override fun save(record: PairingRecord) = withLock {
         checkStageTransition(load(), record)
         val bytes = PairingRecordCodec.encode(record)
-        encoded?.fill(0)
-        encoded = bytes
+        storage.encoded?.fill(0)
+        storage.encoded = bytes
     }
 
-    @Synchronized
-    override fun clear() {
-        encoded?.fill(0)
-        encoded = null
+    override fun clear() = withLock {
+        storage.encoded?.fill(0)
+        storage.encoded = null
     }
 }
 
@@ -147,9 +179,11 @@ private val secureRandom = SecureRandom()
  * Starts a new pairing for a scanned [code]: clears [store] first, so no secret of an earlier
  * pairing survives even if what follows fails, then mints a new X25519 static key pair and a new
  * 32-byte room secret and saves them at [PairingStage.PENDING_CONFIRMATION].
- * Returns the saved record. Throws if the store cannot be cleared or written.
+ * Returns the saved record. Throws if the store cannot be cleared or written; if that happens
+ * after the clear (say the new key cannot be made), no pairing is left and the client shows
+ * Scan again.
  */
-fun beginFreshPairing(store: PairingStore, code: PairingCode): PairingRecord = synchronized(store) {
+fun beginFreshPairing(store: PairingStore, code: PairingCode): PairingRecord = store.withLock {
     store.clear()
     val (staticPrivate, _) = newStaticKeyPair()
     val roomSecret = ByteArray(SECRET_SIZE).also(secureRandom::nextBytes)
@@ -164,17 +198,25 @@ fun beginFreshPairing(store: PairingStore, code: PairingCode): PairingRecord = s
 }
 
 /**
- * Checkpoints the stored pairing at stage [to] and returns the saved record. [expected] is the
- * record the caller is working on; if the store no longer holds that pairing (it was cleared or
- * re-scanned), this throws [IllegalStateException] rather than advance a pairing the caller never
- * saw. [to] must be the stored stage (a no-op, no write) or the next one; anything else throws
- * [IllegalStateException]. The write is a synchronous commit (see [PairingStore.save]).
+ * Checkpoints the stored pairing at stage [to] and returns the saved record. The write is a
+ * synchronous commit (see [PairingStore.save]).
+ *
+ * - [expected] is the record the caller is working on. If the store no longer holds that pairing
+ *   (cleared or re-scanned), or already holds it at a later stage, this throws
+ *   [StalePairingFlowException]: the caller aborts its flow; nothing is changed or lost.
+ * - [to] equal to the stored stage is a no-op with no write.
+ * - Skipping a stage is a programming error and throws [IllegalStateException].
  */
 fun advancePairing(store: PairingStore, expected: PairingRecord, to: PairingStage): PairingRecord =
-    synchronized(store) {
-        val current = checkNotNull(store.load()) { "no pairing is stored" }
-        check(current.isSamePairingAs(expected)) { "the stored pairing is not the one being advanced" }
-        if (current.stage == to) return current
+    store.withLock {
+        val current = store.load() ?: throw StalePairingFlowException("no pairing is stored")
+        if (!current.isSamePairingAs(expected)) {
+            throw StalePairingFlowException("the stored pairing is not the one being advanced")
+        }
+        if (to.ordinal < current.stage.ordinal) {
+            throw StalePairingFlowException("the pairing is already at ${current.stage}")
+        }
+        if (current.stage == to) return@withLock current
         val next = current.withStage(to)
         checkStageTransition(current, next)
         store.save(next)
