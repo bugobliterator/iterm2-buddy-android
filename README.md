@@ -15,17 +15,25 @@ export JAVA_HOME="$HOME/jdk/java-17-openjdk-amd64"
 ./gradlew testDebugUnitTest lint assembleDebug
 ```
 
-## Installing with Obtainium
+## Installing test builds (Firebase App Distribution)
 
-Every push to `main` publishes a GitHub pre-release named `build-<short sha>` with a debug APK signed with the project's shared debug key. To install and update it on a phone with [Obtainium](https://github.com/ImranR98/Obtainium):
+Every push to `main` builds a debug APK signed with the project's shared debug key and sends it to the `owner` tester group in Firebase App Distribution.
 
-1. In Obtainium, tap **Add App** and enter `https://github.com/bugobliterator/iterm2-buddy-android`.
-2. Turn on **Include prereleases**.
-3. Set the APK filter regex to `itermbuddy-debug-.*\.apk`.
-4. Tap **Add**, then **Install**.
+1. Accept the tester invite email from Firebase App Distribution on the Pixel.
+2. Follow the invite to install the Firebase App Tester flow, then install the build from it.
+3. Each later push to `main` sends a new build, for example `0.1.0-5c99c6a`; App Tester notifies you; installing it over the previous build keeps the pairing.
 
-Example: after a push of commit `5c99c6a`, Obtainium shows an update to version `0.1.0-5c99c6a` and installs `itermbuddy-debug-5c99c6a.apk`.
+The first install of a shared-key build fails if the phone holds a build signed with another key (from a cloud session or a local build). Uninstall that build first; this deletes the pairing, so pair again afterwards.
 
-The first install of a shared-key build fails if the phone holds a build signed with another key (from a cloud session or `adb install`). Uninstall that build first; this deletes the pairing, so pair again afterwards. Later updates keep the pairing.
+One-time owner setup:
+
+- A Firebase project with an Android app for package `dev.bugobliterator.itermbuddy`.
+- A tester group `owner` in App Distribution, with the tester added in the Firebase console.
+- A Google Cloud service account with the Firebase App Distribution Admin role, and a JSON key for it.
+- GitHub repository secret `FIREBASE_SERVICE_ACCOUNT_JSON`: the service account's JSON key.
+- GitHub repository variable `FIREBASE_APP_ID`: the Firebase Android app ID (`1:...:android:...`).
+- GitHub repository secret `DEBUG_KEYSTORE_BASE64`: the shared debug keystore, base64-encoded (alias `androiddebugkey`, passwords `android`).
+
+Without any of these, the workflow still builds the APKs and skips the upload with a warning.
 
 License: GPL-2.0, as iTerm2.

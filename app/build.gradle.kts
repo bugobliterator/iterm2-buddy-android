@@ -13,7 +13,7 @@ android {
         applicationId = "dev.bugobliterator.itermbuddy"
         minSdk = 34
         targetSdk = 37
-        // CI passes -PciVersionCode / -PciVersionName so Obtainium can detect updates.
+        // CI passes -PciVersionCode / -PciVersionName; Firebase App Distribution shows them.
         versionCode = providers.gradleProperty("ciVersionCode").orNull?.toInt() ?: 1
         versionName = providers.gradleProperty("ciVersionName").orNull ?: "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
