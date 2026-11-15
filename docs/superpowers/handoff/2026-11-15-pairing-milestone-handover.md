@@ -70,6 +70,11 @@ Notes from that task:
 - Swift runs in Docker (`swift:6.2-noble`); start `dockerd` first if it is not running.
 - Maven Central (`repo.maven.apache.org`) intermittently answers 429 or a spurious 404 through the proxy. Gradle caches those misses, so a failed resolve may need `--refresh-dependencies` and a retry.
 
+## Follow-ups found in review
+
+- Enable R8 for release builds (`isMinifyEnabled = true` with `proguard-android-optimize.txt`). BouncyCastle (`bcprov-jdk18on`, 7 MB) ships whole without it; a trial R8 build kept about 30 BouncyCastle classes, gave a 1.8 MB release APK and no warnings.
+- Check the relay challenge nonce is 32 bytes where it is base64-decoded (Relay Connection).
+
 ## Plan deviations already ruled on
 
 - Plan tasks are named, not numbered. Hand each implementer only "Global Constraints", "Review Focus" and its own `### Task:` section, never the whole plan.
