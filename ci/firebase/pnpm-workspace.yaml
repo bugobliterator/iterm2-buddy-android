@@ -1,0 +1,4 @@
+# Run no dependency build scripts. protobufjs's postinstall only checks its
+# own version, and the Firebase CLI works without it.
+allowBuilds:
+  protobufjs: false
