@@ -72,6 +72,9 @@ import kotlin.time.TimeSource
  * @property roomSecretErrorLimit `error` replies to `relayRoomSecret` in a row before giving up.
  * @property admission bound on relay admission, connect to result (addition; upstream 30 s).
  * @property register bound on one `/register` call (addition).
+ * @property codeShownGrace (addition) a session that showed the code for longer than this proves
+ *   the Mac was there, so the Mac-absence clock starts again from zero when it ends. A session
+ *   that closes sooner with no frame from the Mac (such as a Mac pinned to another key) does not.
  */
 data class ClientTimeouts(
     val handshakeFresh: Duration = 15.seconds,
@@ -83,6 +86,7 @@ data class ClientTimeouts(
     val roomSecretErrorLimit: Int = 3,
     val admission: Duration = 30.seconds,
     val register: Duration = 30.seconds,
+    val codeShownGrace: Duration = 2.seconds,
 )
 
 /** Why the client is waiting rather than connected. */
@@ -220,8 +224,11 @@ class CompanionClient internal constructor(
     fun cancel() {
         launchControl {
             val fresh = freshCode
-            freshCode = null
-            if (fresh != null) wipeUnconfirmed(fresh)
+            // Committed: finish the wipe even if a later start() or pair() supersedes this cancel.
+            withContext(NonCancellable) {
+                freshCode = null
+                if (fresh != null) wipeUnconfirmed(fresh)
+            }
             setState(if (hasStoredPairing()) ClientState.Idle else ClientState.Unpaired)
         }
     }
@@ -479,7 +486,8 @@ class CompanionClient internal constructor(
          * [ClientTimeouts.freshMacWait]. It runs from the end of an attempt that ended with no
          * frame from the Mac (mac offline, unreachable, a failed handshake, a Mac that closed
          * silently), pauses while the code is on screen, and resets whenever a decrypted frame
-         * from the Mac arrives. Time spent waiting for the user to type the code never counts,
+         * from the Mac arrives or an attempt showed the code for longer than
+         * [ClientTimeouts.codeShownGrace] (the Mac was there; a verdict may have been lost). Time spent waiting for the user to type the code never counts,
          * as upstream defers QR regeneration during a confirmation
          * (`CompanionPairingController.swift:805-810`).
          */
@@ -487,6 +495,13 @@ class CompanionClient internal constructor(
 
         /** Whether the current attempt decrypted any frame from the Mac. */
         private var heardThisAttempt = false
+
+        /** When the current attempt put the code on screen, if it did. */
+        private var codeShownAt: ComparableTimeMark? = null
+
+        /** Whether the current attempt showed the code longer than [ClientTimeouts.codeShownGrace]. */
+        private val codeShownLong: Boolean
+            get() = codeShownAt?.let { it.elapsedNow() > timeouts.codeShownGrace } == true
 
         private val unconfirmed get() = record.stage == PairingStage.PENDING_CONFIRMATION
 
@@ -505,6 +520,7 @@ class CompanionClient internal constructor(
                     return
                 }
                 heardThisAttempt = false
+                codeShownAt = null
                 val end = try {
                     connectOnce(endpoints)
                 } catch (e: StalePairingFlowException) {
@@ -532,7 +548,11 @@ class CompanionClient internal constructor(
                         proofSwitches = 0
                         when {
                             heardThisAttempt -> absence.reset()
-                            end.reason != WaitReason.STORE_UNAVAILABLE -> absence.resume()
+                            end.reason != WaitReason.STORE_UNAVAILABLE -> {
+                                // The Mac was there while the code was up: its absence starts now.
+                                if (codeShownLong) absence.reset()
+                                absence.resume()
+                            }
                         }
                         when {
                             // A confirmed pairing outlives a torn-down room: the Mac keeps it and re-parks.
@@ -855,6 +875,7 @@ class CompanionClient internal constructor(
         /** Shows the code; the Mac is present, so its absence stops counting. */
         private fun showCode(hash: ByteArray) {
             absence.pause()
+            codeShownAt = timeSource.markNow()
             setState(ClientState.ShowCode(sasCode(hash)))
         }
 
