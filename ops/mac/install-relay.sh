@@ -48,18 +48,17 @@ tailscale status --json \
                   process.exit((s.CertDomains ?? []).includes(process.argv[1]) ? 0 : 1)' "$RELAY_HOSTNAME" \
     || die "tailscale CertDomains does not list $RELAY_HOSTNAME; enable HTTPS certificates for the tailnet"
 
-# Prints "on" or "off" from the machine-readable serve config; any failure to
-# read or parse it fails the script. `null` means no serve config at all.
+HELPERS="$SCRIPT_DIR/install-relay-helpers.mjs"
+
+# Prints "on" or "off" from the machine-readable serve config (top-level and
+# foreground Funnel). Any failure to read or parse it returns non-zero.
 funnel_state() {
     local status
-    status="$(tailscale serve status --json)" || die "tailscale serve status --json failed"
-    printf '%s' "$status" | "$NODE" -e '
-        const config = JSON.parse(require("fs").readFileSync(0, "utf8"));
-        const allowFunnel = config?.AllowFunnel ?? {};
-        process.stdout.write(Object.values(allowFunnel).some((enabled) => enabled === true) ? "on" : "off");
-    ' || die "cannot parse tailscale serve status --json"
+    status="$(tailscale serve status --json)" || { echo "install-relay: tailscale serve status --json failed" >&2; return 1; }
+    printf '%s' "$status" | "$NODE" "$HELPERS" funnel-state \
+        || { echo "install-relay: cannot parse tailscale serve status --json" >&2; return 1; }
 }
-funnel="$(funnel_state)"
+funnel="$(funnel_state)" || die "cannot read the Funnel state"
 [[ "$funnel" == "off" ]] || die "tailscale funnel is on; the relay must stay tailnet only (tailscale funnel reset)"
 
 # Keep the installed port unless RELAY_PORT overrides it.
@@ -127,28 +126,15 @@ RELAY_DAILY_BYTE_QUOTA=8589934592
 RELAY_TRUST_PROXY=true"
 ( umask 077 && printf '%s\n' "$environment_lines" > "$WORK_DIR/relay.env" )
 
-xml_escape() {
-    local text="$1"
-    text="${text//&/&amp;}"
-    text="${text//</&lt;}"
-    text="${text//>/&gt;}"
-    text="${text//\"/&quot;}"
-    printf '%s' "$text"
-}
-
-# launchd cannot source an env file, so the values go into the plist.
-environment=""
-while IFS='=' read -r key value; do
-    environment+="        <key>$(xml_escape "$key")</key>"$'\n'"        <string>$(xml_escape "$value")</string>"$'\n'
-done <<< "$environment_lines"
-environment="${environment%$'\n'}"
-plist="$(cat "$SCRIPT_DIR/$LABEL.plist.template")"
-plist="${plist//@NODE@/$(xml_escape "$NODE")}"
-plist="${plist//@CHECKOUT@/$(xml_escape "$CHECKOUT")}"
-plist="${plist//@LOG@/$(xml_escape "$LOG")}"
-plist="${plist//@ENVIRONMENT@/$environment}"
-printf '%s\n' "$plist" > "$WORK_DIR/relay.plist"
+# launchd cannot source an env file, so the values go into the plist. The
+# helper fills the template in node: Bash 5.3's patsub_replacement would treat
+# `&` in ${var//pattern/replacement} specially.
+RELAY_NODE="$NODE" RELAY_CHECKOUT="$CHECKOUT" RELAY_LOG="$LOG" \
+    "$NODE" "$HELPERS" render-plist "$SCRIPT_DIR/$LABEL.plist.template" "$WORK_DIR/relay.env" "$WORK_DIR/relay.plist" \
+    || die "cannot render the plist"
 plutil -lint -s "$WORK_DIR/relay.plist" || die "rendered plist is invalid: $WORK_DIR/relay.plist"
+rendered_node="$(plutil -extract ProgramArguments.0 raw -o - "$WORK_DIR/relay.plist")"
+[[ "$rendered_node" == "$NODE" ]] || die "rendered plist names node '$rendered_node', expected '$NODE'"
 
 # --- Replace the running agent ----------------------------------------------
 
@@ -181,11 +167,13 @@ say "$started"
 
 say "publishing on the tailnet: tailscale serve --bg --https=443 http://127.0.0.1:$RELAY_PORT"
 tailscale serve --bg --https=443 "http://127.0.0.1:$RELAY_PORT"
-funnel="$(funnel_state)"
-if [[ "$funnel" != "off" ]]; then
+# Fail closed: if Funnel is on, or its state cannot be read, unpublish and stop.
+unpublish_and_stop() {
     tailscale funnel --https=443 off || true
     launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-    die "tailscale funnel turned on while publishing; turned it off and stopped $LABEL"
-fi
+    die "$1; ran tailscale funnel --https=443 off and stopped $LABEL"
+}
+funnel="$(funnel_state)" || unpublish_and_stop "cannot read the Funnel state after publishing"
+[[ "$funnel" == "off" ]] || unpublish_and_stop "tailscale funnel is on after publishing"
 tailscale serve status
 say "done; probe with: node $SCRIPT_DIR/check-relay.mjs $RELAY_ORIGIN"
