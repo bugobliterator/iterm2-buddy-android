@@ -65,7 +65,8 @@ class SessionMessagesTest {
 
     /** Every phoneToMac sample, with the message and request ID the Android client sends. */
     private val phoneMessages: Map<String, Pair<PhoneMessage, Long?>> = mapOf(
-        "hello-phone" to (PhoneMessage.Hello() to 1L),
+        // The v3.7.7 sample advertises 11; the app now advertises ProtocolRevision.REVISION.
+        "hello-phone" to (PhoneMessage.Hello(revision = 11, minimumPeer = 11) to 1L),
         "relay-room-secret" to (PhoneMessage.RelayRoomSecret(sampleSecret) to 2L),
         "ping" to (PhoneMessage.Ping to 3L),
         "unpairing" to (PhoneMessage.Unpairing to null),
@@ -108,9 +109,9 @@ class SessionMessagesTest {
 
     @Test
     fun phoneHelloAdvertisesProtocolRevision() {
-        assertEquals(11, ProtocolRevision.REVISION)
+        assertTrue(ProtocolRevision.REVISION >= ProtocolRevision.MINIMUM_PEER)
         assertEquals(11, ProtocolRevision.MINIMUM_PEER)
-        assertEquals(PhoneMessage.Hello(11, 11), PhoneMessage.Hello())
+        assertEquals(PhoneMessage.Hello(ProtocolRevision.REVISION, ProtocolRevision.MINIMUM_PEER), PhoneMessage.Hello())
         // What the Mac speaks at v3.7.7 must accept us, and we must accept it.
         val mac = Json.parseToJsonElement(Fixtures.read("messages/revision.json")).jsonObject
         val macRevision = mac.getValue("revision").jsonPrimitive.int
