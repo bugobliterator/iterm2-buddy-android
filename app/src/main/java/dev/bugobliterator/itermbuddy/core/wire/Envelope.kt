@@ -1,8 +1,10 @@
 package dev.bugobliterator.itermbuddy.core.wire
 
 import java.nio.charset.CharacterCodingException
+import java.util.Base64
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -49,6 +51,12 @@ fun encodeEnvelope(message: PhoneMessage, requestID: Long?): ByteArray {
  * - A frame whose first byte is `0x01` is a media frame: `Unsupported("media", {})`.
  * - Integers are plain literals: `15.0` or `1e2` is rejected where Swift's
  *   `JSONDecoder` may accept it. A deliberate deviation; the Mac writes integer literals.
+ * - A `Double` field takes any JSON number literal (`32`, `15.75`). A `UInt32` field
+ *   (stream IDs, generations) reads into a [Long] and must be in [0, 2^32).
+ * - Optional fields follow upstream's `decodeIfPresent`: absent or `null` takes the
+ *   default; present with the wrong type throws.
+ * - One leniency beyond upstream: an unrecognised `streamEnded` reason decodes to
+ *   `StreamEndReason.UNKNOWN`, so a stream end is never refused.
  *
  * JSON leniency: kotlinx accepts some non-standard values (unquoted literals such as
  * `abc`) in positions this decoder ignores, while a BOM or UTF-16 frame is rejected.
@@ -140,6 +148,8 @@ private fun parseJson(bytes: ByteArray): JsonElement {
 
 private val UNSIGNED_INTEGER = Regex("0|[1-9][0-9]*")
 private val SIGNED_INTEGER = Regex("-?(0|[1-9][0-9]*)")
+private val NUMBER = Regex("-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?")
+internal const val U32_MAX = 0xFFFF_FFFFL
 
 private fun decodeRequestID(element: JsonElement?): Long? {
     if (element == null || element == JsonNull) return null
@@ -161,6 +171,10 @@ private fun decodeMacCase(case: String, body: JsonElement, payload: JsonObject):
     "relayRoomSecretStored" -> MacMessage.RelayRoomSecretStored.also { body.asObject(case) }
     "pong" -> MacMessage.Pong.also { body.asObject(case) }
     "unpaired" -> MacMessage.Unpaired.also { body.asObject(case) }
+    "sessionTree" -> decodeSessionTree(body)
+    "streamStarted" -> decodeStreamStarted(body)
+    "streamConfig" -> decodeStreamConfig(body)
+    "streamEnded" -> decodeStreamEnded(body)
     "error" -> {
         val error = body.asObject(case)[UNLABELLED] as? JsonObject
             ?: throw WireDecodeException("error.$UNLABELLED is missing or not an object")
@@ -178,13 +192,17 @@ private fun jsonType(element: JsonElement): String = when {
     else -> "array"
 }
 
-private fun JsonElement.asObject(case: String): JsonObject =
+// Body helpers, shared with the stream decoders. [case] names the field's path in errors
+// (`streamConfig.cellGeometry`); a value is never put in a message.
+
+internal fun JsonElement.asObject(case: String): JsonObject =
     this as? JsonObject ?: throw WireDecodeException("$case body is not an object")
 
 private fun JsonElement.isBoolean(): Boolean =
     this is JsonPrimitive && !isString && (content == "true" || content == "false")
 
-private fun JsonObject.long(case: String, key: String): Long {
+/** A plain integer literal that fits in a [Long] (Swift `Int`/`Int64`); `15.0` and `1e2` are rejected. */
+internal fun JsonObject.long(case: String, key: String): Long {
     val literal = (get(key) as? JsonPrimitive)?.takeUnless { it.isString }?.content
     if (literal == null || !SIGNED_INTEGER.matches(literal)) {
         throw WireDecodeException("$case.$key is missing or not an integer")
@@ -192,14 +210,67 @@ private fun JsonObject.long(case: String, key: String): Long {
     return literal.toLongOrNull() ?: throw WireDecodeException("$case.$key is out of range (${literal.length} digits)")
 }
 
-private fun JsonObject.string(case: String, key: String): String {
+/** A Swift `Int` field read into a Kotlin [Int]: a value outside its range is rejected, not truncated. */
+internal fun JsonObject.int(case: String, key: String): Int {
+    val value = long(case, key)
+    if (value !in Int.MIN_VALUE..Int.MAX_VALUE) throw WireDecodeException("$case.$key is out of range")
+    return value.toInt()
+}
+
+/** A Swift `UInt32` field, read into a [Long] in [0, 2^32). */
+internal fun JsonObject.u32(case: String, key: String): Long {
+    val value = long(case, key)
+    if (value !in 0..U32_MAX) throw WireDecodeException("$case.$key is out of UInt32 range")
+    return value
+}
+
+/** A Swift `Double` field: any JSON number literal, integer (`32`) or decimal (`15.75`, `1e2`). */
+internal fun JsonObject.double(case: String, key: String): Double {
+    val literal = (get(key) as? JsonPrimitive)?.takeUnless { it.isString }?.content
+    if (literal == null || !NUMBER.matches(literal)) throw WireDecodeException("$case.$key is missing or not a number")
+    return literal.toDouble().takeIf { it.isFinite() } ?: throw WireDecodeException("$case.$key is out of range")
+}
+
+internal fun JsonObject.boolean(case: String, key: String): Boolean {
+    val value = get(key)
+    if (value == null || !value.isBoolean()) throw WireDecodeException("$case.$key is missing or not a boolean")
+    return (value as JsonPrimitive).content == "true"
+}
+
+internal fun JsonObject.string(case: String, key: String): String {
     val value = get(key) as? JsonPrimitive
     if (value == null || !value.isString) throw WireDecodeException("$case.$key is missing or not a string")
     return value.content
 }
 
+/** Swift `Data`: standard padded base64 in a string (`Data(base64Encoded:)`). */
+internal fun JsonObject.base64(case: String, key: String): ByteArray {
+    val text = string(case, key)
+    if (text.length % 4 != 0) throw WireDecodeException("$case.$key is not padded base64")
+    return try {
+        Base64.getDecoder().decode(text)
+    } catch (e: IllegalArgumentException) {
+        throw WireDecodeException("$case.$key is not base64", e)
+    }
+}
+
+internal fun JsonObject.obj(case: String, key: String): JsonObject =
+    get(key) as? JsonObject ?: throw WireDecodeException("$case.$key is missing or not an object")
+
+internal fun JsonObject.array(case: String, key: String): JsonArray =
+    get(key) as? JsonArray ?: throw WireDecodeException("$case.$key is missing or not an array")
+
 /** An optional field: absent or `null` reads as nil, as `decodeIfPresent` does; otherwise it must be [valid]. */
-private fun JsonObject.optional(case: String, key: String, valid: (JsonElement) -> Boolean) {
+internal fun JsonObject.optional(case: String, key: String, valid: (JsonElement) -> Boolean) {
     val value = get(key)
     if (value != null && value != JsonNull && !valid(value)) throw WireDecodeException("$case.$key has the wrong type")
+}
+
+/**
+ * `decodeIfPresent`: null when [key] is absent or `null`, else [read] of it, which throws
+ * for a value of the wrong type (upstream throws too; only absence takes the default).
+ */
+internal fun <T> JsonObject.ifPresent(key: String, read: JsonObject.(String) -> T): T? {
+    val value = get(key)
+    return if (value == null || value == JsonNull) null else read(key)
 }

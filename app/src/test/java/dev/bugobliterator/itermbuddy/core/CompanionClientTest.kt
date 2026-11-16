@@ -11,6 +11,7 @@ import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
 import dev.bugobliterator.itermbuddy.core.relay.UnreachableKind
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
+import dev.bugobliterator.itermbuddy.core.wire.ProtocolRevision
 import dev.bugobliterator.itermbuddy.fakemac.FakeMac
 import dev.bugobliterator.itermbuddy.fakemac.FakeRelay
 import dev.bugobliterator.itermbuddy.store.InMemoryPairingStore
@@ -151,7 +152,7 @@ class CompanionClientTest {
 
         // Sends to the Mac match the v3.7.7 golden samples, request IDs included.
         val sent = h.mac.receivedEnvelopes()
-        assertEquals(FakeMac.fixtureJson("hello-phone.json"), sent[0])
+        assertEquals(withRevision(FakeMac.fixtureJson("hello-phone.json"), ProtocolRevision.REVISION), sent[0])
         val secretSample = FakeMac.fixtureJson("relay-room-secret.json")
         assertEquals(withSecret(secretSample, record.roomSecret), sent[1])
         assertEquals(FakeMac.fixtureJson("ping.json"), sent[2])
@@ -675,7 +676,7 @@ class CompanionClientTest {
         val h = Harness(this)
         val record = h.stored(PairingStage.CONFIRMED)
         h.macPinned(record)
-        h.mac.minimumPeer = 12
+        h.mac.minimumPeer = ProtocolRevision.REVISION + 1
         h.mac.start()
         h.client.start()
 
@@ -1167,6 +1168,14 @@ class CompanionClientTest {
             } finally {
                 dh.destroy()
             }
+        }
+
+        /** [sample] with its hello's `revision` replaced: the v3.7.7 sample advertises 11. */
+        fun withRevision(sample: JsonObject, revision: Int): JsonObject {
+            val payload = sample.getValue("payload") as JsonObject
+            val hello = payload.getValue("hello") as JsonObject
+            val body = JsonObject(hello + ("revision" to JsonPrimitive(revision)))
+            return JsonObject(sample + ("payload" to JsonObject(payload + ("hello" to body))))
         }
 
         fun withSecret(sample: JsonObject, secret: ByteArray): JsonObject {
