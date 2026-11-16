@@ -124,8 +124,10 @@ sealed class NoiseHandshake(
     /**
      * Finishes the handshake: returns the transport channel and destroys the handshake state.
      * Only valid once message 3 has been written or read.
+     *
+     * @param maxMessageBytes the channel's cap on one reassembled message ([NoiseChannel]).
      */
-    fun split(): NoiseChannel {
+    fun split(maxMessageBytes: Int = DEFAULT_MAX_MESSAGE_BYTES): NoiseChannel {
         val handshake = checkNotNull(state) { "handshake is closed" }
         check(nextMessage == 4 && handshake.action == HandshakeState.SPLIT) { "handshake has not finished" }
         val pair = try {
@@ -134,7 +136,7 @@ sealed class NoiseHandshake(
             close()
         }
         // noise-java swaps the pair for the responder, so the sender is always this side's.
-        return NoiseChannel(pair.sender, pair.receiver)
+        return NoiseChannel(pair.sender, pair.receiver, maxMessageBytes)
     }
 
     /** Destroys the handshake state (keys, chaining key). Idempotent. */

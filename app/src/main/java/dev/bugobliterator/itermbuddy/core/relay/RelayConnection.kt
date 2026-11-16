@@ -4,7 +4,10 @@ import androidx.annotation.VisibleForTesting
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ChannelIterator
+import kotlinx.coroutines.channels.ChannelResult
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.selects.SelectClause1
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -30,6 +33,7 @@ import java.net.UnknownHostException
 import java.security.cert.CertificateException
 import java.util.Base64
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLException
 import javax.net.ssl.SSLPeerUnverifiedException
 
@@ -150,6 +154,12 @@ class RelayClosedException(val code: Int, val reason: String) : IOException("rel
 /** The relay broke framing after admission, such as by sending a text frame. The connection is closed. */
 class RelayProtocolException(message: String) : IOException(message)
 
+/**
+ * Default bound on received frames waiting for the reader of [RelayConnection.incoming]: 64 MiB.
+ * Over it the connection is closed (never a frame dropped while it stays open).
+ */
+const val DEFAULT_MAX_QUEUED_BYTES: Long = 64L * 1024 * 1024
+
 /** [RelayConnection.send] could not queue a frame; the connection is closed or closing. */
 class RelaySendException(message: String) : IOException(message)
 
@@ -169,6 +179,11 @@ class RelaySendException(message: String) : IOException(message)
  * @param roomName 64 lowercase hex characters, as `roomName(code)` gives.
  * @param admissionTimeoutMillis bound on [admit] from connect to result (upstream: 30 s).
  * @param pingIntervalMillis WebSocket ping cadence; OkHttp fails the socket on a missed pong.
+ * @param maxQueuedBytes bound on received frames not yet read from [incoming]. Bytes count when
+ *   a frame is queued and are released when it is received. A frame that would pass the bound
+ *   closes the connection: [incoming] delivers every frame queued before it, in order, then fails
+ *   with [RelayClosedException] 1006 whose reason starts "receive queue over budget". No frame is ever dropped
+ *   while the connection stays open.
  * @param client the caller's client. An `Origin` header any of its application interceptors add
  *   is stripped. WebSocket calls run no network interceptors, but the production client must not
  *   add `Origin` anywhere regardless.
@@ -179,6 +194,7 @@ class RelayConnection(
     private val roomName: String,
     private val admissionTimeoutMillis: Long = DEFAULT_ADMISSION_TIMEOUT_MILLIS,
     pingIntervalMillis: Long = DEFAULT_PING_INTERVAL_MILLIS,
+    private val maxQueuedBytes: Long = DEFAULT_MAX_QUEUED_BYTES,
 ) {
     init {
         require(ROOM_NAME_PATTERN.matches(roomName)) { "room name must be 64 lowercase hex characters" }
@@ -189,17 +205,24 @@ class RelayConnection(
         .addInterceptor(StripOriginHeader)
         .build()
 
-    // Unbounded on purpose: OkHttp's single reader thread must never block, or pings and the
-    // close handshake stall behind a slow consumer. The relay bounds what can pile up here: it
-    // splices at most 500 frames/s per room, each at most 256 KiB, and 512 MiB per room per day
-    // (room.js:51-61). A consumer that stops reading for long should close the connection.
+    // Unbounded in count on purpose: OkHttp's single reader thread must never block, or pings
+    // and the close handshake stall behind a slow consumer. Bounded in bytes by maxQueuedBytes:
+    // over it the connection closes rather than drop a frame (the Noise stream cannot skip one).
     private val frames = Channel<ByteArray>(Channel.UNLIMITED)
+
+    /** Bytes of frames queued in [frames] and not yet received. */
+    private val queuedBytes = AtomicLong()
+
+    private val counted = CountedFrames()
 
     /**
      * Binary frames from the Mac, in order, after admission. Closes normally after [close], or
-     * with [RelayClosedException] or [RelayProtocolException] when the relay side ends it.
+     * with [RelayClosedException] or [RelayProtocolException] when the relay side ends it, or
+     * with [RelayClosedException] 1006 "receive queue over budget" when unread frames pass the budget.
+     * Read it with `receive`, `receiveCatching`, `tryReceive` or a `for` loop; its select clauses
+     * are not supported, since they could not release the budget.
      */
-    val incoming: ReceiveChannel<ByteArray> get() = frames
+    val incoming: ReceiveChannel<ByteArray> get() = counted
 
     private val admission = CompletableDeferred<AdmissionResult>()
     private val lock = Any()
@@ -372,6 +395,49 @@ class RelayConnection(
         phase = Phase.CLOSED
     }
 
+    /** Queues an admitted frame, or closes the connection if it would pass the budget. Caller holds [lock]. */
+    private fun queue(socket: WebSocket, frame: ByteArray) {
+        val queued = queuedBytes.get()
+        if (queued + frame.size > maxQueuedBytes) {
+            phase = Phase.CLOSED
+            val reason = "$OVER_BUDGET: $queued bytes unread, ${frame.size} more, limit $maxQueuedBytes"
+            frames.close(RelayClosedException(CLOSE_ABNORMAL, reason))
+            socket.close(CLOSE_NORMAL, OVER_BUDGET)
+            return
+        }
+        queuedBytes.addAndGet(frame.size.toLong())
+        frames.trySend(frame)
+    }
+
+    private fun release(frame: ByteArray) {
+        queuedBytes.addAndGet(-frame.size.toLong())
+    }
+
+    /** [frames] as the reader sees it: every way of receiving releases the frame's bytes. */
+    private inner class CountedFrames : ReceiveChannel<ByteArray> by frames {
+        override suspend fun receive(): ByteArray = frames.receive().also(::release)
+
+        override suspend fun receiveCatching(): ChannelResult<ByteArray> =
+            frames.receiveCatching().also { result -> result.getOrNull()?.let(::release) }
+
+        override fun tryReceive(): ChannelResult<ByteArray> =
+            frames.tryReceive().also { result -> result.getOrNull()?.let(::release) }
+
+        override fun iterator(): ChannelIterator<ByteArray> = object : ChannelIterator<ByteArray> {
+            private val inner = frames.iterator()
+
+            override suspend fun hasNext(): Boolean = inner.hasNext()
+
+            override fun next(): ByteArray = inner.next().also(::release)
+        }
+
+        override val onReceive: SelectClause1<ByteArray>
+            get() = throw UnsupportedOperationException("select on incoming would not release the budget")
+
+        override val onReceiveCatching: SelectClause1<ChannelResult<ByteArray>>
+            get() = throw UnsupportedOperationException("select on incoming would not release the budget")
+    }
+
     private inner class Listener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             synchronized(lock) {
@@ -399,7 +465,7 @@ class RelayConnection(
         override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
             synchronized(lock) {
                 when (phase) {
-                    Phase.ADMITTED -> frames.trySend(bytes.toByteArray())
+                    Phase.ADMITTED -> queue(webSocket, bytes.toByteArray())
                     Phase.HELLO_SENT, Phase.PROOF_SENT -> failAdmission(
                         webSocket,
                         AdmissionResult.ProtocolError("binary frame before admission"),
@@ -457,6 +523,9 @@ class RelayConnection(
         const val CLOSE_ABNORMAL = 1006
         const val HTTP_SWITCHING_PROTOCOLS = 101
         const val ADMISSION_TIMEOUT = "admission timeout"
+
+        /** Reason for a close because unread frames passed maxQueuedBytes; also the WebSocket close reason. */
+        const val OVER_BUDGET = "receive queue over budget"
 
         val HELLO: String = buildJsonObject {
             put("v", PROTOCOL_VERSION)

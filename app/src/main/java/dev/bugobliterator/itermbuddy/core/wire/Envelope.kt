@@ -19,7 +19,10 @@ import kotlinx.serialization.json.JsonPrimitive
  */
 class WireDecodeException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
-/** First byte of a media frame; a JSON control frame starts with `{` (`CompanionFrameChannel.swift`). */
+/**
+ * First byte of a media frame; a JSON control frame starts with `{` (`CompanionFrameChannel.swift`).
+ * The session routes media by this byte before decoding, so a media frame never reaches [decodeEnvelope].
+ */
 private const val MEDIA_FRAME: Byte = 0x01
 
 private const val REQUEST_ID = "requestID"
@@ -48,7 +51,8 @@ fun encodeEnvelope(message: PhoneMessage, requestID: Long?): ByteArray {
  *   value must be a plain non-negative integer literal that fits in a [Long].
  * - The payload must be an object with exactly one key. An unknown key decodes to
  *   [MacMessage.Unsupported]; a known key whose body does not decode throws.
- * - A frame whose first byte is `0x01` is a media frame: `Unsupported("media", {})`.
+ * - A frame whose first byte is `0x01` is a media frame and throws `WireDecodeException("media
+ *   frame")`: the session routes media to the stream sink and never passes one here.
  * - Integers are plain literals: `15.0` or `1e2` is rejected where Swift's
  *   `JSONDecoder` may accept it. A deliberate deviation; the Mac writes integer literals.
  * - A `Double` field takes any JSON number literal (`32`, `15.75`). A `UInt32` field
@@ -66,7 +70,7 @@ fun encodeEnvelope(message: PhoneMessage, requestID: Long?): ByteArray {
  */
 fun decodeEnvelope(bytes: ByteArray): Pair<Long?, MacMessage> {
     if (bytes.isNotEmpty() && bytes[0] == MEDIA_FRAME) {
-        return null to MacMessage.Unsupported("media", JsonObject(emptyMap()))
+        throw WireDecodeException("media frame")
     }
     val envelope = parseJson(bytes) as? JsonObject ?: throw WireDecodeException("envelope is not a JSON object")
     val requestID = decodeRequestID(envelope[REQUEST_ID])

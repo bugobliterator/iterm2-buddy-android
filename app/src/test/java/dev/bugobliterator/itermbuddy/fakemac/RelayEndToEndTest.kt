@@ -10,6 +10,7 @@ import dev.bugobliterator.itermbuddy.core.relay.AdmissionResult
 import dev.bugobliterator.itermbuddy.core.relay.Proof
 import dev.bugobliterator.itermbuddy.core.relay.RelayConnection
 import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
+import dev.bugobliterator.itermbuddy.core.stream.StreamInput
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.store.InMemoryPairingStore
@@ -18,6 +19,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -25,10 +28,13 @@ import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.File
+import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
@@ -126,6 +132,76 @@ class RelayEndToEndTest {
         println("client log:\n" + logs.joinToString("\n") + "\nrelay log:\n" + relays.flatMap { it.output }.joinToString("\n"))
     }
 
+    /**
+     * A 3 MiB keyframe crosses the relay as about 49 Noise chunks of at most 65535 bytes (the relay
+     * splices frames up to 256 KiB), then 300 P-frames of 40 KiB at 30 fps: one chunk each. That is
+     * about 80 relay frames in the busiest second, well under the relay's 500 frames/s per room.
+     */
+    @Test
+    fun streamsLargeKeyframeThroughRealRelay() = runBlocking {
+        val relay = startRelay(File(workDir, "relay.db"), port = 0)
+        val endpoints = RelayEndpoints(RELAY_ORIGIN, "ws://127.0.0.1:${relay.port}/", "http://127.0.0.1:${relay.port}")
+        val (macPrivate, macPublic) = newStaticKeyPair()
+        val code = PairingCode(macPublic, "e2e-${UUID.randomUUID()}", RELAY_ORIGIN)
+        val logs = CopyOnWriteArrayList<String>()
+        val inputs = CopyOnWriteArrayList<StreamInput>()
+        val mediaCount = MutableStateFlow(0)
+        val client = CompanionClient(
+            InMemoryPairingStore(),
+            http,
+            scope,
+            endpointsFor = { endpoints },
+            timeouts = ClientTimeouts(admission = 5.seconds, register = 5.seconds),
+            random = ShortJitter,
+            log = { logs += it },
+            streamSink = { input ->
+                inputs += input
+                if (input is StreamInput.Media) mediaCount.value++
+            },
+        )
+        val mac = FakeMac(endpoints, code, macPrivate, http, scope)
+        mac.start()
+        client.pair(code)
+        val shown = awaitState(client) { it is ClientState.ShowCode } as ClientState.ShowCode
+        assertEquals(shown.code, withTimeout(STEP) { mac.awaitingCode.first { it != null } })
+        mac.enterCode(accept = true)
+        awaitState(client) { it is ClientState.Connected }
+
+        val frames = ArrayList<ByteArray>()
+        frames += mediaFrame(sequence = 0, keyframe = true, payloadBytes = KEYFRAME_BYTES)
+        for (sequence in 1..P_FRAMES) frames += mediaFrame(sequence, keyframe = false, payloadBytes = P_FRAME_BYTES)
+        for ((index, frame) in frames.withIndex()) {
+            mac.sendMedia(frame)
+            if (index > 0) delay(FRAME_INTERVAL_MILLIS)
+        }
+        withTimeout(STEP) { mediaCount.first { it >= frames.size } }
+
+        val media = inputs.filterIsInstance<StreamInput.Media>()
+        assertEquals(frames.size, media.size)
+        frames.forEachIndexed { index, frame -> assertArrayEquals("frame $index", frame, media[index].bytes) }
+        assertEquals("one link, never closed: ${inputs.filter { it !is StreamInput.Media }}", listOf<StreamInput>(StreamInput.LinkUp(1, FakeMac.MAC_REVISION)), inputs.filter { it !is StreamInput.Media })
+        assertTrue(client.state.value is ClientState.Connected)
+        assertEquals(MacMessage.Pong, client.request(PhoneMessage.Ping))
+        val relayLog = relay.output.joinToString("\n")
+        assertFalse(relayLog, relayLog.contains("frame rate exceeded") || relayLog.contains("frame too large"))
+    }
+
+    /** A version 2 media frame (*notes* → Media frame): a 34-byte header, then [payloadBytes] of seeded noise. */
+    private fun mediaFrame(sequence: Int, keyframe: Boolean, payloadBytes: Int): ByteArray {
+        val payload = Random(sequence).nextBytes(payloadBytes)
+        return ByteBuffer.allocate(V2_HEADER_BYTES + payloadBytes)
+            .put(2.toByte())
+            .put(if (keyframe) 1.toByte() else 0.toByte())
+            .putInt(1)
+            .putInt(sequence)
+            .putLong(sequence * FRAME_INTERVAL_MILLIS)
+            .putInt(1)
+            .putLong(0)
+            .putInt(payloadBytes)
+            .put(payload)
+            .array()
+    }
+
     private suspend fun awaitState(client: CompanionClient, predicate: (ClientState) -> Boolean): ClientState =
         withTimeout(STEP) { client.state.first(predicate) }
 
@@ -195,6 +271,11 @@ class RelayEndToEndTest {
         const val RELAY_ORIGIN = "https://relay.test"
         const val STARTUP_SECONDS = 15L
         val STEP = 30.seconds
+        const val KEYFRAME_BYTES = 3 * 1024 * 1024
+        const val P_FRAME_BYTES = 40 * 1024
+        const val P_FRAMES = 300
+        const val FRAME_INTERVAL_MILLIS = 33L
+        const val V2_HEADER_BYTES = 34
         val LISTENING = Regex("listening on 127\\.0\\.0\\.1:(\\d+)")
     }
 }

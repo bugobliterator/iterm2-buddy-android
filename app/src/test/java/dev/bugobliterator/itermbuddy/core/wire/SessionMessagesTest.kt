@@ -175,9 +175,11 @@ class SessionMessagesTest {
 
     @Test
     fun mediaFrameIsUnsupportedMedia() {
-        val (requestID, message) = decodeEnvelope(byteArrayOf(0x01, 0x7B, 0x00, 0xFF.toByte()))
-        assertNull(requestID)
-        assertEquals("media", (message as MacMessage.Unsupported).case)
+        // The session routes media by its first byte and never passes one here.
+        val error = assertThrows(WireDecodeException::class.java) {
+            decodeEnvelope(byteArrayOf(0x01, 0x7B, 0x00, 0xFF.toByte()))
+        }
+        assertEquals("media frame", error.message)
     }
 
     @Test

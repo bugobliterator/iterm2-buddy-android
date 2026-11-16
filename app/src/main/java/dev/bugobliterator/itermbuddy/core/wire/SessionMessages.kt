@@ -156,7 +156,7 @@ sealed interface MacMessage {
 
     /**
      * A case this build does not handle: [case] is its discriminator and [raw] the
-     * payload object `{"<case>": ...}`. A media frame is `Unsupported("media", {})`.
+     * payload object `{"<case>": ...}`. A media frame is never decoded as a message.
      */
     data class Unsupported(val case: String, val raw: JsonObject) : MacMessage {
         /** [raw] may hold terminal content (a chat's messages, say), so only its shape is shown. */

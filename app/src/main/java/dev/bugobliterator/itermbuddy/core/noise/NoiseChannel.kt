@@ -9,6 +9,12 @@ private const val TAG_BYTES = 16
 /** One continuation byte plus a 16-byte tag must fit in a Noise message: 65535 - 16 - 1. */
 private const val MAX_CHUNK = MAX_NOISE_MESSAGE_SIZE - TAG_BYTES - 1
 
+/**
+ * Default cap on one reassembled message: 32 MiB. A 5K keyframe is about 3 MiB, so a sane stream
+ * never reaches it.
+ */
+const val DEFAULT_MAX_MESSAGE_BYTES = 32 * 1024 * 1024
+
 private const val LAST_CHUNK: Byte = 0
 private const val MORE_CHUNKS: Byte = 1
 
@@ -26,13 +32,22 @@ private const val MORE_CHUNKS: Byte = 1
  * frames in arrival order. Both directions are also locked, so misuse cannot corrupt a
  * CipherState, but locking cannot restore a wire order the caller broke.
  *
+ * A message is reassembled up to [maxMessageBytes] (default [DEFAULT_MAX_MESSAGE_BYTES]); a chunk
+ * that would take it past the cap closes the channel with `NoiseException("message too large")`
+ * and sets [messageTooLarge], before the chunk is buffered.
+ *
  * Any receive failure (bad tag, replayed, reordered or truncated frame, a frame over 65535
- * bytes, a message with no continuation byte) or send failure closes the channel: both
+ * bytes, a message with no continuation byte, a message over the cap) or send failure closes the channel: both
  * CipherStates are destroyed and every later call throws [NoiseException]. Upstream likewise
  * ends the connection when `receive()` throws.
  */
-class NoiseChannel internal constructor(sender: CipherState, receiver: CipherState) : Closeable {
+class NoiseChannel internal constructor(
+    sender: CipherState,
+    receiver: CipherState,
+    private val maxMessageBytes: Int = DEFAULT_MAX_MESSAGE_BYTES,
+) : Closeable {
     init {
+        require(maxMessageBytes > 0) { "maxMessageBytes must be positive" }
         // A keyless CipherState is a pass-through in noise-java (and noise-c): MAC length 0,
         // plaintext out, nothing authenticated. Only split() keys, so refuse anything else.
         require(sender.hasKey() && receiver.hasKey()) { "Noise channel needs keyed CipherStates" }
@@ -48,9 +63,10 @@ class NoiseChannel internal constructor(sender: CipherState, receiver: CipherSta
     private var receiver: CipherState? = receiver
 
     /**
-     * Chunks of the message being reassembled; zeroed when handed out or on close. Uncapped,
-     * as upstream (`NoiseChannel.swift:168`): every chunk must authenticate under the receive
-     * key, so only the paired Mac can grow it, never the relay.
+     * Chunks of the message being reassembled; zeroed when handed out or on close. Capped at
+     * [maxMessageBytes], an addition: upstream's reassembly is uncapped (`NoiseChannel.swift:168`).
+     * Every chunk must authenticate under the receive key, so only the paired Mac can grow it,
+     * never the relay; the cap bounds what a misbehaving Mac can make the phone hold.
      */
     private var pending = ByteArray(0)
     private var pendingSize = 0
@@ -100,6 +116,10 @@ class NoiseChannel internal constructor(sender: CipherState, receiver: CipherSta
                 // Every chunk carries at least the continuation byte (upstream malformedFrame).
                 throw NoiseException("Noise transport message has no continuation byte")
             }
+            if (pendingSize.toLong() + plaintext.size - 1 > maxMessageBytes) {
+                messageTooLarge = true
+                throw NoiseException("message too large")
+            }
             appendPending(plaintext, 1, plaintext.size)
             if (plaintext[0] == LAST_CHUNK) takePending() else null
         } finally {
@@ -133,6 +153,14 @@ class NoiseChannel internal constructor(sender: CipherState, receiver: CipherSta
     }
 
     override fun toString(): String = if (closed) "NoiseChannel(closed)" else "NoiseChannel(open)"
+
+    /** Bytes held for the message being reassembled (its buffer's capacity), for tests. */
+    internal val reassemblyCapacity: Int get() = synchronized(receiveLock) { pending.size }
+
+    /** Whether the channel closed because a message would have passed [maxMessageBytes]. */
+    @Volatile
+    var messageTooLarge = false
+        private set
 
     /** Runs [block] under [lock]; if it fails, closes the channel after releasing the lock. */
     private inline fun <T> failClosed(lock: Any, block: () -> T): T {
@@ -183,7 +211,8 @@ class NoiseChannel internal constructor(sender: CipherState, receiver: CipherSta
     private fun appendPending(source: ByteArray, from: Int, to: Int) {
         val count = to - from
         if (pendingSize + count > pending.size) {
-            val grown = ByteArray(maxOf(pendingSize + count, pending.size * 2))
+            // Never past the cap, which decryptFrame has checked the message fits.
+            val grown = ByteArray(minOf(maxOf(pendingSize + count, pending.size * 2), maxMessageBytes))
             pending.copyInto(grown, 0, 0, pendingSize)
             pending.fill(0)
             pending = grown
