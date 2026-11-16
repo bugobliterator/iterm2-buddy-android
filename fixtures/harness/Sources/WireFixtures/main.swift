@@ -701,7 +701,14 @@ print("wire-fixtures: wrote \(messagesDirectory.path): session=\(sessionSamples.
 let terminalClip = try loadTerminalClip(outputDirectory.appendingPathComponent("media/hevc/terminal-clip.hevc"))
 let liveSessionSampleList = try liveSessionSamples(clip: terminalClip)
 try checkSessionSamples(liveSessionSampleList)
-try writeSessionSamples(liveSessionSampleList,
+// Older-Mac samples are checked in olderMacSamples: upstream decodes them to
+// the full sample's value, but re-encoding adds the omitted key back.
+let olderMacSampleList = try olderMacSamples(liveSamples: liveSessionSampleList)
+require(!olderMacSampleList.isEmpty, "the older-Mac sample list is empty")
+let allLiveSessionSamples = liveSessionSampleList + olderMacSampleList
+require(Set(allLiveSessionSamples.map(\.name)).count == allLiveSessionSamples.count, "duplicate live-session sample name")
+try writeSessionSamples(allLiveSessionSamples,
                         to: outputDirectory.appendingPathComponent("messages/live-session", isDirectory: true))
-print("wire-fixtures: wrote \(messagesDirectory.path)/live-session: samples=\(liveSessionSampleList.count)")
+print("wire-fixtures: wrote \(messagesDirectory.path)/live-session: samples=\(liveSessionSampleList.count) "
+      + "olderMac=\(olderMacSampleList.count)")
 try writeMediaFixtures(clip: terminalClip, to: outputDirectory.appendingPathComponent("media", isDirectory: true))

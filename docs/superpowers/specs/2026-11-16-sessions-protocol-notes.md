@@ -49,8 +49,9 @@ persisted from the last hello, `MC/CompanionPushRegistry.swift:128-134`):
 
 Android today: `REVISION = 11`, `MINIMUM_PEER = 11` (`AND/wire/ProtocolRevision.kt:11-14`).
 - Terminal Sessions work at 11 unchanged. Raise to **13** to get live session-tree pushes; that also
-  claims rev 12 (`messagesRemoved`) and 13 (`aiAvailabilityChanged`, typed `aiUnavailable` error), both
-  harmless if ignored (unknown cases decode to `Unsupported`).
+  claims rev 12 (`messagesRemoved`, sent only for a subscribed chat) and 13 (typed `aiUnavailable`
+  error), both harmless if ignored (unknown cases decode to `Unsupported`). `aiAvailabilityChanged` is
+  sent at any revision after the hello reply (`MC/CompanionLink.swift:549-558`).
 - Browser phase: raise to **15**, which also claims 14 (hello reply gains `macStatus`; `macStatusChanged`,
   `modalAlertAnswerRejected` events). Android keeps the hello reply as raw JSON, so the extra field is
   tolerated; holding request timeouts while `mainBlocked` is optional.
@@ -149,7 +150,8 @@ receive loop when the reply is dispatched, so the config that follows is not dro
 Resends: on geometry change (new generation), on a fresh encoder (new parameter sets), on `requestKeyframe`,
 and on a `canResize`/`altScreen`/`scrollWheelReporting` flip, the last three **keeping** the generation
 (`ST:319-324`, `ST:350-367`, `ST:553-557`). A config is only emitted alongside an encoded keyframe that
-carries parameter sets (`ST:565`); the frame right after it has `configChanged` set (`ST:595`).
+carries parameter sets (`ST:565`); `configChanged` is set on that same keyframe, the one the config was
+built from, which is the next media frame on the wire (`ST:595`).
 
 ### Stop, end, restart
 - P→M `{"stopSessionStream":{"streamID":N}}`, fire-and-forget; Mac replies unsolicited `streamEnded` (`HB:553-554`, `HB:1341-1351`).

@@ -8,13 +8,15 @@
 #
 # open-gop=0: with ffmpeg 6.1.1 and x265 3.5 a forced keyframe after the
 # first one is otherwise coded as a CRA (NAL type 21), not an IDR, even with
-# -forced-idr 1.
+# -forced-idr 1. info=0 drops x265's informational SEI, which records the CPU
+# flags and thread count; frame-threads=1 keeps the output independent of the
+# number of CPUs.
 set -eu
 cd "$(dirname "$0")/hevc"
 ffmpeg -hide_banner -nostdin -y \
     -f lavfi -i testsrc2=size=1280x800:rate=30 -frames:v 15 \
     -c:v libx265 -forced-idr 1 \
-    -x265-params bframes=0:keyint=10000:min-keyint=10000:repeat-headers=1:aud=0:open-gop=0 \
+    -x265-params bframes=0:keyint=10000:min-keyint=10000:repeat-headers=1:aud=0:open-gop=0:info=0:frame-threads=1 \
     -force_key_frames 0,0.333 -profile:v main \
     -f hevc terminal-clip.hevc
 ffprobe -v error -show_frames -show_entries frame=pict_type -of csv=p=0 terminal-clip.hevc \

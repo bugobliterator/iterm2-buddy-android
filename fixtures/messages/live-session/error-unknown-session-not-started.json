@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: Optional(5), payload: WireFixtures.CompanionHostMessage.error(CompanionProtocol.CompanionError(code: CompanionProtocol.CompanionError.Code.unknownSession, message: \"That session hasn’t started running yet, so there is nothing to show.\")))",
+  "json" : {"payload":{"error":{"_0":{"code":"unknownSession","message":"That session hasn’t started running yet, so there is nothing to show."}}},"requestID":5}
+}
