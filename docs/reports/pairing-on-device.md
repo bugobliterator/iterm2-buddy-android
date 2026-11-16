@@ -180,3 +180,5 @@ relay log lines).
 - Step 11 and step 12 were exercised informally: after the Mac unpaired the phone while it was
   disconnected, the phone kept retrying with "mac offline" until the owner tapped Unpair (the
   known limitation in step 12).
+- Sign-off (2026-11-16): the owner ran most of the remaining steps informally, reported them as
+  passing, and accepted the on-device check without recording each step individually.
