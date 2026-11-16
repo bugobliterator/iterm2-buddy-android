@@ -144,15 +144,18 @@ func loadTerminalClip(_ url: URL) throws -> TerminalClip {
                 parameterSets = inBandSets
             }
         }
-        // The Mac sets keyframe on a sync sample and configChanged on the frame
-        // whose parameter sets went out as a config just before it
-        // (CompanionSessionStreamer.swift:561-597). Frame 0 is the stream's
-        // first keyframe (config generation 1); frame 10 models the keyframe
-        // after a phone requestKeyframe, which resends the config with the same
-        // generation (CompanionSessionStreamer.swift:312-324).
+        // The Mac sets keyframe on a sync sample and configChanged on the
+        // keyframe whose parameter sets it built a config from, the next media
+        // frame on the wire after that config (CompanionSessionStreamer.swift:561-597).
+        // Frame 0 is the stream's first keyframe (config generation 1). Frame 10
+        // is an insurance keyframe, 0.3 s after the last P-frame with nothing new
+        // (CompanionSessionStreamer.swift:374-382): same encoder, so the same
+        // parameter sets, no config resend and so no configChanged.
         var flags: CompanionMediaFrame.Flags = []
         if isIDR {
             flags.insert(.keyframe)
+        }
+        if index == 0 {
             flags.insert(.configChanged)
         }
         frames.append(CompanionMediaFrame(
@@ -186,6 +189,8 @@ func loadTerminalClip(_ url: URL) throws -> TerminalClip {
             require(firstPicture.map { idrTypes.contains(nalType($0)) } ?? false,
                     "clip frame \(index): first VCL NAL is not IDR after stripping")
             require(decoded.flags.contains(.keyframe), "clip frame \(index) is not flagged keyframe")
+            require(decoded.flags.contains(.configChanged) == (index == 0),
+                    "clip frame \(index): configChanged only on the first keyframe")
         }
     }
     return TerminalClip(parameterSets: parameterSets, codecExtradata: codecExtradata, frames: frames)

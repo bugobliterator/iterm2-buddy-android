@@ -20,6 +20,8 @@ let liveSessionAppRevision = 13
 /// messages/session (hello 1, relayRoomSecret 2, ping 3).
 let fetchSessionTreeRequestID: UInt64 = 4
 let startSessionStreamRequestID: UInt64 = 5
+/// The start of the browser stream, the link's second stream.
+let startBrowserStreamRequestID: UInt64 = 6
 
 /// A canonical `ptys_` stable session ID (what the Mac sends as `guid`,
 /// CompanionSessionLister.swift:23-31) with the given 12-character body: the
@@ -43,6 +45,7 @@ func stableSessionID(_ body: String) -> String {
 ///     "Split Pane" row.
 ///   Tab "agents": one pane whose peer group has two members, so iOS hoists the
 ///     peers to the tab.
+///   Tab 3, title empty, so the Mac names it "Tab 3": one plain pane.
 /// Window 2, title empty, so the Mac names it "Window 2":
 ///   Tab "Widget Docs": a browser session.
 enum SyntheticMac {
@@ -56,6 +59,8 @@ enum SyntheticMac {
                                                  name: "claude", subtitle: "planning")
     static let tester = CompanionSessionSummary(guid: stableSessionID("6V0T2B8NW4HE"),
                                                 name: "claude", subtitle: "")
+    static let notes = CompanionSessionSummary(guid: stableSessionID("8M3B5X1QJ7TW"),
+                                               name: "vim", subtitle: "notes.md")
     static let docs = CompanionSessionSummary(guid: stableSessionID("4Q8S1D6KZ3MA"),
                                               name: "Widget Docs", subtitle: "", isBrowser: true)
 
@@ -71,26 +76,34 @@ enum SyntheticMac {
         CompanionSessionTree.Peer(roleName: "Tester", session: tester)
     ]
 
-    static func tree(includingBuildLog: Bool) -> CompanionSessionTree {
+    static func tree(includingBuildLog: Bool, includingBrowser: Bool = true) -> CompanionSessionTree {
         var widgetPanes = [CompanionSessionTree.Pane(session: shell, peers: reviewPeers)]
         if includingBuildLog {
             widgetPanes.append(CompanionSessionTree.Pane(session: buildLog, peers: []))
         }
-        return CompanionSessionTree(windows: [
+        var windows = [
             CompanionSessionTree.Window(title: "demo@buildhost: ~/src/widget", tabs: [
                 CompanionSessionTree.Tab(title: "widget", panes: widgetPanes),
                 CompanionSessionTree.Tab(title: "agents", panes: [
                     CompanionSessionTree.Pane(session: planner, peers: agentPeers)
+                ]),
+                // CompanionSessionLister.swift:46-51: a tab with no title yet
+                // becomes "Tab \(tabIndex + 1)".
+                CompanionSessionTree.Tab(title: "Tab 3", panes: [
+                    CompanionSessionTree.Pane(session: notes, peers: [])
                 ])
-            ]),
+            ])
+        ]
+        if includingBrowser {
             // CompanionSessionLister.swift:53-56: an empty window title becomes
             // "Window \(index + 1)".
-            CompanionSessionTree.Window(title: "Window 2", tabs: [
+            windows.append(CompanionSessionTree.Window(title: "Window 2", tabs: [
                 CompanionSessionTree.Tab(title: "Widget Docs", panes: [
                     CompanionSessionTree.Pane(session: docs, peers: [])
                 ])
-            ])
-        ])
+            ]))
+        }
+        return CompanionSessionTree(windows: windows)
     }
 }
 
@@ -110,7 +123,7 @@ func liveSessionSamples(clip: TerminalClip) throws -> [SessionSample] {
     require(liveSessionAppRevision >= CompanionProtocolVersion.aiDecouplingRevision,
             "the Mac pushes sessionTree only to a phone at aiDecouplingRevision or later")
     require(liveSessionAppRevision >= CompanionProtocolVersion.messageDeletionRevision,
-            "the Mac sends messagesRemoved only to a phone at messageDeletionRevision or later")
+            "the Mac forwards messagesRemoved only to a phone at messageDeletionRevision or later")
     require(liveSessionAppRevision < CompanionProtocolVersion.modalAlertRevision,
             "the app's revision now gets macStatus")
 
@@ -194,6 +207,11 @@ func liveSessionSamples(clip: TerminalClip) throws -> [SessionSample] {
                                   HostEnvelope(requestID: startSessionStreamRequestID,
                                                payload: .streamStarted(CompanionStreamStarted(streamID: streamID,
                                                                                               codec: .hevc)))))
+    // A later start for the browser session, the link's second stream.
+    samples.append(try hostSample("stream-started-browser",
+                                  HostEnvelope(requestID: startBrowserStreamRequestID,
+                                               payload: .streamStarted(CompanionStreamStarted(streamID: streamID + 1,
+                                                                                              codec: .hevc)))))
 
     // CompanionSessionStreamer.swift:579-594 builds the config;
     // CompanionHostBridge.swift:1246-1247 sends it with no requestID. Terminal
@@ -220,12 +238,13 @@ func liveSessionSamples(clip: TerminalClip) throws -> [SessionSample] {
                                                isBrowser: false)
     samples.append(try hostSample("stream-config-terminal",
                                   HostEnvelope(requestID: nil, payload: .streamConfig(terminalConfig))))
-    // Not something a v3.7.7 Mac sends (its terminal source always reports
-    // cell geometry): the optional field absent, as from a pre-geometry host
+    // Decode tolerance only, not a real host message: a v3.7.7 Mac's terminal
+    // source always reports cell geometry, and every Mac the phone can pair
+    // with (revision 11 or later) sends it. The optional field absent
     // (CompanionMessages.swift:343-346), for the phone's no-selection path.
     var withoutCellGeometry = terminalConfig
     withoutCellGeometry.cellGeometry = nil
-    samples.append(try hostSample("stream-config-terminal-without-cell-geometry",
+    samples.append(try hostSample("stream-config-terminal-cell-geometry-absent",
                                   HostEnvelope(requestID: nil, payload: .streamConfig(withoutCellGeometry))))
     // CompanionBrowserFrameSource.swift:69-83 and
     // CompanionSessionStreamer.swift:63-71: no grid, no cell geometry, no
@@ -259,13 +278,20 @@ func liveSessionSamples(clip: TerminalClip) throws -> [SessionSample] {
                                                    payload: .streamEnded(streamID: streamID, reason: reason))))
     }
 
-    // CompanionHostBridge.swift:2005-2013 (contentSession): the reply to a
+    // CompanionHostBridge.swift:2006-2013 (contentSession): the reply to a
     // start for a session that is gone.
     samples.append(try hostSample("error-unknown-session",
                                   HostEnvelope(requestID: startSessionStreamRequestID,
                                                payload: .error(CompanionError(
                                                    code: .unknownSession,
                                                    message: "That session no longer exists. It may have been closed.")))))
+    // CompanionHostBridge.swift:2014-2018 (contentSession): a session whose
+    // text view has no width yet.
+    samples.append(try hostSample("error-unknown-session-not-started",
+                                  HostEnvelope(requestID: startSessionStreamRequestID,
+                                               payload: .error(CompanionError(
+                                                   code: .unknownSession,
+                                                   message: "That session hasn\u{2019}t started running yet, so there is nothing to show.")))))
     // CompanionHostBridge.swift:1202-1207: a start without hevc.
     samples.append(try hostSample("error-no-supported-codec",
                                   HostEnvelope(requestID: startSessionStreamRequestID,
@@ -273,19 +299,74 @@ func liveSessionSamples(clip: TerminalClip) throws -> [SessionSample] {
                                                    code: .badRequest,
                                                    message: "No supported video codec (HEVC required)")))))
 
-    // Extras a revision-13 phone receives. CompanionHostBridge.swift:1850-1858:
-    // a chat truncated on the Mac (chat IDs are `UUID().uuidString`, Chat.swift:15).
+    // Extras. CompanionHostBridge.swift:1850-1858: a chat truncated on the
+    // Mac, forwarded only to a phone at messageDeletionRevision (12) or later
+    // and only from a chat subscription's broker updates; this app never
+    // subscribes to a chat (chat IDs are `UUID().uuidString`, Chat.swift:15).
     samples.append(try hostSample("messages-removed",
                                   HostEnvelope(requestID: nil,
                                                payload: .messagesRemoved(
                                                    chatID: "5E0B7C1A-9D24-4F36-8A51-0C7E2D9B4F18",
                                                    messageIDs: [UUID(uuidString: "A1C3E5F7-0B2D-4F6A-8C1E-3D5F7A9B0C2D")!,
                                                                 UUID(uuidString: "B2D4F6A8-1C3E-4A7B-9D2F-4E6A8B0C1D3E")!]))))
-    // CompanionLink.swift:549-558: sent when AI is turned off on the Mac.
+    // CompanionLink.swift:549-558: sent when AI is turned off on the Mac, at
+    // any phone revision, once the hello reply has gone out.
     samples.append(try hostSample("ai-availability-changed",
                                   HostEnvelope(requestID: nil, payload: .aiAvailabilityChanged(available: false))))
 
     require(samples.filter { $0.name.hasPrefix("send-key-special-") }.count == specialKeyRawValues.count,
             "a special key sample is missing")
     return samples
+}
+
+// MARK: - Older Macs
+
+/// A sample as a Mac older than the field's revision sends it: upstream's
+/// sorted encoding with `removedText` cut out of the JSON text (so upstream's
+/// escaping is kept), which upstream must decode to the same value as `full`.
+/// Re-encoding adds the key back, so these do not round-trip byte for byte.
+struct OlderMacSample {
+    let file: SessionSample
+    let removedKey: String
+}
+
+func olderMacSample<Payload: CompanionMessagePayload>(_ name: String, from full: SessionSample, removing removedText: String,
+                             key removedKey: String, as _: Payload.Type) throws -> OlderMacSample {
+    let text = String(decoding: full.sortedWire, as: UTF8.self)
+    require(text.contains(removedText), "\(name): \(removedText) is not in \(full.name)")
+    let trimmed = Data(text.replacingOccurrences(of: removedText, with: "").utf8)
+    require(!String(decoding: trimmed, as: UTF8.self).contains("\"\(removedKey)\""),
+            "\(name): \(removedKey) is still present")
+    let decoded = try WireCoding.decode(CompanionEnvelope<Payload>.self, from: trimmed)
+    require(String(reflecting: decoded) == full.swiftValue, "\(name): decodes differently from \(full.name)")
+    require(try sortedWireEncoder().encode(decoded) == full.sortedWire, "\(name): re-encoding differs from \(full.name)")
+    require(try jsonTree(trimmed) != nil, "\(name): not a JSON object")
+    let file = SessionSample(name: name, direction: full.direction, swiftValue: full.swiftValue,
+                             wire: trimmed, sortedWire: trimmed,
+                             roundTrip: { _ in (full.swiftValue, full.sortedWire) })
+    return OlderMacSample(file: file, removedKey: removedKey)
+}
+
+/// `isBrowser` arrived with browser sessions at revision 15; a revision 11-14
+/// Mac omits it from session summaries and stream configs, and upstream
+/// decodes it with decodeIfPresent as false (CompanionMessages.swift:52-59,
+/// 401-417). The tree has no browser session, as such a Mac would not list
+/// one as a browser.
+func olderMacSamples(liveSamples: [SessionSample]) throws -> [SessionSample] {
+    let absent = "\"isBrowser\":false,"
+    let tree = try hostSample("session-tree-reply-full-keys",
+                              HostEnvelope(requestID: fetchSessionTreeRequestID,
+                                           payload: .sessionTree(SyntheticMac.tree(includingBuildLog: true,
+                                                                                   includingBrowser: false))))
+    guard let config = liveSamples.first(where: { $0.name == "stream-config-terminal" }) else {
+        require(false, "stream-config-terminal is missing")
+        return []
+    }
+    let samples = [
+        try olderMacSample("session-tree-reply-without-is-browser", from: tree, removing: absent,
+                           key: "isBrowser", as: CompanionHostMessage.self),
+        try olderMacSample("stream-config-terminal-without-is-browser", from: config, removing: absent,
+                           key: "isBrowser", as: CompanionHostMessage.self)
+    ]
+    return samples.map(\.file)
 }
