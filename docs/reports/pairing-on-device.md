@@ -170,3 +170,13 @@ relay log lines).
   **Result:**
 
 ## Notes
+- Mac screen lock (not sleep) while Connected: no disconnect.
+- Reconnect after the app came back from the background took about a minute (owner's estimate).
+- Connection drops about every 31–36 s (close code 1006, `lived=31410ms`, `32833ms`, `35729ms`)
+  match the Pixel's 30 s screen timeout (`screen_off_timeout=30000`): the phone locks, the
+  connection drops, and the app reconnects via `admit role=phone via=signed` once it is
+  reopened. Right after a lock the app logged `UnknownHostException` for the tailnet name for
+  about 15 s. Expected until the foreground service lands (see step 10).
+- Step 11 and step 12 were exercised informally: after the Mac unpaired the phone while it was
+  disconnected, the phone kept retrying with "mac offline" until the owner tapped Unpair (the
+  known limitation in step 12).
