@@ -1,4 +1,6 @@
 # Run no dependency build scripts. protobufjs's postinstall only checks its
-# own version, and the Firebase CLI works without it.
+# own version, and re2 is an optional native regex used by Hosting (via
+# superstatic), not App Distribution. The Firebase CLI works without both.
 allowBuilds:
   protobufjs: false
+  re2: false
