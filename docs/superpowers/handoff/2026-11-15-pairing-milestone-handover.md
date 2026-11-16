@@ -41,6 +41,23 @@ This is a Kotlin Android port of the iOS iTerm2 Buddy companion app, for the own
 | Pairing | Pairing Code and Room Name; SAS and Join Signature; Noise Channel; Wire Envelope and Session Messages; Relay Connection; Pairing Store; Companion Client | **Done.** Opus review per task; Mythos for Noise, Pairing Store and Companion Client. |
 | Pairing | Pairing Screens | **Code done**; whole-milestone Mythos review clean (no Critical). Waiting on the owner's on-device check (`docs/reports/pairing-on-device.md`). |
 
+## Next phase: Sessions (ready to implement)
+
+The Pairing milestone passed the owner's Pixel check (`docs/reports/pairing-on-device.md`). The owner chose **Sessions** before Agent Chat.
+
+- Plan: `docs/superpowers/plans/2026-11-16-sessions.md`. Design: `docs/superpowers/specs/2026-11-16-sessions-design.md`. Protocol notes: `docs/superpowers/specs/2026-11-16-sessions-protocol-notes.md`.
+- Build order, with an owner on-device check at the end of each:
+  1. **Live Session:** session list, live HEVC view, zoom, typing, composer, Fit to phone.
+  2. **History and Selection.**
+  3. **Browser Sessions.**
+- Owner decisions:
+  - **Video:** the Mac sends HEVC only, decoded with MediaCodec.
+  - **Screen:** stays on while a live or browser view is open.
+  - **Fit to phone:** never undone, and offered only when `canResize == true`.
+  - **Composer:** sends with `pasteText`.
+- The plan went through five adversarial review rounds by Codex Astra and Gemini 4 Argon. Every disposition is in its "Review Dispositions" tables. The history-tile and decoder-recovery rules mirror the iOS client. Keep them that way unless a device test shows otherwise.
+- The Live Session device check decides one open item: whether the last frame of a burst shows on an idle screen without extra drain logic.
+
 ## Closed: Linux build of the harness
 
 Codex Sol's review of Upstream Harness has one Important finding: the Linux build ran in local Docker (`swift:6.2-noble` on the Mac), not in a cloud Linux session. In the cloud session:
