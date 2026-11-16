@@ -11,6 +11,7 @@ import dev.bugobliterator.itermbuddy.core.relay.RelayClosedException
 import dev.bugobliterator.itermbuddy.core.relay.RelayConnection
 import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
 import dev.bugobliterator.itermbuddy.core.relay.RelayRegistrar
+import dev.bugobliterator.itermbuddy.core.stream.MEDIA_CHANNEL
 import dev.bugobliterator.itermbuddy.core.stream.StreamInput
 import dev.bugobliterator.itermbuddy.core.stream.StreamSink
 import dev.bugobliterator.itermbuddy.core.stream.isStreamScoped
@@ -23,6 +24,7 @@ import dev.bugobliterator.itermbuddy.core.wire.encodeEnvelope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.launch
@@ -34,9 +36,8 @@ import okhttp3.OkHttpClient
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
-import kotlin.time.ComparableTimeMark
 import kotlin.time.Duration
-import kotlin.time.TimeSource
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * One relay WebSocket as the client uses it: the surface [RelayConnection] exposes. A seam so
@@ -127,18 +128,27 @@ internal enum class ConfirmationMode {
  * session; [ended] then completes with the relay's close frame, if the relay sent one.
  *
  * Routing, after the first-frame confirmation check: a frame whose first byte is `0x01` is media
- * and goes to [sink] as [StreamInput.Media] with that byte stripped. A stream-scoped message
+ * and goes to [sink] as [StreamInput.Media] (the frame as decrypted; the marker is skipped by
+ * offset, never copied off). A stream-scoped message
  * ([isStreamScoped]) goes to [sink] as [StreamInput.Control], whether or not a request waits for
  * it; a waiting request is completed only after [StreamSink.accept] returns. Neither ever reaches
  * [onEvent]. Everything else goes to its waiting request or to [onEvent], as before.
  *
  * The loop awaits [StreamSink.accept] before it reads the next frame: back-pressure, never a drop.
  * Stream inputs are dropped (logged by kind only) when there is no [sink] or before [linkUp].
- * Time the loop spends waiting on the sink does not count against a request's timeout, so a
- * reply queued behind media a slow sink has not taken yet is not timed out.
+ *
+ * Sink bounds:
+ * - One accept longer than [sinkStall] ends the session: the accept is cancelled, the frames
+ *   already queued are read without waiting (replies and `unpaired` are honoured, stream inputs
+ *   dropped), then the session ends with no relay close frame, so the client treats it as a
+ *   lost link and reconnects.
+ * - A request with a bound that passes while frames are queued behind an accept the sink has not
+ *   finished (the reply may be among them) keeps waiting, in slices of a tenth of its bound, for
+ *   at most one more bound: never more than twice its bound in all. Waiting for the stream lock
+ *   (an [linkUp] still announcing) is not a sink wait.
  *
  * @param sink where stream inputs go once the link is up; null drops them.
- * @param timeSource measures request timeouts; tests pass the virtual clock.
+ * @param sinkStall the longest one accept may take before the session ends.
  */
 internal class CompanionSession(
     private val socket: RelaySocket,
@@ -147,7 +157,7 @@ internal class CompanionSession(
     private val onEvent: (MacMessage) -> Unit,
     private val log: (String) -> Unit,
     private val sink: StreamSink? = null,
-    private val timeSource: TimeSource.WithComparableMarks = TimeSource.Monotonic,
+    private val sinkStall: Duration = DEFAULT_SINK_STALL,
 ) {
     private val sendLock = Mutex()
     private val nextRequestID = AtomicLong(1)
@@ -189,9 +199,16 @@ internal class CompanionSession(
     @Volatile
     private var linkId: Long? = null
 
-    private val stallLock = Any()
-    private var stalledTotal = Duration.ZERO
-    private var stalledSince: ComparableTimeMark? = null
+    /** Whether the receive loop is inside an accept (the stream lock held). */
+    @Volatile
+    private var accepting = false
+
+    /** Accepts begun so far, so a request can tell the loop worked through a slice. */
+    private val acceptsBegun = AtomicLong()
+
+    /** Set when an accept outlasted [sinkStall]: the loop drains what is queued and ends. */
+    @Volatile
+    private var sinkStalled = false
 
     /** Whether the session ended because the Mac sent a message over the Noise reassembly cap. */
     val messageTooLarge: Boolean get() = channel.messageTooLarge
@@ -215,9 +232,13 @@ internal class CompanionSession(
 
     /**
      * Sends [message] as a request and returns the reply, or null when none came within
-     * [timeout] (null: no bound). The bound covers the send too. Time the receive loop spends
-     * waiting on the [StreamSink] is not counted: the reply may be queued behind media.
-     * [onSent] gets the request ID before the envelope is written.
+     * [timeout] (null: no bound). [onSent] gets the request ID before the envelope is written.
+     *
+     * The bound runs from when the envelope has been handed to the socket: the send only waits
+     * for [sendLock] behind other sends, and socket sends do not suspend. When it passes while
+     * the receive loop is working through frames the sink is slow to take, with more queued
+     * behind (the reply may be one), the request waits on in slices of a tenth of [timeout] while
+     * that lasts, at most [EXTENSION_SLICES] of them: never more than twice [timeout] in all.
      *
      * @throws CompanionRequestException if the session ends first or the send fails.
      */
@@ -227,30 +248,31 @@ internal class CompanionSession(
         pending[id] = reply
         try {
             onSent(id)
-            if (timeout == null) {
-                sendEnvelope(message, id)
-                return awaitReply(reply)
+            sendEnvelope(message, id)
+            if (timeout == null) return awaitReply(reply)
+            var acceptsSeen = acceptsBegun.get()
+            withTimeoutOrNull(timeout) { awaitReply(reply) }?.let { return it }
+            val slice = timeout / EXTENSION_SLICES
+            var slices = 0
+            while (slices < EXTENSION_SLICES && sinkBusy(acceptsSeen)) {
+                acceptsSeen = acceptsBegun.get()
+                slices++
+                withTimeoutOrNull(slice) { awaitReply(reply) }?.let { return it }
             }
-            val start = timeSource.markNow()
-            val stalledAtStart = stalled()
-            var sent = false
-            while (true) {
-                val remaining = timeout - (start.elapsedNow() - (stalled() - stalledAtStart))
-                if (remaining <= Duration.ZERO) return null
-                val answer = withTimeoutOrNull(remaining) {
-                    if (!sent) {
-                        sendEnvelope(message, id)
-                        sent = true
-                    }
-                    awaitReply(reply)
-                }
-                // A send cut off by the bound has closed the channel: no reply can come.
-                if (answer != null || !sent) return answer
-            }
+            if (slices > 0) log("no reply to request $id within $timeout and $slices extension slices behind a busy stream sink")
+            return null
         } finally {
             pending.remove(id)
         }
     }
+
+    /**
+     * Whether a reply could be stuck behind the sink: frames are queued and the loop is in an
+     * accept now or began one since [acceptsSeen]. A loop waiting for the stream lock is not.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun sinkBusy(acceptsSeen: Long): Boolean =
+        !socket.incoming.isEmpty && (accepting || acceptsBegun.get() != acceptsSeen)
 
     private suspend fun awaitReply(reply: CompletableDeferred<MacMessage>): MacMessage = select {
         reply.onAwait { it }
@@ -272,11 +294,6 @@ internal class CompanionSession(
     /** Waits for the receive loop to stop after [close], so nothing more reaches the sink. */
     suspend fun awaitStopped() {
         receiveJob?.join()
-    }
-
-    /** Total time the receive loop has spent waiting on the sink, including a wait in progress. */
-    private fun stalled(): Duration = synchronized(stallLock) {
-        stalledTotal + (stalledSince?.elapsedNow() ?: Duration.ZERO)
     }
 
     /** Closes the Noise channel and the socket; the receive loop then ends. Idempotent. */
@@ -320,11 +337,20 @@ internal class CompanionSession(
     private suspend fun receiveLoop() {
         var relayClose: RelayClose? = null
         try {
-            for (frame in socket.incoming) {
+            while (true) {
+                val frame = if (sinkStalled) {
+                    // Draining after a stalled sink: only what is already queued.
+                    socket.incoming.tryReceive().getOrNull() ?: break
+                } else {
+                    val next = socket.incoming.receiveCatching()
+                    next.exceptionOrNull()?.let { throw it }
+                    next.getOrNull() ?: break
+                }
                 val plaintext = channel.decryptFrame(frame) ?: continue
                 heardFromMac = true
                 handle(plaintext)
             }
+            if (sinkStalled) log("ending the link: the stream sink stalled")
         } catch (e: CancellationException) {
             throw e
         } catch (e: RelayClosedException) {
@@ -365,7 +391,7 @@ internal class CompanionSession(
             return
         }
         if (plaintext[0] == MEDIA_CHANNEL) {
-            deliver("Media") { StreamInput.Media(it, plaintext.copyOfRange(1, plaintext.size)) }
+            deliver("Media") { StreamInput.Media(it, plaintext) }
             return
         }
         val (requestID, message) = try {
@@ -390,35 +416,35 @@ internal class CompanionSession(
     }
 
     /**
-     * Hands one stream input to the sink and waits for it to be taken, counting the wait as
-     * stalled time. [kind] is all that is logged: inputs carry terminal content.
+     * Hands one stream input to the sink and waits, at most [sinkStall], for it to be taken.
+     * [kind] is all that is logged: inputs carry terminal content.
      */
     private suspend fun deliver(kind: String, input: (linkId: Long) -> StreamInput) {
         val target = sink
-        if (target == null) {
-            log("dropped a stream input ($kind): no stream sink")
+        if (target == null || sinkStalled) {
+            log("dropped a stream input ($kind): ${if (target == null) "no stream sink" else "the stream sink stalled"}")
             return
         }
-        synchronized(stallLock) { stalledSince = timeSource.markNow() }
-        try {
-            streamLock.withLock {
-                val id = linkId
-                if (id == null) {
-                    log("dropped a stream input ($kind): the link is not up yet")
-                    return
-                }
-                try {
-                    target.accept(input(id))
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    log("the stream sink failed on $kind: ${e.javaClass.simpleName}")
-                }
+        streamLock.withLock {
+            val id = linkId
+            if (id == null) {
+                log("dropped a stream input ($kind): the link is not up yet")
+                return
             }
-        } finally {
-            synchronized(stallLock) {
-                stalledSince?.let { stalledTotal += it.elapsedNow() }
-                stalledSince = null
+            acceptsBegun.incrementAndGet()
+            accepting = true
+            try {
+                val taken = withTimeoutOrNull(sinkStall) { target.accept(input(id)) }
+                if (taken == null) {
+                    log("the stream sink did not take $kind within $sinkStall; ending the link")
+                    sinkStalled = true
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("the stream sink failed on $kind: ${e.javaClass.simpleName}")
+            } finally {
+                accepting = false
             }
         }
     }
@@ -436,10 +462,13 @@ internal class CompanionSession(
     private companion object {
         const val CLOSE_ABNORMAL = 1006
 
-        /** First byte of a media frame; a JSON envelope starts with `{` (`CompanionFrameChannel.swift`). */
-        const val MEDIA_CHANNEL: Byte = 0x01
+        /** Slices of a request's bound it may wait on behind a busy sink: one more bound in all. */
+        const val EXTENSION_SLICES = 10
     }
 }
+
+/** Default for [ClientTimeouts.sinkStall]. */
+internal val DEFAULT_SINK_STALL: Duration = 30.seconds
 
 /** How a session ended: [relayClose] is the relay's close frame, null for anything else. */
 internal data class SessionEnd(val relayClose: RelayClose?)

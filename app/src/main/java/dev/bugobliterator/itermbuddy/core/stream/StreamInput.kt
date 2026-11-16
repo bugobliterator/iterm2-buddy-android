@@ -4,12 +4,23 @@ import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import kotlin.time.Duration
 
+/** First byte of a media channel frame; a JSON envelope starts with `{` (`CompanionFrameChannel.swift`). */
+const val MEDIA_CHANNEL: Byte = 0x01
+
 /**
  * What the connection layer hands the stream controller, in wire order, through one [StreamSink].
  *
  * Every input carries the link id it arrived on. Link ids start at 1 and grow by one for each
- * connection that reaches the connected step. [LinkUp] comes before anything else on its link and
- * [LinkDown] after everything else on it, so a controller can scope its state by link id.
+ * connection that reaches the connected step. No [Media] or [Control] reaches the sink before its
+ * link's [LinkUp] or after its [LinkDown], so a controller can scope its state by link id.
+ *
+ * The markers are best effort, and a controller must tolerate a missed or late one:
+ * - each marker waits at most `ClientTimeouts.sinkStall` for the sink; a sink that takes longer
+ *   misses it (the client logs the miss and carries on), so cancel, unpair and reconnect never
+ *   hang on the sink;
+ * - a link cancelled while its [LinkUp] is being accepted still gets a [LinkDown], so a
+ *   [LinkDown] can come for a link the controller never saw come up: ignore it.
+ * A newer link id supersedes everything on older ones, whatever markers were missed.
  */
 sealed interface StreamInput {
     /** The link is connected; [macRevision] is the Mac's revision from its `hello` reply. */
@@ -21,10 +32,27 @@ sealed interface StreamInput {
      */
     data class LinkDown(val linkId: Long, val messageTooLarge: Boolean = false) : StreamInput
 
-    /** One media frame with its `0x01` channel byte stripped (*notes* → Media frame). */
-    class Media(val linkId: Long, val bytes: ByteArray) : StreamInput {
+    /**
+     * One media frame (*notes* → Media frame). It holds the decrypted channel frame as received,
+     * `0x01` marker included, so a 3 MiB keyframe is not copied just to drop one byte; [parse]
+     * reads it from after the marker.
+     */
+    class Media(val linkId: Long, private val channelFrame: ByteArray) : StreamInput {
+        init {
+            require(channelFrame.isNotEmpty() && channelFrame[0] == MEDIA_CHANNEL) { "not a media channel frame" }
+        }
+
+        /** The media frame's size in bytes (header and payload, marker excluded), for byte budgets. */
+        val size: Int get() = channelFrame.size - 1
+
+        /** Parses the media frame; the result owns a copy of the payload. Throws [MediaFrameException]. */
+        fun parse(): MediaFrame = parseMediaFrame(channelFrame, offset = 1)
+
+        /** A copy of the media frame's bytes, marker excluded: for tests and inspection. */
+        fun copyBytes(): ByteArray = channelFrame.copyOfRange(1, channelFrame.size)
+
         /** Frames are terminal content: only the size is shown. */
-        override fun toString(): String = "Media(linkId=$linkId, bytes=${bytes.size})"
+        override fun toString(): String = "Media(linkId=$linkId, bytes=$size)"
     }
 
     /**
@@ -37,13 +65,18 @@ sealed interface StreamInput {
 
 /**
  * Takes [StreamInput]s in wire order. The session's receive loop awaits [accept] before it reads
- * the next frame, so a sink that suspends applies back-pressure all the way to the relay socket
- * (whose byte budget then closes and reconnects a link that stalls too long); nothing is dropped.
- * Time spent in [accept] does not count against request timeouts.
+ * the next frame, so a sink that suspends applies back-pressure to the relay socket; nothing is
+ * dropped while the link stays up.
  *
- * [accept] must never wait for a reply from the Mac (directly or through a lock a requester
- * holds): the receive loop that would deliver the reply is the one waiting on it. Sending
- * ([StreamLink.send]) from inside [accept] is fine.
+ * Bounds: one [accept] of a [StreamInput.Media] or [StreamInput.Control] that takes longer than
+ * `ClientTimeouts.sinkStall` ends the link (it is cancelled, the frames already queued are read
+ * for replies and `unpaired` with stream inputs dropped, and the client reconnects); a marker
+ * that takes longer is missed. A request whose reply is queued behind frames the sink is still
+ * taking gets up to one more of its own bound, never more.
+ *
+ * [accept] must be cancellable, and must never wait for a reply from the Mac, directly or through
+ * a lock a requester holds: the receive loop that would deliver the reply is the one waiting on
+ * it, so such a request just times out. Sending ([StreamLink.send]) from inside [accept] is fine.
  */
 fun interface StreamSink {
     suspend fun accept(input: StreamInput)
