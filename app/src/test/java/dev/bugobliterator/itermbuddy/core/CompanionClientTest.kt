@@ -1,6 +1,7 @@
 package dev.bugobliterator.itermbuddy.core
 
 import com.southernstorm.noise.protocol.Noise
+import dev.bugobliterator.itermbuddy.Fixtures
 import dev.bugobliterator.itermbuddy.core.noise.newStaticKeyPair
 import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
 import dev.bugobliterator.itermbuddy.core.pairing.roomName
@@ -12,6 +13,7 @@ import dev.bugobliterator.itermbuddy.core.relay.UnreachableKind
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.core.wire.ProtocolRevision
+import dev.bugobliterator.itermbuddy.core.wire.decodeEnvelope
 import dev.bugobliterator.itermbuddy.fakemac.FakeMac
 import dev.bugobliterator.itermbuddy.fakemac.FakeRelay
 import dev.bugobliterator.itermbuddy.store.InMemoryPairingStore
@@ -24,6 +26,7 @@ import dev.bugobliterator.itermbuddy.store.beginFreshPairing
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -33,8 +36,12 @@ import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -1109,6 +1116,70 @@ class CompanionClientTest {
         h.mac.sendRaw("""{"payload":{"futureThing":{"x":1}}}""".toByteArray())
         runCurrent()
         assertEquals(listOf("futureThing"), received.map { (it as MacMessage.Unsupported).case })
+    }
+
+    @Test
+    fun sessionTreePushDuringFetchReachesEventsAndReplyCompletesRequest() = runTest {
+        val h = Harness(this)
+        val record = h.stored(PairingStage.REGISTERED)
+        h.macPinned(record)
+        h.mac.start()
+        h.client.start()
+        h.awaitConnected()
+
+        val events = CopyOnWriteArrayList<MacMessage>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { h.client.events.collect { events += it } }
+        val reply = async { h.client.request(PhoneMessage.FetchSessionTree) }
+        runCurrent()
+        val fetch = h.mac.receivedEnvelopes().last()
+        assertTrue("$fetch", "fetchSessionTree" in fetch.getValue("payload").jsonObject)
+        val requestID = fetch.getValue("requestID").jsonPrimitive.long
+
+        h.mac.sendSample("messages/live-session/session-tree-push.json", null)
+        runCurrent()
+        assertFalse("the push does not answer the request", reply.isCompleted)
+        h.mac.sendSample("messages/live-session/session-tree-reply.json", requestID)
+
+        val tree = reply.await() as MacMessage.SessionTreeMessage
+        assertEquals(liveSample("session-tree-reply.json"), tree)
+        assertEquals(listOf(liveSample("session-tree-push.json")), events.toList())
+    }
+
+    @Test
+    fun sessionTreePushBeforeHelloReplyOnReconnectIsHarmless() = runTest {
+        // NONE: a reconnect with a confirmed pairing.
+        pushBeforeHelloReply(PairingStage.REGISTERED)
+    }
+
+    @Test
+    fun sessionTreePushBeforeHelloReplyInPendingRecoveryIsHarmless() = runTest {
+        // POSSIBLE: unconfirmed, but the Mac pinned this phone, so its first frame is an envelope.
+        pushBeforeHelloReply(PairingStage.PENDING_CONFIRMATION)
+    }
+
+    /** The Mac persisted the phone's revision, so it may push a tree before answering the hello. */
+    private suspend fun TestScope.pushBeforeHelloReply(stage: PairingStage) {
+        val h = Harness(this)
+        val record = h.stored(stage)
+        h.macPinned(record)
+        h.mac.beforeHelloReply += "messages/live-session/session-tree-push.json"
+        val events = CopyOnWriteArrayList<MacMessage>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { h.client.events.collect { events += it } }
+        h.mac.start()
+        h.client.start()
+
+        h.awaitConnected()
+        assertEquals(PairingStage.REGISTERED, h.stage())
+        assertTrue(h.store.load()!!.isSamePairingAs(record))
+        assertEquals(1, h.mac.handshakes.get())
+        assertEquals("no confirmation from a pinned Mac", 0, h.mac.confirmationsSent.get())
+        assertEquals(listOf(liveSample("session-tree-push.json")), events.toList())
+        assertEquals(MacMessage.Pong, h.client.request(PhoneMessage.Ping))
+    }
+
+    private fun liveSample(name: String): MacMessage {
+        val json = Json.parseToJsonElement(Fixtures.read("messages/live-session/$name")).jsonObject.getValue("json")
+        return decodeEnvelope(json.toString().toByteArray()).second
     }
 
     /** A store whose loads, or saves at one stage, fail as a busy Keystore does. */

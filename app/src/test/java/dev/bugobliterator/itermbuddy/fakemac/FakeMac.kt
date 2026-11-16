@@ -201,6 +201,19 @@ class FakeMac(
         send(current, fixtureEnvelope("unpaired.json", null))
     }
 
+    /**
+     * Fixture paths (relative to `fixtures/`, such as `messages/live-session/session-tree-push.json`)
+     * whose payloads are sent, with no request ID, just before each hello reply: a Mac that
+     * persisted the phone's revision can push before it answers the hello.
+     */
+    val beforeHelloReply = CopyOnWriteArrayList<String>()
+
+    /** Sends the payload of the fixture at [path] (relative to `fixtures/`) with [requestID]. */
+    suspend fun sendSample(path: String, requestID: Long?) {
+        val current = checkNotNull(link) { "no link" }
+        send(current, sampleEnvelope(path, requestID))
+    }
+
     /** Sends raw [plaintext] on the link, such as a frame the phone cannot decode. */
     suspend fun sendRaw(plaintext: ByteArray) {
         val current = checkNotNull(link) { "no link" }
@@ -295,7 +308,10 @@ class FakeMac(
         val requestID = (envelope["requestID"] as? JsonPrimitive)?.long
         val payload = envelope.getValue("payload").jsonObject
         when (payload.keys.single()) {
-            "hello" -> if (answering) send(current, helloReply(requestID))
+            "hello" -> if (answering) {
+                for (path in beforeHelloReply) send(current, sampleEnvelope(path, null))
+                send(current, helloReply(requestID))
+            }
             "relayRoomSecret" -> if (answering) {
                 if (unpairOnRoomSecret) {
                     unpairOnRoomSecret = false
@@ -321,8 +337,12 @@ class FakeMac(
         return envelope(JsonObject(mapOf("hello" to body)), requestID)
     }
 
-    private fun fixtureEnvelope(name: String, requestID: Long?): ByteArray =
-        envelope(fixtureJson(name).getValue("payload").jsonObject, requestID)
+    private fun fixtureEnvelope(name: String, requestID: Long?): ByteArray = sampleEnvelope("messages/session/$name", requestID)
+
+    private fun sampleEnvelope(path: String, requestID: Long?): ByteArray {
+        val json = Json.parseToJsonElement(Fixtures.read(path)).jsonObject.getValue("json").jsonObject
+        return envelope(json.getValue("payload").jsonObject, requestID)
+    }
 
     private fun envelope(payload: JsonObject, requestID: Long?): ByteArray {
         val map = LinkedHashMap<String, JsonElement>()

@@ -156,28 +156,29 @@ class StreamMessagesTest {
     private fun unsupported(sample: Sample, case: String): MacMessage =
         MacMessage.Unsupported(case, sample.json.getValue("payload").jsonObject)
 
-    /** Every macToPhone sample, with the request ID and message it decodes to. */
-    private fun expectedMacMessage(sample: Sample): Pair<Long?, MacMessage>? = when (sample.name) {
-        "session-tree-reply" -> 4L to MacMessage.SessionTreeMessage(expectedTree(withTail = true, withBrowser = true))
-        "session-tree-reply-without-is-browser" ->
-            4L to MacMessage.SessionTreeMessage(expectedTree(withTail = true, withBrowser = false))
-        "session-tree-push" -> null to MacMessage.SessionTreeMessage(expectedTree(withTail = false, withBrowser = true))
-        "stream-started" -> 5L to MacMessage.StreamStarted(1, "hevc")
-        "stream-started-browser" -> 6L to MacMessage.StreamStarted(2, "hevc")
-        "stream-config-terminal" -> null to MacMessage.StreamConfigMessage(terminalConfig())
-        "stream-config-terminal-without-is-browser" -> null to MacMessage.StreamConfigMessage(terminalConfig())
-        "stream-config-terminal-cell-geometry-absent" -> null to MacMessage.StreamConfigMessage(terminalConfig(null))
-        "stream-config-browser" -> null to MacMessage.StreamConfigMessage(browserConfig)
-        "stream-ended-stoppedByClient" -> null to MacMessage.StreamEnded(1, StreamEndReason.STOPPED_BY_CLIENT)
-        "stream-ended-sessionClosed" -> null to MacMessage.StreamEnded(1, StreamEndReason.SESSION_CLOSED)
-        "stream-ended-superseded" -> null to MacMessage.StreamEnded(1, StreamEndReason.SUPERSEDED)
-        "stream-ended-dataLimitReached" -> null to MacMessage.StreamEnded(1, StreamEndReason.DATA_LIMIT_REACHED)
-        "stream-ended-error" -> null to MacMessage.StreamEnded(1, StreamEndReason.ERROR)
-        "error-no-supported-codec", "error-unknown-session", "error-unknown-session-not-started" -> 5L to error(sample)
-        "messages-removed" -> null to unsupported(sample, "messagesRemoved")
-        "ai-availability-changed" -> null to unsupported(sample, "aiAvailabilityChanged")
-        else -> null
-    }
+    /** Every macToPhone sample by name, with the request ID and message it decodes to. */
+    private val macMessages: Map<String, (Sample) -> Pair<Long?, MacMessage>> = mapOf(
+        "session-tree-reply" to { _ -> 4L to MacMessage.SessionTreeMessage(expectedTree(withTail = true, withBrowser = true)) },
+        "session-tree-reply-without-is-browser" to
+            { _ -> 4L to MacMessage.SessionTreeMessage(expectedTree(withTail = true, withBrowser = false)) },
+        "session-tree-push" to { _ -> null to MacMessage.SessionTreeMessage(expectedTree(withTail = false, withBrowser = true)) },
+        "stream-started" to { _ -> 5L to MacMessage.StreamStarted(1, StreamCodec.HEVC) },
+        "stream-started-browser" to { _ -> 6L to MacMessage.StreamStarted(2, StreamCodec.HEVC) },
+        "stream-config-terminal" to { _ -> null to MacMessage.StreamConfigMessage(terminalConfig()) },
+        "stream-config-terminal-without-is-browser" to { _ -> null to MacMessage.StreamConfigMessage(terminalConfig()) },
+        "stream-config-terminal-cell-geometry-absent" to { _ -> null to MacMessage.StreamConfigMessage(terminalConfig(null)) },
+        "stream-config-browser" to { _ -> null to MacMessage.StreamConfigMessage(browserConfig) },
+        "stream-ended-stoppedByClient" to { _ -> null to MacMessage.StreamEnded(1, StreamEndReason.STOPPED_BY_CLIENT) },
+        "stream-ended-sessionClosed" to { _ -> null to MacMessage.StreamEnded(1, StreamEndReason.SESSION_CLOSED) },
+        "stream-ended-superseded" to { _ -> null to MacMessage.StreamEnded(1, StreamEndReason.SUPERSEDED) },
+        "stream-ended-dataLimitReached" to { _ -> null to MacMessage.StreamEnded(1, StreamEndReason.DATA_LIMIT_REACHED) },
+        "stream-ended-error" to { _ -> null to MacMessage.StreamEnded(1, StreamEndReason.ERROR) },
+        "error-no-supported-codec" to { sample -> 5L to error(sample) },
+        "error-unknown-session" to { sample -> 5L to error(sample) },
+        "error-unknown-session-not-started" to { sample -> 5L to error(sample) },
+        "messages-removed" to { sample -> null to unsupported(sample, "messagesRemoved") },
+        "ai-availability-changed" to { sample -> null to unsupported(sample, "aiAvailabilityChanged") },
+    )
 
     @Test
     fun liveSessionPhoneSamplesEncodeExactly() {
@@ -191,10 +192,12 @@ class StreamMessagesTest {
 
     @Test
     fun liveSessionMacSamplesDecode() {
-        forEachSample(samples("macToPhone")) { sample ->
-            val expected = expectedMacMessage(sample) ?: throw AssertionError("no expectation")
+        val macSamples = samples("macToPhone")
+        forEachSample(macSamples) { sample ->
+            val expected = macMessages[sample.name]?.invoke(sample) ?: throw AssertionError("no expectation")
             assertEquals(sample.path, expected, decodeEnvelope(sample.bytes))
         }
+        assertEquals("expectations without a sample", macMessages.keys, macSamples.map { it.name }.toSet())
 
         val reply = decodeEnvelope(sample("session-tree-reply").bytes).second as MacMessage.SessionTreeMessage
         assertEquals(2, reply.tree.windows.size)
@@ -253,11 +256,60 @@ class StreamMessagesTest {
         val text = """{"payload":{"streamEnded":{"reason":"futureReason","streamID":3}}}"""
         assertEquals(null to MacMessage.StreamEnded(3, StreamEndReason.UNKNOWN), decodeEnvelope(text.toByteArray()))
         assertNull(StreamEndReason.UNKNOWN.raw)
-        // A missing or non-string reason is still a bad body.
-        for (bad in listOf("""{"streamID":3}""", """{"streamID":3,"reason":1}""")) {
-            val frame = """{"payload":{"streamEnded":$bad}}"""
-            assertThrows(frame, WireDecodeException::class.java) { decodeEnvelope(frame.toByteArray()) }
+        // A missing or non-string reason is UNKNOWN too: a stream end is never refused.
+        for (body in listOf("""{"streamID":3}""", """{"streamID":3,"reason":1}""", """{"streamID":3,"reason":null}""")) {
+            val frame = """{"payload":{"streamEnded":$body}}"""
+            assertEquals(frame, null to MacMessage.StreamEnded(3, StreamEndReason.UNKNOWN), decodeEnvelope(frame.toByteArray()))
         }
+        // The stream ID is still required.
+        val noStream = """{"payload":{"streamEnded":{"reason":"superseded"}}}"""
+        assertThrows(noStream, WireDecodeException::class.java) { decodeEnvelope(noStream.toByteArray()) }
+    }
+
+    @Test
+    fun unknownCodecIsUnknown() {
+        val text = """{"payload":{"streamStarted":{"_0":{"codec":"vp9","streamID":1}}},"requestID":5}"""
+        assertEquals(5L to MacMessage.StreamStarted(1, StreamCodec.UNKNOWN), decodeEnvelope(text.toByteArray()))
+        assertNull(StreamCodec.UNKNOWN.raw)
+        // Only known codecs can be offered.
+        assertThrows(IllegalArgumentException::class.java) { StreamParams(supportedCodecs = listOf(StreamCodec.UNKNOWN)) }
+        val both = PhoneMessage.StartSessionStream(guid, StreamParams(listOf(StreamCodec.HEVC, StreamCodec.H264))).payload()
+        assertEquals(
+            """["hevc","h264"]""",
+            both.getValue("startSessionStream").jsonObject.getValue("params").jsonObject.getValue("supportedCodecs").toString(),
+        )
+    }
+
+    @Test
+    fun exponentLiteralsInIntegerFieldsAreRejected() {
+        val config = sample("stream-config-terminal").json.toString()
+        val bad = listOf(
+            config.replace("\"columns\":80", "\"columns\":8e1"),
+            config.replace("\"pixelWidth\":1280", "\"pixelWidth\":1.28e3"),
+            config.replace("\"streamID\":1", "\"streamID\":1e0"),
+            """{"payload":{"streamStarted":{"_0":{"codec":"hevc","streamID":1e2}}}}""",
+        )
+        for (text in bad) {
+            assertThrows(text, WireDecodeException::class.java) { decodeEnvelope(text.toByteArray()) }
+        }
+    }
+
+    @Test
+    fun streamConfigOwnsItsExtradata() {
+        val input = extradata.copyOf()
+        val config = terminalConfig().copy(codecExtradata = input)
+        val hash = config.hashCode()
+        input.fill(0)
+        config.codecExtradata.fill(0)
+        assertEquals(terminalConfig(), config)
+        assertEquals(hash, config.hashCode())
+        assertTrue(config.codecExtradata.contentEquals(extradata))
+
+        val resized = config.copy(columns = 60, rows = 45, generationId = 2)
+        assertEquals(60, resized.columns)
+        assertEquals(45, resized.rows)
+        assertEquals(2L, resized.generationId)
+        assertEquals(terminalConfig(), resized.copy(columns = 80, rows = 25, generationId = 1))
     }
 
     @Test
@@ -316,7 +368,8 @@ class StreamMessagesTest {
             tree.replace("\"title\":\"agents\"", "\"title\":null"),
             tree.replace("\"peers\":[]", "\"peers\":{}"),
             """{"payload":{"sessionTree":{"windows":[]}}}""",
-            """{"payload":{"streamStarted":{"_0":{"codec":"vp9","streamID":1}}}}""",
+            """{"payload":{"streamStarted":{"_0":{"streamID":1}}}}""",
+            """{"payload":{"streamStarted":{"_0":{"codec":1,"streamID":1}}}}""",
             """{"payload":{"streamStarted":{"streamID":1,"codec":"hevc"}}}""",
             """{"payload":{"streamConfig":[]}}""",
         )
@@ -328,7 +381,7 @@ class StreamMessagesTest {
     @Test
     fun unknownLiveSessionKeysAreIgnored() {
         val text = """{"payload":{"streamStarted":{"_0":{"codec":"h264","streamID":7,"x":1},"_1":2}},"requestID":5}"""
-        assertEquals(5L to MacMessage.StreamStarted(7, "h264"), decodeEnvelope(text.toByteArray()))
+        assertEquals(5L to MacMessage.StreamStarted(7, StreamCodec.H264), decodeEnvelope(text.toByteArray()))
         val ended = """{"payload":{"streamEnded":{"reason":"error","streamID":1,"detail":"x"}}}"""
         assertEquals(null to MacMessage.StreamEnded(1, StreamEndReason.ERROR), decodeEnvelope(ended.toByteArray()))
     }
@@ -356,12 +409,17 @@ class StreamMessagesTest {
         val values = listOf<Any>(
             text, event, PhoneMessage.SendKey("ptys_X", event), PhoneMessage.PasteText("ptys_X", secret),
             summary, peer, pane, tab, window, tree, MacMessage.SessionTreeMessage(tree),
+            decodeEnvelope("""{"payload":{"messagesRemoved":{"chatID":"$secret","messageIDs":["$secret"]}}}""".toByteArray()).second,
         )
         for (value in values) {
             val printed = value.toString()
             assertFalse("${value.javaClass.simpleName}: $printed", secret in printed)
         }
         assertEquals("Text(len=14)", text.toString())
+        assertEquals(
+            "Unsupported(case=messagesRemoved, keys=2)",
+            MacMessage.Unsupported("messagesRemoved", Json.parseToJsonElement("""{"messagesRemoved":{"a":"$secret","b":1}}""").jsonObject).toString(),
+        )
     }
 
     @Test

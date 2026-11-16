@@ -30,14 +30,36 @@ import kotlinx.serialization.json.JsonPrimitive
  * [maxMediaFrameVersion].
  */
 data class StreamParams(
-    val supportedCodecs: List<String> = listOf("hevc"),
+    val supportedCodecs: List<StreamCodec> = listOf(StreamCodec.HEVC),
     val maxFrameRate: Double = 30.0,
     val maxMediaFrameVersion: Int? = 2,
-)
+) {
+    init {
+        require(StreamCodec.UNKNOWN !in supportedCodecs) { "only a known codec can be offered" }
+    }
+}
 
 /**
- * Upstream `CompanionStreamEndReason`. [UNKNOWN] (raw null) is Android's own: any reason
- * string this build does not know decodes to it, so a stream end is never refused.
+ * Upstream `CompanionStreamCodec`. [UNKNOWN] (raw null) is Android's own: a codec string this
+ * build does not know decodes to it rather than failing the `streamStarted` reply, and it can
+ * never be offered in [StreamParams]. v3.7.7 always answers `hevc`. The stream controller must
+ * stop any started stream whose codec is not [HEVC]; it is the only one this app decodes.
+ */
+enum class StreamCodec(val raw: String?) {
+    HEVC("hevc"),
+    H264("h264"),
+    UNKNOWN(null),
+    ;
+
+    companion object {
+        fun fromRaw(raw: String): StreamCodec = entries.firstOrNull { it.raw == raw } ?: UNKNOWN
+    }
+}
+
+/**
+ * Upstream `CompanionStreamEndReason`. [UNKNOWN] (raw null) is Android's own: a reason this
+ * build does not know, or a missing or non-string one, decodes to it, so a stream end is
+ * never refused.
  * [ERROR] is defined upstream and never sent by v3.7.7.
  */
 enum class StreamEndReason(val raw: String?) {
@@ -54,9 +76,6 @@ enum class StreamEndReason(val raw: String?) {
     }
 }
 
-/** Codecs upstream `CompanionStreamCodec` knows; any other value fails its decode. */
-private val STREAM_CODECS = setOf("hevc", "h264")
-
 private fun requireU32(name: String, value: Long) {
     require(value in 0..U32_MAX) { "$name must be a UInt32" }
 }
@@ -67,7 +86,7 @@ internal fun encodeStartSessionStream(message: PhoneMessage.StartSessionStream):
     val params = message.params
     // Insertion order is the iOS text order, which startParamsAreExactlyIos pins.
     val paramsBody = linkedMapOf<String, JsonElement>(
-        "supportedCodecs" to JsonArray(params.supportedCodecs.map(::JsonPrimitive)),
+        "supportedCodecs" to JsonArray(params.supportedCodecs.map { JsonPrimitive(checkNotNull(it.raw)) }),
         "maxFrameRate" to swiftDouble(params.maxFrameRate),
     )
     params.maxMediaFrameVersion?.let { paramsBody["maxMediaFrameVersion"] = JsonPrimitive(it) }
@@ -159,8 +178,8 @@ private fun decodeSessionSummary(summary: JsonObject): SessionSummary = SessionS
 
 internal fun decodeStreamStarted(body: JsonElement): MacMessage {
     val started = body.unlabelled("streamStarted")
-    val codec = started.string("streamStarted", "codec")
-    if (codec !in STREAM_CODECS) throw WireDecodeException("streamStarted.codec is not a known codec")
+    // An unknown codec string is UNKNOWN, not a bad body; a missing or non-string one still throws.
+    val codec = StreamCodec.fromRaw(started.string("streamStarted", "codec"))
     return MacMessage.StreamStarted(started.u32("streamStarted", "streamID"), codec)
 }
 
@@ -200,6 +219,8 @@ private fun decodeCellGeometry(geometry: JsonObject): CellGeometry {
 
 internal fun decodeStreamEnded(body: JsonElement): MacMessage {
     val ended = body.asObject("streamEnded")
-    val reason = StreamEndReason.fromRaw(ended.string("streamEnded", "reason"))
+    // Lenient beyond upstream: a stream end is never refused, whatever its reason.
+    val raw = (ended["reason"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+    val reason = raw?.let(StreamEndReason::fromRaw) ?: StreamEndReason.UNKNOWN
     return MacMessage.StreamEnded(ended.u32("streamEnded", "streamID"), reason)
 }

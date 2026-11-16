@@ -55,8 +55,9 @@ fun encodeEnvelope(message: PhoneMessage, requestID: Long?): ByteArray {
  *   (stream IDs, generations) reads into a [Long] and must be in [0, 2^32).
  * - Optional fields follow upstream's `decodeIfPresent`: absent or `null` takes the
  *   default; present with the wrong type throws.
- * - One leniency beyond upstream: an unrecognised `streamEnded` reason decodes to
- *   `StreamEndReason.UNKNOWN`, so a stream end is never refused.
+ * - Leniencies beyond upstream: a `streamEnded` reason that is unknown, missing or not a
+ *   string decodes to `StreamEndReason.UNKNOWN`, so a stream end is never refused; an
+ *   unknown `streamStarted` codec string decodes to `StreamCodec.UNKNOWN`.
  *
  * JSON leniency: kotlinx accepts some non-standard values (unquoted literals such as
  * `abc`) in positions this decoder ignores, while a BOM or UTF-16 frame is rejected.

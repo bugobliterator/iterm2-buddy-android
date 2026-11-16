@@ -142,8 +142,11 @@ sealed interface MacMessage {
      */
     data class SessionTreeMessage(val tree: SessionTree) : MacMessage
 
-    /** `streamStarted(CompanionStreamStarted)`: [streamID] is upstream `UInt32`; [codec] is `hevc` or `h264`. */
-    data class StreamStarted(val streamID: Long, val codec: String) : MacMessage
+    /**
+     * `streamStarted(CompanionStreamStarted)`: [streamID] is upstream `UInt32`. The stream
+     * controller must stop a stream whose [codec] is not [StreamCodec.HEVC].
+     */
+    data class StreamStarted(val streamID: Long, val codec: StreamCodec) : MacMessage
 
     /** `streamConfig(CompanionStreamConfig)`. */
     data class StreamConfigMessage(val config: StreamConfig) : MacMessage
@@ -155,7 +158,10 @@ sealed interface MacMessage {
      * A case this build does not handle: [case] is its discriminator and [raw] the
      * payload object `{"<case>": ...}`. A media frame is `Unsupported("media", {})`.
      */
-    data class Unsupported(val case: String, val raw: JsonObject) : MacMessage
+    data class Unsupported(val case: String, val raw: JsonObject) : MacMessage {
+        /** [raw] may hold terminal content (a chat's messages, say), so only its shape is shown. */
+        override fun toString(): String = "Unsupported(case=$case, keys=${(raw[case] as? JsonObject)?.size ?: 0})"
+    }
 }
 
 /** Key Swift's synthesized `Codable` gives the first unlabelled associated value. */
