@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: Optional(4), payload: WireFixtures.CompanionClientMessage.fetchSessionTree)",
+  "json" : {"payload":{"fetchSessionTree":{}},"requestID":4}
+}

@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.messagesRemoved(chatID: \"5E0B7C1A-9D24-4F36-8A51-0C7E2D9B4F18\", messageIDs: [A1C3E5F7-0B2D-4F6A-8C1E-3D5F7A9B0C2D, B2D4F6A8-1C3E-4A7B-9D2F-4E6A8B0C1D3E]))",
+  "json" : {"payload":{"messagesRemoved":{"chatID":"5E0B7C1A-9D24-4F36-8A51-0C7E2D9B4F18","messageIDs":["A1C3E5F7-0B2D-4F6A-8C1E-3D5F7A9B0C2D","B2D4F6A8-1C3E-4A7B-9D2F-4E6A8B0C1D3E"]}}}
+}

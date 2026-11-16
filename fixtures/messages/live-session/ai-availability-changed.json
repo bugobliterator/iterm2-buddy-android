@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.aiAvailabilityChanged(available: false))",
+  "json" : {"payload":{"aiAvailabilityChanged":{"available":false}}}
+}

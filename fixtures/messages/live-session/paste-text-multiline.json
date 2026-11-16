@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: nil, payload: WireFixtures.CompanionClientMessage.pasteText(sessionGuid: \"ptys_7K2M9Q4R8T1VH\", text: \"make test\\ngit status --short\\n\"))",
+  "json" : {"payload":{"pasteText":{"sessionGuid":"ptys_7K2M9Q4R8T1VH","text":"make test\ngit status --short\n"}}}
+}

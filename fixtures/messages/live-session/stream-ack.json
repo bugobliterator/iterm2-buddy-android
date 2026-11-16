@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: nil, payload: WireFixtures.CompanionClientMessage.streamAck(streamID: 1, lastPTSMilliseconds: 523118042, queueDepth: 0))",
+  "json" : {"payload":{"streamAck":{"lastPTSMilliseconds":523118042,"queueDepth":0,"streamID":1}}}
+}

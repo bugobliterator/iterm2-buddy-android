@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: Optional(5), payload: WireFixtures.CompanionHostMessage.streamStarted(WireFixtures.CompanionStreamStarted(streamID: 1, codec: WireFixtures.CompanionStreamCodec.hevc)))",
+  "json" : {"payload":{"streamStarted":{"_0":{"codec":"hevc","streamID":1}}},"requestID":5}
+}

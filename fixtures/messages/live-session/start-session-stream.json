@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: Optional(5), payload: WireFixtures.CompanionClientMessage.startSessionStream(sessionGuid: \"ptys_7K2M9Q4R8T1VH\", params: WireFixtures.CompanionStreamParams(supportedCodecs: [WireFixtures.CompanionStreamCodec.hevc], maxFrameRate: 30.0, maxBitrate: nil, maxMediaFrameVersion: Optional(2))))",
+  "json" : {"payload":{"startSessionStream":{"params":{"maxFrameRate":30,"maxMediaFrameVersion":2,"supportedCodecs":["hevc"]},"sessionGuid":"ptys_7K2M9Q4R8T1VH"}},"requestID":5}
+}

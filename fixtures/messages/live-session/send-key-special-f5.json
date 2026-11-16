@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: nil, payload: WireFixtures.CompanionClientMessage.sendKey(sessionGuid: \"ptys_7K2M9Q4R8T1VH\", event: WireFixtures.CompanionKeyEvent(key: WireFixtures.CompanionKeyEvent.Key.special(WireFixtures.CompanionSpecialKey.f5), modifiers: WireFixtures.CompanionKeyModifiers(control: false, shift: false, leftOption: false, rightOption: false))))",
+  "json" : {"payload":{"sendKey":{"event":{"key":{"special":{"_0":"f5"}},"modifiers":{"control":false,"leftOption":false,"rightOption":false,"shift":false}},"sessionGuid":"ptys_7K2M9Q4R8T1VH"}}}
+}

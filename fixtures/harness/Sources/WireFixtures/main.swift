@@ -395,8 +395,14 @@ let vectors = CryptoVectors(canonical: canonical,
                             sas: sas,
                             joins: joins,
                             prologues: prologues)
-let encoder = JSONEncoder()
-encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+/// The encoder for every file the harness writes itself (not message samples).
+func fixtureEncoder() -> JSONEncoder {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    return encoder
+}
+
+let encoder = fixtureEncoder()
 var json = try encoder.encode(vectors)
 json.append(0x0a)
 let destination = outputDirectory.appendingPathComponent("crypto-vectors.json")
@@ -612,37 +618,48 @@ func jsonTree(_ data: Data) throws -> NSDictionary? {
     try JSONSerialization.jsonObject(with: data) as? NSDictionary
 }
 
-for sample in sessionSamples {
-    // Upstream's own bytes and the sorted bytes are the same JSON tree.
-    // NSDictionary equality conflates true and 1; the decode round-trip below
-    // compares typed values and catches that.
-    let wireTree = try jsonTree(sample.wire)
-    let sortedTree = try jsonTree(sample.sortedWire)
-    require(wireTree != nil && wireTree == sortedTree,
-            "\(sample.name): sorted encoding differs from WireCoding.encode")
-    // Both decode with upstream WireCoding back to the same value.
-    for data in [sample.wire, sample.sortedWire] {
-        let decoded = try sample.roundTrip(data)
-        require(decoded.swiftValue == sample.swiftValue, "\(sample.name): decoded value differs from the sample")
-        require(decoded.sortedWire == sample.sortedWire, "\(sample.name): re-encoding differs from the sample")
+/// Checks every sample: upstream's bytes and the sorted bytes are one JSON
+/// tree, both decode with upstream `WireCoding` to the same value, and the
+/// file's embedded `json` decodes to it too.
+func checkSessionSamples(_ samples: [SessionSample]) throws {
+    require(!samples.isEmpty, "a session sample list is empty")
+    for sample in samples {
+        // Upstream's own bytes and the sorted bytes are the same JSON tree.
+        // NSDictionary equality conflates true and 1; the decode round-trip below
+        // compares typed values and catches that.
+        let wireTree = try jsonTree(sample.wire)
+        let sortedTree = try jsonTree(sample.sortedWire)
+        require(wireTree != nil && wireTree == sortedTree,
+                "\(sample.name): sorted encoding differs from WireCoding.encode")
+        // Both decode with upstream WireCoding back to the same value.
+        for data in [sample.wire, sample.sortedWire] {
+            let decoded = try sample.roundTrip(data)
+            require(decoded.swiftValue == sample.swiftValue, "\(sample.name): decoded value differs from the sample")
+            require(decoded.sortedWire == sample.sortedWire, "\(sample.name): re-encoding differs from the sample")
+        }
+        require(!sample.swiftValue.contains(".unsupported"), "\(sample.name): sample is unsupported")
+        // The file parses, and its `json` is the same tree, and decodes the same.
+        let file = try JSONSerialization.jsonObject(with: try sampleFile(sample)) as? NSDictionary
+        let embedded = file?["json"] as? NSDictionary
+        require(embedded != nil && embedded == wireTree, "\(sample.name): embedded json differs from the wire bytes")
+        let embeddedData = try JSONSerialization.data(withJSONObject: embedded ?? [:])
+        let embeddedValue = try sample.roundTrip(embeddedData).swiftValue
+        require(embeddedValue == sample.swiftValue,
+                "\(sample.name): embedded json does not decode to the sample")
     }
-    require(!sample.swiftValue.contains(".unsupported"), "\(sample.name): sample is unsupported")
-    // The file parses, and its `json` is the same tree, and decodes the same.
-    let file = try JSONSerialization.jsonObject(with: try sampleFile(sample)) as? NSDictionary
-    let embedded = file?["json"] as? NSDictionary
-    require(embedded != nil && embedded == wireTree, "\(sample.name): embedded json differs from the wire bytes")
-    let embeddedData = try JSONSerialization.data(withJSONObject: embedded ?? [:])
-    let embeddedValue = try sample.roundTrip(embeddedData).swiftValue
-    require(embeddedValue == sample.swiftValue,
-            "\(sample.name): embedded json does not decode to the sample")
+    require(Set(samples.map(\.name)).count == samples.count, "duplicate session sample name")
 }
-require(Set(sessionSamples.map(\.name)).count == sessionSamples.count, "duplicate session sample name")
 
-let sessionDirectory = outputDirectory.appendingPathComponent("messages/session", isDirectory: true)
-try FileManager.default.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
-for sample in sessionSamples {
-    try sampleFile(sample).write(to: sessionDirectory.appendingPathComponent("\(sample.name).json"), options: .atomic)
+func writeSessionSamples(_ samples: [SessionSample], to directory: URL) throws {
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    for sample in samples {
+        try sampleFile(sample).write(to: directory.appendingPathComponent("\(sample.name).json"), options: .atomic)
+    }
 }
+
+try checkSessionSamples(sessionSamples)
+try writeSessionSamples(sessionSamples,
+                        to: outputDirectory.appendingPathComponent("messages/session", isDirectory: true))
 
 // MARK: - Pairing confirmation
 
@@ -675,3 +692,16 @@ let messagesDirectory = outputDirectory.appendingPathComponent("messages", isDir
 try revisionFile.write(to: messagesDirectory.appendingPathComponent("revision.json"), options: .atomic)
 print("wire-fixtures: wrote \(messagesDirectory.path): session=\(sessionSamples.count) "
       + "confirmation=\(confirmations.count) revision=\(CompanionProtocolVersion.current)")
+
+// MARK: - Live session samples and media fixtures
+//
+// The HEVC clip comes first: the stream configs carry its parameter sets.
+// Generators are in MediaSamples.swift and LiveSessionSamples.swift.
+
+let terminalClip = try loadTerminalClip(outputDirectory.appendingPathComponent("media/hevc/terminal-clip.hevc"))
+let liveSessionSampleList = try liveSessionSamples(clip: terminalClip)
+try checkSessionSamples(liveSessionSampleList)
+try writeSessionSamples(liveSessionSampleList,
+                        to: outputDirectory.appendingPathComponent("messages/live-session", isDirectory: true))
+print("wire-fixtures: wrote \(messagesDirectory.path)/live-session: samples=\(liveSessionSampleList.count)")
+try writeMediaFixtures(clip: terminalClip, to: outputDirectory.appendingPathComponent("media", isDirectory: true))

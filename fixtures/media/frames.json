@@ -1,0 +1,183 @@
+{
+  "invalid" : [
+    {
+      "channelHex" : "01",
+      "encodedHex" : "",
+      "name" : "empty",
+      "upstreamError" : "truncated"
+    },
+    {
+      "channelHex" : "0102",
+      "encodedHex" : "02",
+      "name" : "one-byte",
+      "upstreamError" : "truncated"
+    },
+    {
+      "channelHex" : "0100000000000100000001000000001f2e25fb000000010000000000000fa0000000052021222324",
+      "encodedHex" : "00000000000100000001000000001f2e25fb000000010000000000000fa0000000052021222324",
+      "name" : "version-0",
+      "upstreamError" : "unsupportedVersion(0)"
+    },
+    {
+      "channelHex" : "0103000000000100000001000000001f2e25fb000000010000000000000fa0000000052021222324",
+      "encodedHex" : "03000000000100000001000000001f2e25fb000000010000000000000fa0000000052021222324",
+      "name" : "version-3",
+      "upstreamError" : "unsupportedVersion(3)"
+    },
+    {
+      "channelHex" : "0102000000000100000001000000001f2e25fb000000010000000000000fa0000000",
+      "encodedHex" : "02000000000100000001000000001f2e25fb000000010000000000000fa0000000",
+      "name" : "v2-header-one-byte-short",
+      "upstreamError" : "truncated"
+    },
+    {
+      "channelHex" : "0101000000000100000001000000001f2e25fb000000",
+      "encodedHex" : "01000000000100000001000000001f2e25fb000000",
+      "name" : "v1-header-one-byte-short",
+      "upstreamError" : "truncated"
+    },
+    {
+      "channelHex" : "0102000000000100000001000000001f2e25fb000000010000000000000fa00000000520212223",
+      "encodedHex" : "02000000000100000001000000001f2e25fb000000010000000000000fa00000000520212223",
+      "name" : "v2-length-one-more-than-payload",
+      "upstreamError" : "payloadLengthMismatch(declared: 5, actual: 4)"
+    },
+    {
+      "channelHex" : "0102000000000100000001000000001f2e25fb000000010000000000000fa000000005202122232400",
+      "encodedHex" : "02000000000100000001000000001f2e25fb000000010000000000000fa000000005202122232400",
+      "name" : "v2-length-one-less-than-payload",
+      "upstreamError" : "payloadLengthMismatch(declared: 5, actual: 6)"
+    },
+    {
+      "channelHex" : "0101000000000100000001000000001f2e25fb0000000520212223",
+      "encodedHex" : "01000000000100000001000000001f2e25fb0000000520212223",
+      "name" : "v1-length-one-more-than-payload",
+      "upstreamError" : "payloadLengthMismatch(declared: 5, actual: 4)"
+    },
+    {
+      "channelHex" : "0101000000000100000001000000001f2e25fb00000005202122232400",
+      "encodedHex" : "01000000000100000001000000001f2e25fb00000005202122232400",
+      "name" : "v1-length-one-less-than-payload",
+      "upstreamError" : "payloadLengthMismatch(declared: 5, actual: 6)"
+    },
+    {
+      "channelHex" : "0101000000000100000001000000001f2e25fb000000010000000000000fa0000000052021222324",
+      "encodedHex" : "01000000000100000001000000001f2e25fb000000010000000000000fa0000000052021222324",
+      "name" : "v2-bytes-read-as-v1",
+      "upstreamError" : "payloadLengthMismatch(declared: 1, actual: 17)"
+    }
+  ],
+  "valid" : [
+    {
+      "channelHex" : "0101030000000100000000000000001f2e25da00000009101112131415161718",
+      "encodedHex" : "01030000000100000000000000001f2e25da00000009101112131415161718",
+      "flags" : 3,
+      "name" : "v1-keyframe-config-changed",
+      "payloadHex" : "101112131415161718",
+      "ptsMilliseconds" : 523118042,
+      "sequence" : 0,
+      "streamID" : 1,
+      "version" : 1
+    },
+    {
+      "channelHex" : "0101000000000100000001000000001f2e25fb000000052021222324",
+      "encodedHex" : "01000000000100000001000000001f2e25fb000000052021222324",
+      "flags" : 0,
+      "name" : "v1-delta",
+      "payloadHex" : "2021222324",
+      "ptsMilliseconds" : 523118075,
+      "sequence" : 1,
+      "streamID" : 1,
+      "version" : 1
+    },
+    {
+      "channelHex" : "0102030000000100000000000000001f2e25da000000010000000000000fa000000009101112131415161718",
+      "encodedHex" : "02030000000100000000000000001f2e25da000000010000000000000fa000000009101112131415161718",
+      "flags" : 3,
+      "generationId" : 1,
+      "liveTop" : 4000,
+      "name" : "v2-keyframe-config-changed",
+      "payloadHex" : "101112131415161718",
+      "ptsMilliseconds" : 523118042,
+      "sequence" : 0,
+      "streamID" : 1,
+      "version" : 2
+    },
+    {
+      "channelHex" : "0102000000000100000001000000001f2e25fb000000010000000000000fa0000000052021222324",
+      "encodedHex" : "02000000000100000001000000001f2e25fb000000010000000000000fa0000000052021222324",
+      "flags" : 0,
+      "generationId" : 1,
+      "liveTop" : 4000,
+      "name" : "v2-delta",
+      "payloadHex" : "2021222324",
+      "ptsMilliseconds" : 523118075,
+      "sequence" : 1,
+      "streamID" : 1,
+      "version" : 2
+    },
+    {
+      "channelHex" : "0102010000000100000007000000001f2e2832000000020000000000000fa300000006303132333435",
+      "encodedHex" : "02010000000100000007000000001f2e2832000000020000000000000fa300000006303132333435",
+      "flags" : 1,
+      "generationId" : 2,
+      "liveTop" : 4003,
+      "name" : "v2-keyframe-only",
+      "payloadHex" : "303132333435",
+      "ptsMilliseconds" : 523118642,
+      "sequence" : 7,
+      "streamID" : 1,
+      "version" : 2
+    },
+    {
+      "channelHex" : "0102000000000100000002000000001f2e261c00000001fffffee08e04fb350000000440414243",
+      "encodedHex" : "02000000000100000002000000001f2e261c00000001fffffee08e04fb350000000440414243",
+      "flags" : 0,
+      "generationId" : 1,
+      "liveTop" : -1234567890123,
+      "name" : "v2-negative-live-top",
+      "payloadHex" : "40414243",
+      "ptsMilliseconds" : 523118108,
+      "sequence" : 2,
+      "streamID" : 1,
+      "version" : 2
+    },
+    {
+      "channelHex" : "01020080000001fffffffe000000001f2e263d80000002000000000000000000000003505152",
+      "encodedHex" : "020080000001fffffffe000000001f2e263d80000002000000000000000000000003505152",
+      "flags" : 0,
+      "generationId" : 2147483650,
+      "liveTop" : 0,
+      "name" : "v2-ids-above-2-31",
+      "payloadHex" : "505152",
+      "ptsMilliseconds" : 523118141,
+      "sequence" : 4294967294,
+      "streamID" : 2147483649,
+      "version" : 2
+    },
+    {
+      "channelHex" : "0102000000000100000003000000001f2e265e000000010000000000000fa000000000",
+      "encodedHex" : "02000000000100000003000000001f2e265e000000010000000000000fa000000000",
+      "flags" : 0,
+      "generationId" : 1,
+      "liveTop" : 4000,
+      "name" : "v2-empty-payload",
+      "payloadHex" : "",
+      "ptsMilliseconds" : 523118174,
+      "sequence" : 3,
+      "streamID" : 1,
+      "version" : 2
+    },
+    {
+      "channelHex" : "0101000000000100000003000000001f2e265e00000000",
+      "encodedHex" : "01000000000100000003000000001f2e265e00000000",
+      "flags" : 0,
+      "name" : "v1-empty-payload",
+      "payloadHex" : "",
+      "ptsMilliseconds" : 523118174,
+      "sequence" : 3,
+      "streamID" : 1,
+      "version" : 1
+    }
+  ]
+}
