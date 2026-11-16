@@ -3,6 +3,7 @@ package dev.bugobliterator.itermbuddy.fakemac
 import dev.bugobliterator.itermbuddy.core.RelaySocket
 import dev.bugobliterator.itermbuddy.core.RelayTransport
 import dev.bugobliterator.itermbuddy.core.relay.AdmissionResult
+import dev.bugobliterator.itermbuddy.core.relay.FrameQueue
 import dev.bugobliterator.itermbuddy.core.relay.JoinRole
 import dev.bugobliterator.itermbuddy.core.relay.Proof
 import dev.bugobliterator.itermbuddy.core.relay.RegisterResult
@@ -36,8 +37,15 @@ import kotlin.random.Random
  * Tests script failures with [phoneAdmissionOverrides], [registerOverrides] and [reachable].
  *
  * @param origin the relay's RELAY_ORIGIN, the string it verifies join signatures against.
+ * @param phoneQueueBytes the phone socket's receive budget, as [RelayConnection]'s
+ *   `maxQueuedBytes`, through the same [FrameQueue]: over it the phone's socket fails with 1006
+ *   "receive queue over budget" after the frames before it, and the relay closes the Mac with
+ *   1001 "peer gone", as it does when the phone closes.
  */
-internal class FakeRelay(val origin: String) : RelayTransport, MacRelay {
+internal class FakeRelay(
+    val origin: String,
+    private val phoneQueueBytes: Long = Long.MAX_VALUE,
+) : RelayTransport, MacRelay {
     private class Room {
         var verifier: ByteArray? = null
         var mac: MacSide? = null
@@ -171,11 +179,11 @@ internal class FakeRelay(val origin: String) : RelayTransport, MacRelay {
     }
 
     private inner class PhoneSide(private val signedOrigin: String, private val roomName: String) : RelaySocket {
-        private val frames = Channel<ByteArray>(Channel.UNLIMITED)
+        private val frames = FrameQueue(phoneQueueBytes)
         private var admitted = false
         private var closed = false
 
-        override val incoming: ReceiveChannel<ByteArray> get() = frames
+        override val incoming: ReceiveChannel<ByteArray> get() = frames.incoming
 
         override suspend fun admit(proof: Proof): AdmissionResult = synchronized(this@FakeRelay) {
             val result = decide(proof)
@@ -238,7 +246,16 @@ internal class FakeRelay(val origin: String) : RelayTransport, MacRelay {
         }
 
         fun deliver(frame: ByteArray) {
-            if (!closed) frames.trySend(frame)
+            if (closed) return
+            if (!frames.offer(frame)) {
+                // The phone closed itself over its budget; the queue already fails with 1006.
+                closed = true
+                val room = rooms[roomName] ?: return
+                if (room.phone === this) {
+                    room.phone = null
+                    room.mac?.closedByRelay(CLOSE_GOING_AWAY, "peer gone")
+                }
+            }
         }
 
         fun closedByRelay(code: Int, reason: String) {

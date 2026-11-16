@@ -81,12 +81,27 @@ class MediaChannelTest {
         val media: List<StreamInput.Media> get() = inputs.filterIsInstance<StreamInput.Media>()
     }
 
+    /** Takes LinkUp, then suspends forever on everything else: a bounded inbox whose consumer died. */
+    private class StuckSink : StreamSink {
+        val inputs = CopyOnWriteArrayList<StreamInput>()
+        val stuckOn = CopyOnWriteArrayList<StreamInput>()
+
+        override suspend fun accept(input: StreamInput) {
+            if (input is StreamInput.LinkUp) {
+                inputs += input
+                return
+            }
+            stuckOn += input
+            CompletableDeferred<Unit>().await()
+        }
+    }
+
     private inner class Harness(
         test: TestScope,
-        val sink: RecordingSink? = RecordingSink(),
+        val sink: StreamSink? = RecordingSink(),
         timeouts: ClientTimeouts = ClientTimeouts(),
+        val relay: FakeRelay = FakeRelay(ORIGIN),
     ) {
-        val relay = FakeRelay(ORIGIN)
         val store = InMemoryPairingStore()
         val logs = CopyOnWriteArrayList<String>()
         val events = CopyOnWriteArrayList<MacMessage>()
@@ -105,6 +120,9 @@ class MediaChannelTest {
             sink,
         )
         val mac = FakeMac(relay, code, macKeys.first, test.backgroundScope)
+
+        /** The sink as a [RecordingSink], for tests that use one. */
+        val recorded: RecordingSink get() = sink as RecordingSink
 
         init {
             val unconfined = UnconfinedTestDispatcher(test.testScheduler)
@@ -148,9 +166,9 @@ class MediaChannelTest {
         h.mac.sendRaw(channel)
         runCurrent()
 
-        val media = h.sink!!.media.single()
+        val media = h.recorded.media.single()
         assertEquals(1L, media.linkId)
-        assertArrayEquals(hex(frame.getValue("encodedHex").jsonPrimitive.content), media.bytes)
+        assertArrayEquals(hex(frame.getValue("encodedHex").jsonPrimitive.content), media.copyBytes())
         assertTrue(h.events.isEmpty())
     }
 
@@ -194,7 +212,7 @@ class MediaChannelTest {
         repeat(BURST) { h.mac.sendMedia(ByteBuffer.allocate(4).putInt(it).array()) }
         advanceTimeBy((BURST + 100).milliseconds)
 
-        val sequence = sink.media.map { ByteBuffer.wrap(it.bytes).int }
+        val sequence = sink.media.map { ByteBuffer.wrap(it.copyBytes()).int }
         assertEquals((0 until BURST).toList(), sequence)
         assertTrue(h.events.isEmpty())
     }
@@ -225,7 +243,7 @@ class MediaChannelTest {
 
         assertEquals(
             listOf(StreamInput.LinkUp(1, 13), StreamInput.LinkDown(1), StreamInput.LinkUp(2, 13)),
-            h.sink!!.markers,
+            h.recorded.markers,
         )
     }
 
@@ -303,7 +321,7 @@ class MediaChannelTest {
             runCurrent()
             operation(h.client)
             advanceTimeBy(1.seconds)
-            assertEquals(name, StreamInput.LinkDown(1), h.sink!!.markers.getOrNull(1))
+            assertEquals(name, StreamInput.LinkDown(1), h.recorded.markers.getOrNull(1))
             h.mac.stop()
         }
     }
@@ -356,7 +374,7 @@ class MediaChannelTest {
         runCurrent()
         assertEquals(
             listOf(StreamInput.Control(1, sentID, MacMessage.StreamStarted(1, StreamCodec.HEVC))),
-            h.sink!!.inputs.filterIsInstance<StreamInput.Control>(),
+            h.recorded.inputs.filterIsInstance<StreamInput.Control>(),
         )
     }
 
@@ -386,15 +404,15 @@ class MediaChannelTest {
 
         assertEquals(
             listOf(StreamInput.LinkUp(1, FakeMac.MAC_REVISION), StreamInput.LinkDown(1, messageTooLarge = true), StreamInput.LinkUp(2, FakeMac.MAC_REVISION)),
-            h.sink!!.markers,
+            h.recorded.markers,
         )
-        assertTrue(h.sink.media.isEmpty())
+        assertTrue(h.recorded.media.isEmpty())
     }
 
     /**
      * Back-pressure versus the rpc bound: a reply queued behind media the sink is slow to take
-     * is not timed out, because time the receive loop spends waiting on the sink does not count
-     * against a request. A reply that never comes still times out once the sink is idle again.
+     * is not timed out at the bound while the sink is still working through the queue ahead of
+     * it, up to one more bound. A reply that never comes times out once the queue is drained.
      */
     @Test
     fun slowSinkDoesNotTimeOutQueuedReply() = runTest {
@@ -413,7 +431,8 @@ class MediaChannelTest {
         assertTrue("the reply waited behind ${STALL_FRAMES}s of media", currentTime - startedAt >= STALL_FRAMES * 1_000L)
         assertEquals(STALL_FRAMES, sink.media.size)
 
-        // Unanswered, with a stall of its own: it times out after the stall plus the rpc bound.
+        // Unanswered behind a 20 s stall: past the bound it waits in 1.5 s slices while frames
+        // are queued behind the sink, then fails at the first slice with the queue drained.
         val unanswered = async { runCatching { h.client.request(PhoneMessage.Ping) }.exceptionOrNull() }
         runCurrent()
         val secondStart = currentTime
@@ -421,8 +440,199 @@ class MediaChannelTest {
         val timedOut = unanswered.await()
         assertTrue("$timedOut", timedOut is CompanionRequestException)
         val waited = currentTime - secondStart
-        assertTrue("waited $waited ms", waited in (STALL_FRAMES + 15) * 1_000L..(STALL_FRAMES + 16) * 1_000L)
+        assertTrue("waited $waited ms", waited in 19_000L..21_000L)
     }
+
+    /** A sink slower than the arrival rate with a Mac that has stopped answering: the request fails within twice its bound. */
+    @Test
+    fun unansweredRequestBehindSlowSinkFailsWithinTwiceItsBound() = runTest {
+        val h = Harness(this, RecordingSink(perItem = 110.milliseconds), ClientTimeouts(rpc = 15.seconds))
+        h.connect()
+        h.mac.onRequest("ping") { null }
+        val pump = launch {
+            while (true) {
+                h.mac.sendMedia(byteArrayOf(1))
+                delay(100)
+            }
+        }
+        runCurrent()
+        val startedAt = currentTime
+        val failure = runCatching { h.client.request(PhoneMessage.Ping) }.exceptionOrNull()
+        val waited = currentTime - startedAt
+        pump.cancel()
+        assertTrue("$failure", failure is CompanionRequestException)
+        assertTrue("waited $waited ms", waited in 15_000L..30_000L)
+    }
+
+    /** A sink that keeps up (90 ms per 100 ms frame, nothing queued) does not stretch the bound. */
+    @Test
+    fun sinkThatKeepsUpDoesNotStretchTheBound() = runTest {
+        val h = Harness(this, RecordingSink(perItem = 90.milliseconds), ClientTimeouts(rpc = 15.seconds))
+        h.connect()
+        h.mac.onRequest("ping") { null }
+        val pump = launch {
+            while (true) {
+                h.mac.sendMedia(byteArrayOf(1))
+                delay(100)
+            }
+        }
+        runCurrent()
+        val startedAt = currentTime
+        val failure = runCatching { h.client.request(PhoneMessage.Ping) }.exceptionOrNull()
+        val waited = currentTime - startedAt
+        pump.cancel()
+        assertTrue("$failure", failure is CompanionRequestException)
+        assertTrue("waited $waited ms", waited in 15_000L..16_500L)
+    }
+
+    /** The bound firing during a long stall with frames queued behind it: ten slices, then it fails at twice the bound. */
+    @Test
+    fun boundFiringDuringStallTakesBoundedRounds() = runTest {
+        val h = Harness(this, RecordingSink(perItem = 60.seconds), ClientTimeouts(rpc = 15.seconds, sinkStall = 2.minutes))
+        h.connect()
+        h.mac.onRequest("ping") { null }
+        val startedAt = currentTime
+        val reply = async { runCatching { h.client.request(PhoneMessage.Ping) }.exceptionOrNull() }
+        advanceTimeBy(14.seconds + 999.milliseconds)
+        h.mac.sendMedia(byteArrayOf(1))
+        h.mac.sendMedia(byteArrayOf(2))
+        val failure = reply.await()
+        assertTrue("$failure", failure is CompanionRequestException)
+        assertEquals(30_000L, currentTime - startedAt)
+        val extension = h.logs.single { it.contains("extension slices") }
+        assertTrue(extension, extension.contains("and 10 extension slices"))
+    }
+
+    /** A sink stuck forever: cancel, start and unpair each return within sinkStall. */
+    @Test
+    fun stuckSinkDoesNotWedgeCancelStartOrUnpair() = runTest {
+        val sink = StuckSink()
+        val stall = 30.seconds
+        val h = Harness(this, sink, ClientTimeouts(sinkStall = stall))
+        h.connect()
+        h.mac.sendMedia(byteArrayOf(1))
+        runCurrent()
+        assertEquals(1, sink.stuckOn.size)
+
+        val cancelledAt = currentTime
+        h.client.cancel()
+        withTimeout(stall + 1.seconds) { h.client.state.first { it == ClientState.Idle } }
+        assertTrue(currentTime - cancelledAt <= stall.inWholeMilliseconds)
+        assertTrue(h.logs.joinToString("\n"), h.logs.any { it.contains("missed LinkDown(linkId=1") })
+
+        h.client.start()
+        h.awaitConnected(2)
+        val unpairAt = currentTime
+        withTimeout(stall + 1.seconds) { h.client.unpair() }
+        assertEquals(ClientState.Unpaired, h.client.state.value)
+        assertTrue(currentTime - unpairAt <= stall.inWholeMilliseconds + 1_000)
+    }
+
+    /** A stuck sink ends the link after sinkStall; frames already queued are still read, so the Mac's `unpaired` is honoured. */
+    @Test
+    fun unpairedBehindStuckSinkIsHonouredWithinSinkStall() = runTest {
+        val stall = 30.seconds
+        val h = Harness(this, StuckSink(), ClientTimeouts(sinkStall = stall))
+        h.connect()
+        val sentAt = currentTime
+        h.mac.sendMedia(byteArrayOf(1))
+        h.mac.sendUnpaired()
+        runCurrent()
+        h.mac.dropSocket()
+
+        val failed = withTimeout(stall + 1.seconds) { h.client.state.first { it is ClientState.Failed } }
+        assertEquals(ClientState.Failed("Unpaired on the Mac", rescanNeeded = true), failed)
+        assertTrue(currentTime - sentAt <= stall.inWholeMilliseconds + 1_000)
+        assertEquals(null, h.store.load())
+        assertEquals(false, h.client.paired.value)
+    }
+
+    /** A stuck sink with nothing behind it: the link ends after sinkStall and the client reconnects. */
+    @Test
+    fun stuckSinkEndsTheLinkAndReconnects() = runTest {
+        val sink = StuckSink()
+        val h = Harness(this, sink, ClientTimeouts(sinkStall = 30.seconds))
+        h.connect()
+        h.mac.sendMedia(byteArrayOf(1))
+        h.awaitConnected(2)
+        assertEquals(
+            listOf<StreamInput>(StreamInput.LinkUp(1, FakeMac.MAC_REVISION), StreamInput.LinkUp(2, FakeMac.MAC_REVISION)),
+            sink.inputs.toList(),
+        )
+        assertTrue(h.logs.any { it.contains("did not take Media within") })
+    }
+
+    /**
+     * A link cancelled while the sink is still taking its LinkUp gets a LinkDown though the sink
+     * never finished the LinkUp: the controller ignores a LinkDown for a link it does not know.
+     */
+    @Test
+    fun cancelDuringLinkUpDeliversLinkDownAlone() = runTest {
+        val sink = RecordingSink()
+        sink.onAccept = { if (it is StreamInput.LinkUp) delay(10.seconds) }
+        val h = Harness(this, sink)
+        h.storedAndPinned()
+        h.mac.start()
+        h.client.start()
+        advanceTimeBy(2.seconds)
+        h.client.cancel()
+        advanceTimeBy(1.minutes)
+        assertEquals(listOf<StreamInput>(StreamInput.LinkDown(1)), sink.markers)
+        assertEquals(ClientState.Idle, h.client.state.value)
+    }
+
+    /**
+     * A request made inside accept(LinkUp) with a stream frame ahead of its reply cannot be
+     * answered (the receive loop waits for the LinkUp to finish): it fails at its own bound, and
+     * the link then works, including a later `unpaired`.
+     */
+    @Test
+    fun requestInsideLinkUpEndsAtItsBound() = runTest {
+        val sink = RecordingSink()
+        val h = Harness(this, sink, ClientTimeouts(rpc = 15.seconds))
+        var outcome: Throwable? = null
+        var waited = -1L
+        sink.onAccept = { input ->
+            if (input is StreamInput.LinkUp) {
+                h.mac.sendMedia(byteArrayOf(1))
+                val startedAt = currentTime
+                outcome = runCatching { h.client.request(PhoneMessage.Ping, onLink = input.linkId) }.exceptionOrNull()
+                waited = currentTime - startedAt
+            }
+        }
+        h.connect()
+        assertTrue("$outcome", outcome is CompanionRequestException)
+        assertEquals(15_000L, waited)
+        runCurrent()
+        assertEquals(1, sink.media.size)
+        h.mac.sendUnpaired()
+        val failed = withTimeout(1.minutes) { h.client.state.first { it is ClientState.Failed } }
+        assertEquals(ClientState.Failed("Unpaired on the Mac", rescanNeeded = true), failed)
+    }
+
+    /** The relay socket's byte budget, through FakeRelay's real FrameQueue: 1006, lost, backoff, LinkDown, LinkUp. */
+    @Test
+    fun transportOverBudgetEndsLinkAndReconnects() = runTest {
+        val sink = RecordingSink(perItem = 10.seconds)
+        val h = Harness(this, sink, relay = FakeRelay(ORIGIN, phoneQueueBytes = 1024L * 1024))
+        h.connect()
+        for (index in 0 until 32) {
+            val frame = ByteBuffer.allocate(60 * 1024).putInt(index).array()
+            if (runCatching { h.mac.sendMedia(frame) }.isFailure) break
+        }
+        h.awaitConnected(2)
+        runCurrent()
+
+        assertEquals(
+            listOf(StreamInput.LinkUp(1, FakeMac.MAC_REVISION), StreamInput.LinkDown(1), StreamInput.LinkUp(2, FakeMac.MAC_REVISION)),
+            sink.markers,
+        )
+        val delivered = sink.media.map { ByteBuffer.wrap(it.copyBytes()).int }
+        assertTrue("$delivered", delivered.size in 10..20)
+        assertEquals("every frame before the close, in order", (0 until delivered.size).toList(), delivered)
+        assertTrue(h.logs.joinToString("\n"), h.logs.any { it.contains("receive queue over budget") })
+    }
+
 
     /** Messages that are not stream-scoped keep their paths while a stream runs. */
     @Test
@@ -434,7 +644,7 @@ class MediaChannelTest {
         h.mac.sendMedia(byteArrayOf(2))
         runCurrent()
         assertEquals(listOf("sessionTree"), h.events.map { (it as? MacMessage.SessionTreeMessage)?.let { "sessionTree" } ?: "$it" })
-        assertEquals(2, h.sink!!.media.size)
+        assertEquals(2, h.recorded.media.size)
         assertEquals(MacMessage.Pong, h.client.request(PhoneMessage.Ping))
     }
 
@@ -443,7 +653,7 @@ class MediaChannelTest {
         const val SEED = 20261116
         const val BURST = 10_000
         const val SENDS = 500
-        const val STALL_FRAMES = 30
+        const val STALL_FRAMES = 20
 
         fun hex(text: String): ByteArray = ByteArray(text.length / 2) { text.substring(2 * it, 2 * it + 2).toInt(16).toByte() }
 

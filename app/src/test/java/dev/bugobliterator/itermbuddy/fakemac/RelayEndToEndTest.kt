@@ -178,11 +178,12 @@ class RelayEndToEndTest {
 
         val media = inputs.filterIsInstance<StreamInput.Media>()
         assertEquals(frames.size, media.size)
-        frames.forEachIndexed { index, frame -> assertArrayEquals("frame $index", frame, media[index].bytes) }
+        frames.forEachIndexed { index, frame -> assertArrayEquals("frame $index", frame, media[index].copyBytes()) }
         assertEquals("one link, never closed: ${inputs.filter { it !is StreamInput.Media }}", listOf<StreamInput>(StreamInput.LinkUp(1, FakeMac.MAC_REVISION)), inputs.filter { it !is StreamInput.Media })
         assertTrue(client.state.value is ClientState.Connected)
         assertEquals(MacMessage.Pong, client.request(PhoneMessage.Ping))
         val relayLog = relay.output.joinToString("\n")
+        assertTrue("RELAY_LOG is on, so the next check means something:\n$relayLog", relayLog.contains("hello role=phone"))
         assertFalse(relayLog, relayLog.contains("frame rate exceeded") || relayLog.contains("frame too large"))
     }
 
@@ -230,6 +231,8 @@ class RelayEndToEndTest {
                 environment()["RELAY_DB"] = db.path
                 environment()["ATTEST_REQUIRED"] = "false"
                 environment()["RELAY_ORIGIN"] = RELAY_ORIGIN
+                // The relay's per-event diagnostics (room.js dlog), so frame-limit closes would show.
+                environment()["RELAY_LOG"] = "true"
             }
             .start()
         val port: Int

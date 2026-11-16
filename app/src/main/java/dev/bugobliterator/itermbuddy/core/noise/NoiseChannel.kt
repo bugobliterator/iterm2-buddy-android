@@ -221,9 +221,13 @@ class NoiseChannel internal constructor(
         pendingSize += count
     }
 
+    /** Hands out the reassembled message: the buffer itself when it is exactly full, else one trimmed copy. */
     private fun takePending(): ByteArray {
-        val message = pending.copyOf(pendingSize)
-        pending.fill(0)
+        val message = if (pendingSize == pending.size) {
+            pending
+        } else {
+            pending.copyOf(pendingSize).also { pending.fill(0) }
+        }
         pending = ByteArray(0)
         pendingSize = 0
         return message

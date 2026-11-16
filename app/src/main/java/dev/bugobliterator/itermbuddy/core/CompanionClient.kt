@@ -86,6 +86,10 @@ import kotlin.time.TimeSource
  *   `messageTooLarge` and the client reconnects.
  * @property maxQueuedBytes (addition) bound on received relay frames not yet read; over it the
  *   relay connection is closed and the client reconnects. Never a dropped frame.
+ * @property sinkStall (addition) the longest the stream sink may take over one input. Over it a
+ *   media or control input ends the link as lost (the client reconnects), and a link marker
+ *   is missed and logged, so the connect flow, [CompanionClient.cancel] and
+ *   [CompanionClient.unpair] never wait longer than this on the sink.
  */
 data class ClientTimeouts(
     val handshakeFresh: Duration = 15.seconds,
@@ -100,6 +104,7 @@ data class ClientTimeouts(
     val codeShownGrace: Duration = 2.seconds,
     val maxMessageBytes: Int = DEFAULT_MAX_MESSAGE_BYTES,
     val maxQueuedBytes: Long = DEFAULT_MAX_QUEUED_BYTES,
+    val sinkStall: Duration = DEFAULT_SINK_STALL,
 )
 
 /** Why the client is waiting rather than connected. */
@@ -172,7 +177,9 @@ sealed interface ClientState {
  * 7 the link becomes current (so [send] and [request] with `onLink` reach it), then
  * [StreamInput.LinkUp] is sunk, then the state goes [ClientState.Connected]. When the session ends
  * it is closed first, its receive loop has stopped, and then [StreamInput.LinkDown] is sunk,
- * uncancellably, so [cancel], [unpair] and [pair] never lose it.
+ * uncancellably, so [cancel], [unpair] and [pair] never lose it. Each marker waits at most
+ * [ClientTimeouts.sinkStall] for the sink and is missed after that (see [StreamInput]); a link
+ * cancelled during its LinkUp still gets its LinkDown.
  */
 class CompanionClient internal constructor(
     private val store: PairingStore,
@@ -378,11 +385,16 @@ class CompanionClient internal constructor(
         pairedFlow.value = record != null && (record.stage == PairingStage.CONFIRMED || record.stage == PairingStage.REGISTERED)
     }
 
-    /** Sinks a link marker; a failing sink is logged and never ends the flow. */
+    /**
+     * Sinks a link marker, waiting at most [ClientTimeouts.sinkStall]: a sink that takes longer
+     * misses it (logged), so the control chain never hangs on the sink. A failing sink is logged
+     * and never ends the flow.
+     */
     private suspend fun sinkLink(input: StreamInput) {
         val target = streamSink ?: return
         try {
-            target.accept(input)
+            withTimeoutOrNull(timeouts.sinkStall) { target.accept(input) }
+                ?: log("the stream sink missed $input: it did not take it within ${timeouts.sinkStall}")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -728,7 +740,7 @@ class CompanionClient internal constructor(
                         onEvent = ::emitEvent,
                         log = log,
                         sink = streamSink,
-                        timeSource = timeSource,
+                        sinkStall = timeouts.sinkStall,
                     )
                     live.start(this)
                     try {
@@ -926,7 +938,10 @@ class CompanionClient internal constructor(
         /** The Mac sent `unpaired`: the same teardown as [unpair], without sending anything. */
         private suspend fun macUnpaired(live: CompanionSession): End {
             log("the Mac unpaired this phone")
-            endLink(live)
+            // Closed now; its LinkDown follows from connectOnce once the state is set, so a slow
+            // sink never delays honouring the unpair.
+            if (active?.session === live) active = null
+            live.close()
             freshCode = null
             try {
                 clearStoreWithRetry()
