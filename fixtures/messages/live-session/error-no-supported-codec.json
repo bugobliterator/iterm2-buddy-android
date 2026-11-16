@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: Optional(5), payload: WireFixtures.CompanionHostMessage.error(CompanionProtocol.CompanionError(code: CompanionProtocol.CompanionError.Code.badRequest, message: \"No supported video codec (HEVC required)\")))",
+  "json" : {"payload":{"error":{"_0":{"code":"badRequest","message":"No supported video codec (HEVC required)"}}},"requestID":5}
+}

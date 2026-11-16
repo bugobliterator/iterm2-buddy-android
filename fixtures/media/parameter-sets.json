@@ -1,0 +1,77 @@
+{
+  "invalid" : [
+    {
+      "containerHex" : "",
+      "name" : "empty",
+      "upstreamError" : "truncated"
+    },
+    {
+      "containerHex" : "00",
+      "name" : "count-one-byte",
+      "upstreamError" : "truncated"
+    },
+    {
+      "containerHex" : "00020000000440414243",
+      "name" : "count-larger-than-data",
+      "upstreamError" : "truncated"
+    },
+    {
+      "containerHex" : "00010000",
+      "name" : "truncated-length",
+      "upstreamError" : "truncated"
+    },
+    {
+      "containerHex" : "00010000000540414243",
+      "name" : "length-overruns-data",
+      "upstreamError" : "truncated"
+    },
+    {
+      "containerHex" : "0003000000034041420000000542434445460000000244",
+      "name" : "last-set-one-byte-short",
+      "upstreamError" : "truncated"
+    }
+  ],
+  "valid" : [
+    {
+      "containerHex" : "0000",
+      "name" : "none",
+      "setsHex" : [
+
+      ]
+    },
+    {
+      "containerHex" : "00010000000440414243",
+      "name" : "one",
+      "setsHex" : [
+        "40414243"
+      ]
+    },
+    {
+      "containerHex" : "000300000003404142000000054243444546000000024445",
+      "name" : "three",
+      "setsHex" : [
+        "404142",
+        "4243444546",
+        "4445"
+      ]
+    },
+    {
+      "containerHex" : "00030000000340414200000000000000024445",
+      "name" : "zero-length-set",
+      "setsHex" : [
+        "404142",
+        "",
+        "4445"
+      ]
+    },
+    {
+      "containerHex" : "00030000001840010c01ffff0160000003009000000300000300789280900000002a420101016000000300900000030000030078a00280803216592a4932bc05a020000003002000000303c1000000074401c172b46240",
+      "name" : "terminal-clip",
+      "setsHex" : [
+        "40010c01ffff016000000300900000030000030078928090",
+        "420101016000000300900000030000030078a00280803216592a4932bc05a020000003002000000303c1",
+        "4401c172b46240"
+      ]
+    }
+  ]
+}

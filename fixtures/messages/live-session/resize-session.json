@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: nil, payload: WireFixtures.CompanionClientMessage.resizeSession(sessionGuid: \"ptys_7K2M9Q4R8T1VH\", columns: 60, rows: 45))",
+  "json" : {"payload":{"resizeSession":{"columns":60,"rows":45,"sessionGuid":"ptys_7K2M9Q4R8T1VH"}}}
+}

@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: nil, payload: WireFixtures.CompanionClientMessage.stopSessionStream(streamID: 1))",
+  "json" : {"payload":{"stopSessionStream":{"streamID":1}}}
+}
