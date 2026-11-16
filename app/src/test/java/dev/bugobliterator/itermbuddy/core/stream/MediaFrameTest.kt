@@ -79,7 +79,39 @@ class MediaFrameTest {
         val parsed = parseMediaFrame(valid.copyOf())
         assertEquals(523118075L, parsed.ptsMilliseconds)
         val bad = valid.copyOf().also { it[10] = 0x80.toByte() }
-        assertThrows(MediaFrameException::class.java) { parseMediaFrame(bad) }
+        val error = assertThrows(MediaFrameException::class.java) { parseMediaFrame(bad) }
+        assertEquals("ptsOutOfRange", error.message)
+
+        // The largest pts a Long holds is accepted.
+        val largest = valid.copyOf().also { frame ->
+            frame[10] = 0x7f
+            for (i in 11..17) frame[i] = 0xff.toByte()
+        }
+        assertEquals(Long.MAX_VALUE, parseMediaFrame(largest).ptsMilliseconds)
+
+        // Upstream's own errors come first: a v1 header with pts 2^63, declared length 1 and no
+        // payload is a length mismatch, not ptsOutOfRange.
+        val mismatch = hex("0100" + "00000001" + "00000000" + "8000000000000000" + "00000001")
+        val first = assertThrows(MediaFrameException::class.java) { parseMediaFrame(mismatch) }
+        assertEquals("payloadLengthMismatch(declared: 1, actual: 0)", first.message)
+    }
+
+    @Test
+    fun parseFromOffsetSkipsTheChannelMarker() {
+        for (entry in entries("valid")) {
+            val name = entry.string("name")
+            val channel = hex(entry.string("channelHex"))
+            assertEquals(name, parseMediaFrame(hex(entry.string("encodedHex"))), parseMediaFrame(channel, offset = 1))
+        }
+        for (entry in entries("invalid")) {
+            val name = entry.string("name")
+            val error = assertThrows(name, MediaFrameException::class.java) { parseMediaFrame(hex(entry.string("channelHex")), 1) }
+            assertEquals("$name: error", entry.string("upstreamError"), error.message)
+        }
+        val encoded = hex(entries("valid").first().string("encodedHex"))
+        assertThrows(IllegalArgumentException::class.java) { parseMediaFrame(encoded, -1) }
+        assertThrows(IllegalArgumentException::class.java) { parseMediaFrame(encoded, encoded.size + 1) }
+        assertEquals("truncated", assertThrows(MediaFrameException::class.java) { parseMediaFrame(encoded, encoded.size) }.message)
     }
 
     @Test
