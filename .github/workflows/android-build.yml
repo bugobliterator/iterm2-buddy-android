@@ -185,9 +185,9 @@ jobs:
           credentials="$RUNNER_TEMP/firebase-service-account.json"
           (umask 077 && printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$credentials")
           if ! jq -e '.type == "service_account" and (.private_key | length > 0) and (.client_email | length > 0)' "$credentials" >/dev/null 2>&1; then
-            # Report only the shape of the value (byte count, top-level key names, .type), never its contents.
+            # Report only fixed facts about the value, never any of its text.
             if jq -e . "$credentials" >/dev/null 2>&1; then
-              shape="top-level keys: $(jq -r 'if type == "object" then keys | join(",") else type end' "$credentials"); type: $(jq -r 'if type == "object" then (.type // "none") else "n/a" end' "$credentials")"
+              shape=$(jq -r 'if type == "object" then "an object with \(keys | length) keys, type_is_service_account=\(.type == "service_account"), has_private_key=\(has("private_key")), has_client_email=\(has("client_email")), looks_like_google_services_json=\(has("project_info"))" else "a JSON \(type)" end' "$credentials")
             else
               shape="not valid JSON ($(wc -c < "$credentials") bytes)"
             fi
