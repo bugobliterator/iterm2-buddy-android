@@ -2,6 +2,8 @@ package dev.bugobliterator.itermbuddy.core.stream
 
 import dev.bugobliterator.itermbuddy.Fixtures
 import java.io.ByteArrayOutputStream
+import java.nio.BufferOverflowException
+import java.nio.ByteBuffer
 import java.util.Base64
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -11,6 +13,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -91,7 +95,7 @@ class HevcFramingTest {
     fun clipFramesParse() {
         val clip = fixture("media/hevc/terminal-clip.json")
         val sets = parseParameterSets(Base64.getDecoder().decode(clip.string("codecExtradataBase64")))
-        assertEquals(listOf(32, 33, 34), sets.map { nalType(it) }.sorted())
+        assertEquals(listOf(32, 33, 34), sets.map { nalType(it) })
 
         val frames = clip.getValue("frames").jsonArray.map { it.jsonObject }
         assertEquals(15, frames.size)
@@ -110,12 +114,114 @@ class HevcFramingTest {
             assertTrue("frame $index: empty access unit", types.isNotEmpty())
             assertTrue("frame $index holds parameter sets: $types", types.none { it in 32..34 })
             if (frame.isKeyframe) {
-                val firstVcl = types.first { it in 0..31 }
+                val firstVcl = types.firstOrNull { it in 0..31 }
+                assertNotNull("frame $index: no VCL", firstVcl)
                 assertTrue("frame $index: first VCL type $firstVcl", firstVcl == 19 || firstVcl == 20)
                 assertTrue("frame $index: only prefix SEI before VCL", types.takeWhile { it !in 0..31 }.all { it == 39 })
             }
         }
     }
+
+    private fun clipChannelFrames(): List<ByteArray> =
+        fixture("media/hevc/terminal-clip.json").getValue("frames").jsonArray.map {
+            byteArrayOf(1) + Base64.getDecoder().decode(it.jsonObject.string("mediaFrameBase64"))
+        }
+
+    @Test
+    fun clipFramesParseFromChannelOffset() {
+        val clip = fixture("media/hevc/terminal-clip.json")
+        val channelFrames = clipChannelFrames()
+        assertEquals(15, channelFrames.size)
+        channelFrames.forEachIndexed { index, channel ->
+            val viaOffset = parseMediaFrame(channel, offset = 1)
+            val viaCopy = parseMediaFrame(channel.copyOfRange(1, channel.size))
+            assertEquals("frame $index", viaCopy, viaOffset)
+            val entry = clip.getValue("frames").jsonArray[index].jsonObject
+            assertEquals("frame $index: pts", entry.getValue("ptsMilliseconds").jsonPrimitive.long, viaOffset.ptsMilliseconds)
+        }
+    }
+
+    @Test
+    fun writeAnnexBMatchesAnnexBAccessUnit() {
+        for ((index, channel) in clipChannelFrames().withIndex()) {
+            val frame = parseMediaFrame(channel, offset = 1)
+            val expected = frame.annexBAccessUnit()
+            for (buffer in listOf(ByteBuffer.allocate(frame.payloadSize + 9), ByteBuffer.allocateDirect(frame.payloadSize + 9))) {
+                buffer.position(5)
+                frame.writeAnnexB(buffer)
+                assertEquals("frame $index: position", 5 + frame.payloadSize, buffer.position())
+                val written = ByteArray(frame.payloadSize).also { buffer.position(5); buffer.get(it) }
+                assertArrayEquals("frame $index: direct=${buffer.isDirect}", expected, written)
+            }
+        }
+    }
+
+    @Test
+    fun writeAnnexBNeverWritesPartially() {
+        val untouched = 0x5a.toByte()
+        // Invalid: the second NAL's length runs past the end; the first NAL is valid.
+        val bad = MediaFrame(2, 0, 1, 0, 0, 1, 0, hex("0000000126000000ff2728"))
+        val buffer = ByteBuffer.allocate(32).apply { while (hasRemaining()) put(untouched); position(3) }
+        assertThrows(HevcFramingException::class.java) { bad.writeAnnexB(buffer) }
+        assertEquals(3, buffer.position())
+        assertTrue(buffer.array().all { it == untouched })
+
+        // Valid, but one byte short of room.
+        val good = MediaFrame(2, 0, 1, 0, 0, 1, 0, hex("000000022627"))
+        val small = ByteBuffer.allocate(good.payloadSize + 2).apply { while (hasRemaining()) put(untouched); position(3) }
+        assertThrows(BufferOverflowException::class.java) { good.writeAnnexB(small) }
+        assertEquals(3, small.position())
+        assertTrue(small.array().all { it == untouched })
+
+        // Read-only buffers are refused before anything happens.
+        assertThrows(java.nio.ReadOnlyBufferException::class.java) {
+            good.writeAnnexB(ByteBuffer.allocate(16).asReadOnlyBuffer())
+        }
+
+        // An empty access unit writes nothing and succeeds even with no room.
+        MediaFrame(2, 0, 1, 0, 0, 1, 0, ByteArray(0)).writeAnnexB(ByteBuffer.allocate(0))
+    }
+
+    @Test
+    fun completeParameterSetsNeedVpsSpsAndPps() {
+        val clipExtradata = Base64.getDecoder().decode(fixture("media/hevc/terminal-clip.json").string("codecExtradataBase64"))
+        assertTrue(hasCompleteHevcParameterSets(clipExtradata))
+        val vps = parseParameterSets(clipExtradata)[0]
+        val sps = parseParameterSets(clipExtradata)[1]
+        val pps = parseParameterSets(clipExtradata)[2]
+        assertTrue(hasCompleteHevcParameterSets(container(pps, sps, vps)))
+        assertTrue(hasCompleteHevcParameterSets(container(vps, sps, pps, pps)))
+        assertTrue(hasCompleteHevcParameterSets(container(vps, sps, pps, hex("4e01"))))
+
+        assertFalse(hasCompleteHevcParameterSets(hex("0000")))
+        assertFalse(hasCompleteHevcParameterSets(hex("")))
+        assertFalse(hasCompleteHevcParameterSets(hex("00010000")))
+        assertFalse(hasCompleteHevcParameterSets(container(vps, sps)))
+        assertFalse(hasCompleteHevcParameterSets(container(sps, pps)))
+        assertFalse(hasCompleteHevcParameterSets(container(vps, pps)))
+        assertFalse(hasCompleteHevcParameterSets(container(vps, sps, ByteArray(0))))
+        // The synthetic "three" sets start 0x40, 0x42, 0x44: NAL types 32, 33, 34.
+        val complete = mapOf("none" to false, "one" to false, "three" to true, "zero-length-set" to false, "terminal-clip" to true)
+        val valid = fixture("media/parameter-sets.json").entries("valid")
+        assertEquals(complete.keys, valid.map { it.string("name") }.toSet())
+        for (entry in valid) {
+            val name = entry.string("name")
+            assertEquals(name, complete.getValue(name), hasCompleteHevcParameterSets(hex(entry.string("containerHex"))))
+        }
+        for (entry in fixture("media/parameter-sets.json").entries("invalid")) {
+            assertFalse(entry.string("name"), hasCompleteHevcParameterSets(hex(entry.string("containerHex"))))
+        }
+    }
+
+    /** Builds the upstream container: `u16 count`, then `u32 length || bytes` per set. */
+    private fun container(vararg sets: ByteArray): ByteArray = ByteArrayOutputStream().apply {
+        write(sets.size shr 8); write(sets.size and 0xff)
+        for (set in sets) {
+            val n = set.size
+            write(n ushr 24); write((n shr 16) and 0xff); write((n shr 8) and 0xff); write(n and 0xff)
+            write(set)
+        }
+    }.toByteArray()
 
     private fun nalType(nal: ByteArray): Int = (nal[0].toInt() shr 1) and 0x3f
 

@@ -1,6 +1,8 @@
 package dev.bugobliterator.itermbuddy.core.stream
 
+import java.nio.BufferOverflowException
 import java.nio.ByteBuffer
+import java.nio.ReadOnlyBufferException
 
 /**
  * A media frame [parseMediaFrame] rejects. The message is upstream's `DecodeError` as
@@ -53,7 +55,11 @@ class MediaFrame private constructor(
         payload: ByteArray,
     ) : this(version, flags, streamID, sequence, ptsMilliseconds, generationId, liveTop, payload.copyOf(), Unit)
 
-    /** A copy of the access unit (AVCC framing: each NAL prefixed by its 4-byte big-endian length). */
+    /**
+     * The access unit (AVCC framing: each NAL prefixed by its 4-byte big-endian length), as a
+     * **new copy on every read**. Use [payloadSize] for its length and [writeAnnexB] or
+     * [annexBAccessUnit] to feed a decoder; this getter is for tests and inspection.
+     */
     val payload: ByteArray get() = bytes.copyOf()
 
     /** The payload length in bytes, without copying it. */
@@ -67,6 +73,31 @@ class MediaFrame private constructor(
 
     /** The payload as Annex-B for MediaCodec, as [accessUnitToAnnexB], without copying the payload first. */
     fun annexBAccessUnit(): ByteArray = accessUnitToAnnexB(bytes)
+
+    /**
+     * Writes the payload as Annex-B into [into] at its position, in place: the payload is put
+     * as is and each 4-byte NAL length is then overwritten with `00 00 00 01`, with no
+     * intermediate array (for a MediaCodec input buffer). Advances the position by
+     * [payloadSize].
+     *
+     * Validates first, with the same rules as [accessUnitToAnnexB], and checks that [into] has
+     * [payloadSize] bytes remaining; on either failure nothing is written and the position does
+     * not move.
+     *
+     * @throws HevcFramingException when the payload is not a valid access unit.
+     * @throws java.nio.BufferOverflowException when [into] has fewer than [payloadSize] bytes remaining.
+     * @throws java.nio.ReadOnlyBufferException when [into] is read-only.
+     */
+    fun writeAnnexB(into: ByteBuffer) {
+        validateAccessUnit(bytes)
+        if (into.isReadOnly) throw ReadOnlyBufferException()
+        if (into.remaining() < bytes.size) throw BufferOverflowException()
+        val start = into.position()
+        into.put(bytes)
+        forEachNalLengthOffset(bytes) { at ->
+            for (i in START_CODE.indices) into.put(start + at + i, START_CODE[i])
+        }
+    }
 
     private fun fields(): List<Any?> =
         listOf(version, flags, streamID, sequence, ptsMilliseconds, generationId, liveTop)
@@ -103,12 +134,12 @@ class MediaFrame private constructor(
     }
 }
 
-private const val U32_MASK = 0xFFFFFFFFL
-
 /**
- * Parses one media frame, [bytes] being the frame **after** the `0x01` channel marker. Mirrors
- * upstream `CompanionMediaFrame.init(decoding:)` (`CompanionMediaFrame.swift:130-171`), checks
- * in the same order:
+ * Parses one media frame from [bytes] starting at [offset]: the frame **after** the `0x01`
+ * channel marker, so a caller holding the whole decrypted channel frame passes `offset = 1`
+ * instead of copying. The frame runs from [offset] to the end of [bytes]. Mirrors upstream
+ * `CompanionMediaFrame.init(decoding:)` (`CompanionMediaFrame.swift:130-171`), checks in the
+ * same order:
  * 1. fewer than 2 bytes: `truncated` (line 133), whatever the version byte;
  * 2. a version other than 1 or 2: `unsupportedVersion(v)` (lines 136-140);
  * 3. fewer bytes than that version's header (22 or 34): `truncated` (lines 141-143);
@@ -121,43 +152,46 @@ private const val U32_MASK = 0xFFFFFFFFL
  *
  * One deviation: upstream accepts any `UInt64` pts (line 147); Android rejects a pts with the top
  * bit set (`ptsOutOfRange`), because a [Long] cannot hold it and no Mac monotonic clock in
- * milliseconds reaches 2^63.
+ * milliseconds reaches 2^63. It is checked last, so every frame upstream rejects fails with
+ * upstream's own error.
  *
  * The returned frame owns a fresh copy of the payload; [bytes] is not retained.
  *
  * @throws MediaFrameException on any of the above.
+ * @throws IllegalArgumentException when [offset] is outside `0..bytes.size`.
  */
-fun parseMediaFrame(bytes: ByteArray): MediaFrame {
-    if (bytes.size < 2) throw MediaFrameException("truncated")
-    val version = bytes[0].toInt() and 0xFF
+fun parseMediaFrame(bytes: ByteArray, offset: Int = 0): MediaFrame {
+    require(offset in 0..bytes.size) { "offset $offset outside 0..${bytes.size}" }
+    val size = bytes.size - offset
+    if (size < 2) throw MediaFrameException("truncated")
+    val version = bytes[offset].toInt() and 0xFF
     val headerSize = when (version) {
         MediaFrame.VERSION_LEGACY -> MediaFrame.HEADER_SIZE_V1
         MediaFrame.VERSION_CURRENT -> MediaFrame.HEADER_SIZE_V2
         else -> throw MediaFrameException("unsupportedVersion($version)")
     }
-    if (bytes.size < headerSize) throw MediaFrameException("truncated")
+    if (size < headerSize) throw MediaFrameException("truncated")
 
-    val buffer = ByteBuffer.wrap(bytes) // big-endian by default
-    val flags = bytes[1].toInt() and 0xFF
-    val streamID = buffer.getInt(2).toLong() and U32_MASK
-    val sequence = buffer.getInt(6).toLong() and U32_MASK
-    val pts = buffer.getLong(10)
+    val flags = bytes[offset + 1].toInt() and 0xFF
+    val streamID = readU32(bytes, offset + 2)
+    val sequence = readU32(bytes, offset + 6)
+    val pts = readU64(bytes, offset + 10)
     var generationId: Long? = null
     var liveTop: Long? = null
-    var cursor = 18
+    var cursor = offset + 18
     if (version == MediaFrame.VERSION_CURRENT) {
-        generationId = buffer.getInt(cursor).toLong() and U32_MASK
-        liveTop = buffer.getLong(cursor + 4)
+        generationId = readU32(bytes, cursor)
+        liveTop = readU64(bytes, cursor + 4)
         cursor += 12
     }
-    val declaredLength = buffer.getInt(cursor).toLong() and U32_MASK
-    val actualLength = bytes.size - headerSize
+    val declaredLength = readU32(bytes, cursor)
+    val actualLength = size - headerSize
     if (declaredLength != actualLength.toLong()) {
         throw MediaFrameException("payloadLengthMismatch(declared: $declaredLength, actual: $actualLength)")
     }
     if (pts < 0) throw MediaFrameException("ptsOutOfRange")
     return MediaFrame.adopting(
         version, flags, streamID, sequence, pts, generationId, liveTop,
-        bytes.copyOfRange(headerSize, bytes.size),
+        bytes.copyOfRange(offset + headerSize, bytes.size),
     )
 }
