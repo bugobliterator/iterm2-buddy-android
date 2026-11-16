@@ -184,6 +184,10 @@ jobs:
         run: |
           credentials="$RUNNER_TEMP/firebase-service-account.json"
           (umask 077 && printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$credentials")
+          if ! jq -e '.type == "service_account" and (.private_key | length > 0) and (.client_email | length > 0)' "$credentials" >/dev/null 2>&1; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT_JSON is not a service account key file (need JSON with type service_account, private_key, client_email)."
+            exit 1
+          fi
           export GOOGLE_APPLICATION_CREDENTIALS="$credentials"
           ci/firebase/node_modules/.bin/firebase appdistribution:distribute apks/app-debug.apk \
             --app "$FIREBASE_APP_ID" --groups owner \
