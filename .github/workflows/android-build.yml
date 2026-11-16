@@ -185,7 +185,13 @@ jobs:
           credentials="$RUNNER_TEMP/firebase-service-account.json"
           (umask 077 && printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$credentials")
           if ! jq -e '.type == "service_account" and (.private_key | length > 0) and (.client_email | length > 0)' "$credentials" >/dev/null 2>&1; then
-            echo "::error::FIREBASE_SERVICE_ACCOUNT_JSON is not a service account key file (need JSON with type service_account, private_key, client_email)."
+            # Report only the shape of the value (byte count, top-level key names, .type), never its contents.
+            if jq -e . "$credentials" >/dev/null 2>&1; then
+              shape="top-level keys: $(jq -r 'if type == "object" then keys | join(",") else type end' "$credentials"); type: $(jq -r 'if type == "object" then (.type // "none") else "n/a" end' "$credentials")"
+            else
+              shape="not valid JSON ($(wc -c < "$credentials") bytes)"
+            fi
+            echo "::error::FIREBASE_SERVICE_ACCOUNT_JSON is not a service account key file (need JSON with type service_account, private_key, client_email). Found $shape."
             exit 1
           fi
           export GOOGLE_APPLICATION_CREDENTIALS="$credentials"
