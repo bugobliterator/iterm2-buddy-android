@@ -48,6 +48,7 @@ import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import java.io.IOException
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -92,6 +93,8 @@ interface MacRelay {
  *   (`CompanionParkSupervisor.swift:425-437`).
  * - Its link answers `hello`, `relayRoomSecret` and `ping`, records `unpairing`, and can send
  *   `unpaired`. When its socket closes it parks again.
+ * - Tests drive streams with [sendMedia], [sendMessage] and [sendSample], answer requests with
+ *   [onRequest], and read what the phone sent in [received].
  */
 class FakeMac(
     private val relay: MacRelay,
@@ -144,8 +147,13 @@ class FakeMac(
     /** The code the Mac expects while it is in SAS mode with a phone handshaken, else null. */
     val awaitingCode: StateFlow<String?> = awaiting.asStateFlow()
 
-    /** Every decrypted message from the phone, as received. */
-    val received = CopyOnWriteArrayList<ByteArray>()
+    /** Every decrypted envelope from the phone, decoded, in the order received. */
+    val received: List<JsonObject> get() = receivedList
+
+    private val receivedList = CopyOnWriteArrayList<JsonObject>()
+
+    /** Handlers that answer a request case instead of the built-in replies; see [onRequest]. */
+    private val requestHandlers = ConcurrentHashMap<String, (JsonObject) -> JsonObject?>()
 
     val parks = AtomicInteger()
     val handshakes = AtomicInteger()
@@ -163,10 +171,8 @@ class FakeMac(
         val sendLock = Mutex()
     }
 
-    /** Received messages decoded as envelopes, in order. */
-    fun receivedEnvelopes(): List<JsonObject> = received.mapNotNull {
-        runCatching { Json.parseToJsonElement(it.decodeToString()).jsonObject }.getOrNull()
-    }
+    /** Received messages decoded as envelopes, in order: a snapshot of [received]. */
+    fun receivedEnvelopes(): List<JsonObject> = receivedList.toList()
 
     /** The payload cases of [receivedEnvelopes], in order. */
     fun receivedCases(): List<String> = receivedEnvelopes().map { it.getValue("payload").jsonObject.keys.single() }
@@ -212,6 +218,26 @@ class FakeMac(
     suspend fun sendSample(path: String, requestID: Long?) {
         val current = checkNotNull(link) { "no link" }
         send(current, sampleEnvelope(path, requestID))
+    }
+
+    /** Sends one media frame: [encodedFrame] (header and payload) behind the `0x01` channel byte. */
+    suspend fun sendMedia(encodedFrame: ByteArray) {
+        sendRaw(byteArrayOf(MEDIA_CHANNEL) + encodedFrame)
+    }
+
+    /** Sends the payload [message] (`{"<case>": {...}}`) in an envelope with [requestID]. */
+    suspend fun sendMessage(message: JsonObject, requestID: Long?) {
+        val current = checkNotNull(link) { "no link" }
+        send(current, envelope(message, requestID))
+    }
+
+    /**
+     * Answers requests whose payload case is [case] with [answer] instead of the built-in reply:
+     * it gets the phone's envelope and returns the reply payload (`{"<case>": {...}}`), sent with
+     * the same request ID, or null to send nothing.
+     */
+    fun onRequest(case: String, answer: (JsonObject) -> JsonObject?) {
+        requestHandlers[case] = answer
     }
 
     /** Sends raw [plaintext] on the link, such as a frame the phone cannot decode. */
@@ -297,17 +323,23 @@ class FakeMac(
         link = current
         for (frame in socket.incoming) {
             val plaintext = channel.decryptFrame(frame) ?: continue
-            received += plaintext
-            answer(current, plaintext)
+            val envelope = Json.parseToJsonElement(plaintext.decodeToString()).jsonObject
+            receivedList += envelope
+            answer(current, envelope)
         }
         return true
     }
 
-    private suspend fun answer(current: Link, plaintext: ByteArray) {
-        val envelope = Json.parseToJsonElement(plaintext.decodeToString()).jsonObject
+    private suspend fun answer(current: Link, envelope: JsonObject) {
         val requestID = (envelope["requestID"] as? JsonPrimitive)?.long
         val payload = envelope.getValue("payload").jsonObject
-        when (payload.keys.single()) {
+        val case = payload.keys.single()
+        val handler = requestHandlers[case]
+        if (handler != null) {
+            handler(envelope)?.let { send(current, envelope(it, requestID)) }
+            return
+        }
+        when (case) {
             "hello" -> if (answering) {
                 for (path in beforeHelloReply) send(current, sampleEnvelope(path, null))
                 send(current, helloReply(requestID))
@@ -361,6 +393,7 @@ class FakeMac(
         const val MAC_REVISION = 15
         const val MAC_MINIMUM_PEER = 11
         const val DEFAULT_REPARK_DELAY_MILLIS = 50L
+        private const val MEDIA_CHANNEL: Byte = 0x01
 
         /** A session sample's `json` tree. */
         fun fixtureJson(name: String): JsonObject =

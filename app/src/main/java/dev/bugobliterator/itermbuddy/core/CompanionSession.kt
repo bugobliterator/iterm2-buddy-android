@@ -3,6 +3,7 @@ package dev.bugobliterator.itermbuddy.core
 import dev.bugobliterator.itermbuddy.core.noise.NoiseChannel
 import dev.bugobliterator.itermbuddy.core.noise.NoiseException
 import dev.bugobliterator.itermbuddy.core.relay.AdmissionResult
+import dev.bugobliterator.itermbuddy.core.relay.DEFAULT_MAX_QUEUED_BYTES
 import dev.bugobliterator.itermbuddy.core.relay.Proof
 import dev.bugobliterator.itermbuddy.core.relay.RegisterResult
 import dev.bugobliterator.itermbuddy.core.relay.RelayClose
@@ -10,6 +11,9 @@ import dev.bugobliterator.itermbuddy.core.relay.RelayClosedException
 import dev.bugobliterator.itermbuddy.core.relay.RelayConnection
 import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
 import dev.bugobliterator.itermbuddy.core.relay.RelayRegistrar
+import dev.bugobliterator.itermbuddy.core.stream.StreamInput
+import dev.bugobliterator.itermbuddy.core.stream.StreamSink
+import dev.bugobliterator.itermbuddy.core.stream.isStreamScoped
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.core.wire.WireDecodeException
@@ -25,10 +29,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.time.ComparableTimeMark
+import kotlin.time.Duration
+import kotlin.time.TimeSource
 
 /**
  * One relay WebSocket as the client uses it: the surface [RelayConnection] exposes. A seam so
@@ -61,9 +69,10 @@ internal class OkHttpRelayTransport(
     private val http: OkHttpClient,
     private val admissionTimeoutMillis: Long,
     private val registerTimeoutMillis: Long,
+    private val maxQueuedBytes: Long = DEFAULT_MAX_QUEUED_BYTES,
 ) : RelayTransport {
     override fun open(endpoints: RelayEndpoints, roomName: String): RelaySocket {
-        val connection = RelayConnection(http, endpoints, roomName, admissionTimeoutMillis)
+        val connection = RelayConnection(http, endpoints, roomName, admissionTimeoutMillis, maxQueuedBytes = maxQueuedBytes)
         return object : RelaySocket {
             override suspend fun admit(proof: Proof): AdmissionResult = connection.admit(proof)
 
@@ -116,6 +125,20 @@ internal enum class ConfirmationMode {
  * ([WireDecodeException]) or is empty is dropped and logged and the session stays up, as
  * upstream `CompanionSession.swift:120-127` does. A Noise failure or the socket closing ends the
  * session; [ended] then completes with the relay's close frame, if the relay sent one.
+ *
+ * Routing, after the first-frame confirmation check: a frame whose first byte is `0x01` is media
+ * and goes to [sink] as [StreamInput.Media] with that byte stripped. A stream-scoped message
+ * ([isStreamScoped]) goes to [sink] as [StreamInput.Control], whether or not a request waits for
+ * it; a waiting request is completed only after [StreamSink.accept] returns. Neither ever reaches
+ * [onEvent]. Everything else goes to its waiting request or to [onEvent], as before.
+ *
+ * The loop awaits [StreamSink.accept] before it reads the next frame: back-pressure, never a drop.
+ * Stream inputs are dropped (logged by kind only) when there is no [sink] or before [linkUp].
+ * Time the loop spends waiting on the sink does not count against a request's timeout, so a
+ * reply queued behind media a slow sink has not taken yet is not timed out.
+ *
+ * @param sink where stream inputs go once the link is up; null drops them.
+ * @param timeSource measures request timeouts; tests pass the virtual clock.
  */
 internal class CompanionSession(
     private val socket: RelaySocket,
@@ -123,6 +146,8 @@ internal class CompanionSession(
     private val confirmationMode: ConfirmationMode,
     private val onEvent: (MacMessage) -> Unit,
     private val log: (String) -> Unit,
+    private val sink: StreamSink? = null,
+    private val timeSource: TimeSource.WithComparableMarks = TimeSource.Monotonic,
 ) {
     private val sendLock = Mutex()
     private val nextRequestID = AtomicLong(1)
@@ -157,6 +182,20 @@ internal class CompanionSession(
 
     private var receiveJob: Job? = null
 
+    /** Held while the link is announced and while each stream input is accepted, so [StreamInput.LinkUp] comes first. */
+    private val streamLock = Mutex()
+
+    /** The link id once [linkUp] has run; stream inputs before it are dropped. */
+    @Volatile
+    private var linkId: Long? = null
+
+    private val stallLock = Any()
+    private var stalledTotal = Duration.ZERO
+    private var stalledSince: ComparableTimeMark? = null
+
+    /** Whether the session ended because the Mac sent a message over the Noise reassembly cap. */
+    val messageTooLarge: Boolean get() = channel.messageTooLarge
+
     /** Starts the receive loop in [scope]; the session ends when [scope] is cancelled. */
     fun start(scope: CoroutineScope) {
         receiveJob = scope.launch { receiveLoop() }
@@ -171,20 +210,73 @@ internal class CompanionSession(
      *
      * @throws CompanionRequestException if the session ends first or the send fails.
      */
-    suspend fun request(message: PhoneMessage): MacMessage {
+    suspend fun request(message: PhoneMessage): MacMessage =
+        request(message, timeout = null, onSent = {}) ?: throw CompanionRequestException("no reply")
+
+    /**
+     * Sends [message] as a request and returns the reply, or null when none came within
+     * [timeout] (null: no bound). The bound covers the send too. Time the receive loop spends
+     * waiting on the [StreamSink] is not counted: the reply may be queued behind media.
+     * [onSent] gets the request ID before the envelope is written.
+     *
+     * @throws CompanionRequestException if the session ends first or the send fails.
+     */
+    suspend fun request(message: PhoneMessage, timeout: Duration?, onSent: (Long) -> Unit): MacMessage? {
         val id = nextRequestID.getAndIncrement()
         val reply = CompletableDeferred<MacMessage>()
         pending[id] = reply
         try {
-            sendEnvelope(message, id)
-            return select {
-                reply.onAwait { it }
-                ended.onAwait { throw CompanionRequestException("the connection closed before the reply") }
-                unpaired.onAwait { throw CompanionRequestException("the Mac unpaired this phone") }
+            onSent(id)
+            if (timeout == null) {
+                sendEnvelope(message, id)
+                return awaitReply(reply)
+            }
+            val start = timeSource.markNow()
+            val stalledAtStart = stalled()
+            var sent = false
+            while (true) {
+                val remaining = timeout - (start.elapsedNow() - (stalled() - stalledAtStart))
+                if (remaining <= Duration.ZERO) return null
+                val answer = withTimeoutOrNull(remaining) {
+                    if (!sent) {
+                        sendEnvelope(message, id)
+                        sent = true
+                    }
+                    awaitReply(reply)
+                }
+                // A send cut off by the bound has closed the channel: no reply can come.
+                if (answer != null || !sent) return answer
             }
         } finally {
             pending.remove(id)
         }
+    }
+
+    private suspend fun awaitReply(reply: CompletableDeferred<MacMessage>): MacMessage = select {
+        reply.onAwait { it }
+        ended.onAwait { throw CompanionRequestException("the connection closed before the reply") }
+        unpaired.onAwait { throw CompanionRequestException("the Mac unpaired this phone") }
+    }
+
+    /**
+     * Makes this session link [id]: stream inputs from here on carry it. [announce] runs first,
+     * before any stream input on the link reaches the sink, so it can deliver [StreamInput.LinkUp].
+     */
+    suspend fun linkUp(id: Long, announce: suspend () -> Unit) {
+        streamLock.withLock {
+            linkId = id
+            announce()
+        }
+    }
+
+    /** Waits for the receive loop to stop after [close], so nothing more reaches the sink. */
+    suspend fun awaitStopped() {
+        receiveJob?.join()
+    }
+
+    /** Total time the receive loop has spent waiting on the sink, including a wait in progress. */
+    private fun stalled(): Duration = synchronized(stallLock) {
+        stalledTotal + (stalledSince?.elapsedNow() ?: Duration.ZERO)
     }
 
     /** Closes the Noise channel and the socket; the receive loop then ends. Idempotent. */
@@ -250,7 +342,7 @@ internal class CompanionSession(
         }
     }
 
-    private fun handle(plaintext: ByteArray) {
+    private suspend fun handle(plaintext: ByteArray) {
         if (awaitingFirstFrame) {
             awaitingFirstFrame = false
             val verdict = decodePairingConfirmation(plaintext)
@@ -272,10 +364,20 @@ internal class CompanionSession(
             log("dropped an empty frame")
             return
         }
+        if (plaintext[0] == MEDIA_CHANNEL) {
+            deliver("Media") { StreamInput.Media(it, plaintext.copyOfRange(1, plaintext.size)) }
+            return
+        }
         val (requestID, message) = try {
             decodeEnvelope(plaintext)
         } catch (e: WireDecodeException) {
             log("dropped a frame that does not decode: ${e.message}")
+            return
+        }
+        if (isStreamScoped(message)) {
+            // The sink first, so the controller has the stream before the request returns.
+            deliver(message.javaClass.simpleName) { StreamInput.Control(it, requestID, message) }
+            requestID?.let { pending.remove(it) }?.complete(message)
             return
         }
         val waiter = requestID?.let { pending.remove(it) }
@@ -285,6 +387,40 @@ internal class CompanionSession(
         }
         if (message == MacMessage.Unpaired) unpaired.complete(Unit)
         onEvent(message)
+    }
+
+    /**
+     * Hands one stream input to the sink and waits for it to be taken, counting the wait as
+     * stalled time. [kind] is all that is logged: inputs carry terminal content.
+     */
+    private suspend fun deliver(kind: String, input: (linkId: Long) -> StreamInput) {
+        val target = sink
+        if (target == null) {
+            log("dropped a stream input ($kind): no stream sink")
+            return
+        }
+        synchronized(stallLock) { stalledSince = timeSource.markNow() }
+        try {
+            streamLock.withLock {
+                val id = linkId
+                if (id == null) {
+                    log("dropped a stream input ($kind): the link is not up yet")
+                    return
+                }
+                try {
+                    target.accept(input(id))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    log("the stream sink failed on $kind: ${e.javaClass.simpleName}")
+                }
+            }
+        } finally {
+            synchronized(stallLock) {
+                stalledSince?.let { stalledTotal += it.elapsedNow() }
+                stalledSince = null
+            }
+        }
     }
 
     private fun finish(relayClose: RelayClose?) {
@@ -299,6 +435,9 @@ internal class CompanionSession(
 
     private companion object {
         const val CLOSE_ABNORMAL = 1006
+
+        /** First byte of a media frame; a JSON envelope starts with `{` (`CompanionFrameChannel.swift`). */
+        const val MEDIA_CHANNEL: Byte = 0x01
     }
 }
 

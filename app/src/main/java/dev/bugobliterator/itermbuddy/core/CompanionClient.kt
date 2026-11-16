@@ -1,6 +1,7 @@
 package dev.bugobliterator.itermbuddy.core
 
 import android.util.Log
+import dev.bugobliterator.itermbuddy.core.noise.DEFAULT_MAX_MESSAGE_BYTES
 import dev.bugobliterator.itermbuddy.core.noise.NoiseChannel
 import dev.bugobliterator.itermbuddy.core.noise.NoiseException
 import dev.bugobliterator.itermbuddy.core.noise.NoiseInitiator
@@ -8,6 +9,7 @@ import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
 import dev.bugobliterator.itermbuddy.core.pairing.roomName
 import dev.bugobliterator.itermbuddy.core.pairing.sasCode
 import dev.bugobliterator.itermbuddy.core.relay.AdmissionResult
+import dev.bugobliterator.itermbuddy.core.relay.DEFAULT_MAX_QUEUED_BYTES
 import dev.bugobliterator.itermbuddy.core.relay.JoinSigner
 import dev.bugobliterator.itermbuddy.core.relay.Proof
 import dev.bugobliterator.itermbuddy.core.relay.RegisterResult
@@ -19,6 +21,9 @@ import dev.bugobliterator.itermbuddy.core.relay.forOrigin
 import dev.bugobliterator.itermbuddy.core.relay.isFatalHttp
 import dev.bugobliterator.itermbuddy.core.relay.nextDelayMillis
 import dev.bugobliterator.itermbuddy.core.relay.requiresRescan
+import dev.bugobliterator.itermbuddy.core.stream.StreamInput
+import dev.bugobliterator.itermbuddy.core.stream.StreamLink
+import dev.bugobliterator.itermbuddy.core.stream.StreamSink
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.core.wire.ProtocolRevision
@@ -51,6 +56,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.CoroutineContext
 import kotlin.random.Random
 import kotlin.time.ComparableTimeMark
@@ -75,6 +81,11 @@ import kotlin.time.TimeSource
  * @property codeShownGrace (addition) a session that showed the code for longer than this proves
  *   the Mac was there, so the Mac-absence clock starts again from zero when it ends. A session
  *   that closes sooner with no frame from the Mac (such as a Mac pinned to another key) does not.
+ * @property maxMessageBytes (addition) cap on one reassembled Noise message from the Mac; over it
+ *   the link ends with [dev.bugobliterator.itermbuddy.core.stream.StreamInput.LinkDown]
+ *   `messageTooLarge` and the client reconnects.
+ * @property maxQueuedBytes (addition) bound on received relay frames not yet read; over it the
+ *   relay connection is closed and the client reconnects. Never a dropped frame.
  */
 data class ClientTimeouts(
     val handshakeFresh: Duration = 15.seconds,
@@ -87,6 +98,8 @@ data class ClientTimeouts(
     val admission: Duration = 30.seconds,
     val register: Duration = 30.seconds,
     val codeShownGrace: Duration = 2.seconds,
+    val maxMessageBytes: Int = DEFAULT_MAX_MESSAGE_BYTES,
+    val maxQueuedBytes: Long = DEFAULT_MAX_QUEUED_BYTES,
 )
 
 /** Why the client is waiting rather than connected. */
@@ -152,6 +165,14 @@ sealed interface ClientState {
  * @param endpointsFor where to connect for a stored relay origin; null refuses the origin.
  * @param random jitter for [nextDelayMillis]; tests pass a seeded one.
  * @param log diagnostics; never given secrets or registration tokens.
+ * @param streamSink where media and stream-scoped control go, in wire order, bracketed per link by
+ *   [StreamInput.LinkUp] and [StreamInput.LinkDown]; with null they are dropped and logged by kind.
+ *
+ * Links: each connection that reaches the connected step (7) is a link, numbered from 1. At step
+ * 7 the link becomes current (so [send] and [request] with `onLink` reach it), then
+ * [StreamInput.LinkUp] is sunk, then the state goes [ClientState.Connected]. When the session ends
+ * it is closed first, its receive loop has stopped, and then [StreamInput.LinkDown] is sunk,
+ * uncancellably, so [cancel], [unpair] and [pair] never lose it.
  */
 class CompanionClient internal constructor(
     private val store: PairingStore,
@@ -163,7 +184,8 @@ class CompanionClient internal constructor(
     private val timeSource: TimeSource.WithComparableMarks,
     private val storeContext: CoroutineContext,
     private val log: (String) -> Unit,
-) {
+    private val streamSink: StreamSink? = null,
+) : StreamLink {
     constructor(
         store: PairingStore,
         http: OkHttpClient,
@@ -172,9 +194,15 @@ class CompanionClient internal constructor(
         timeouts: ClientTimeouts = ClientTimeouts(),
         random: Random = Random.Default,
         log: (String) -> Unit = { Log.i(TAG, it) },
+        streamSink: StreamSink? = null,
     ) : this(
         store,
-        OkHttpRelayTransport(http, timeouts.admission.inWholeMilliseconds, timeouts.register.inWholeMilliseconds),
+        OkHttpRelayTransport(
+            http,
+            timeouts.admission.inWholeMilliseconds,
+            timeouts.register.inWholeMilliseconds,
+            timeouts.maxQueuedBytes,
+        ),
         scope,
         endpointsFor,
         timeouts,
@@ -182,6 +210,7 @@ class CompanionClient internal constructor(
         TimeSource.Monotonic,
         Dispatchers.IO,
         log,
+        streamSink,
     )
 
     private val stateFlow = MutableStateFlow<ClientState>(ClientState.Unpaired)
@@ -191,14 +220,32 @@ class CompanionClient internal constructor(
 
     private val eventFlow = MutableSharedFlow<MacMessage>(extraBufferCapacity = EVENT_BUFFER)
 
-    /** Unsolicited messages from the Mac: envelopes with no request ID or one nobody waits for. */
+    /**
+     * Unsolicited messages from the Mac: envelopes with no request ID or one nobody waits for.
+     * Media and stream-scoped messages never come here; they go to the stream sink.
+     */
     val events: SharedFlow<MacMessage> = eventFlow.asSharedFlow()
+
+    private val pairedFlow = MutableStateFlow<Boolean?>(null)
+
+    /**
+     * Null until the first `store.load()` of [start] finishes (or [pair] writes a fresh record),
+     * then true while the stored record is `CONFIRMED` or `REGISTERED`.
+     */
+    val paired: StateFlow<Boolean?> = pairedFlow.asStateFlow()
 
     private val jobLock = Any()
     private var job: Job? = null
 
+    /** The connected session and its link id: set at step 7, cleared when the session ends. */
+    private class ActiveLink(val id: Long, val session: CompanionSession)
+
     @Volatile
-    private var session: CompanionSession? = null
+    private var active: ActiveLink? = null
+
+    private val session: CompanionSession? get() = active?.session
+
+    private val nextLinkId = AtomicLong(1)
 
     /**
      * The code [pair] is pairing, from before its record is written until the Mac confirms it;
@@ -277,14 +324,41 @@ class CompanionClient internal constructor(
     }
 
     /**
-     * Sends [message] to the Mac and returns its reply, bounded by [ClientTimeouts.rpc].
+     * Sends [message] with no request ID on the current link, in the caller's order, and returns
+     * once its frames are handed to the socket.
      *
-     * @throws CompanionRequestException when not connected, on a timeout, or if the connection drops.
+     * @throws CompanionRequestException when not connected, when [onLink] is not the current
+     *   link id, or when the send fails.
      */
-    suspend fun request(message: PhoneMessage): MacMessage {
-        val live = session ?: throw CompanionRequestException("not connected")
-        return withTimeoutOrNull(timeouts.rpc) { live.request(message) }
-            ?: throw CompanionRequestException("no reply within ${timeouts.rpc}")
+    override suspend fun send(message: PhoneMessage, onLink: Long?) {
+        linkFor(onLink).send(message)
+    }
+
+    /**
+     * Sends [message] to the Mac and returns its reply, bounded by [timeout] or else
+     * [ClientTimeouts.rpc]. Time the receive loop spends waiting on the stream sink does not
+     * count against the bound. [onSent] gets the request ID before the envelope is written.
+     *
+     * @throws CompanionRequestException when not connected, when [onLink] is not the current
+     *   link id, on a timeout, or if the connection drops.
+     */
+    override suspend fun request(
+        message: PhoneMessage,
+        onLink: Long?,
+        timeout: Duration?,
+        onSent: (requestID: Long) -> Unit,
+    ): MacMessage {
+        val live = linkFor(onLink)
+        val bound = timeout ?: timeouts.rpc
+        return live.request(message, bound, onSent) ?: throw CompanionRequestException("no reply within $bound")
+    }
+
+    private fun linkFor(onLink: Long?): CompanionSession {
+        val current = active ?: throw CompanionRequestException("not connected")
+        if (onLink != null && onLink != current.id) {
+            throw CompanionRequestException("link $onLink has ended; the current link is ${current.id}")
+        }
+        return current.session
     }
 
     /** Sends [message] with no request ID; dropped if not connected. */
@@ -296,6 +370,23 @@ class CompanionClient internal constructor(
             } catch (e: IOException) {
                 log("notify failed: ${e.message}")
             }
+        }
+    }
+
+    /** Records what the store now holds for [paired]. */
+    private fun notePaired(record: PairingRecord?) {
+        pairedFlow.value = record != null && (record.stage == PairingStage.CONFIRMED || record.stage == PairingStage.REGISTERED)
+    }
+
+    /** Sinks a link marker; a failing sink is logged and never ends the flow. */
+    private suspend fun sinkLink(input: StreamInput) {
+        val target = streamSink ?: return
+        try {
+            target.accept(input)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("the stream sink failed on ${input.javaClass.simpleName}: ${e.javaClass.simpleName}")
         }
     }
 
@@ -341,7 +432,7 @@ class CompanionClient internal constructor(
     private suspend fun <T> onStore(block: () -> T): T = withContext(storeContext) { block() }
 
     private suspend fun hasStoredPairing(): Boolean = try {
-        onStore { store.load() } != null
+        onStore { store.load() }.also(::notePaired) != null
     } catch (_: PairingStoreUnavailableException) {
         true
     }
@@ -357,6 +448,7 @@ class CompanionClient internal constructor(
                     val stored = store.load()
                     if (stored != null && stored.stage == PairingStage.PENDING_CONFIRMATION && stored.code == code) {
                         store.clear()
+                        notePaired(null)
                     }
                 }
             }
@@ -374,6 +466,7 @@ class CompanionClient internal constructor(
         while (true) {
             try {
                 onStore { store.clear() }
+                notePaired(null)
                 return
             } catch (e: IOException) {
                 if (attempt >= CLEAR_ATTEMPTS) throw e
@@ -391,7 +484,7 @@ class CompanionClient internal constructor(
         var record: PairingRecord? = null
         while (record == null) {
             try {
-                record = onStore { beginFreshPairing(store, code) }
+                record = onStore { beginFreshPairing(store, code) }.also(::notePaired)
             } catch (e: IOException) {
                 // PairingStoreUnavailableException included: the QR stays valid for a while.
                 log("could not start the pairing: ${e.message}")
@@ -415,6 +508,7 @@ class CompanionClient internal constructor(
             try {
                 record = onStore { store.load() }
                 loaded = true
+                notePaired(record)
             } catch (e: PairingStoreUnavailableException) {
                 log("store unavailable: ${e.message}")
                 setState(ClientState.WaitingForMac(WaitReason.STORE_UNAVAILABLE))
@@ -633,6 +727,8 @@ class CompanionClient internal constructor(
                         confirmationMode(),
                         onEvent = ::emitEvent,
                         log = log,
+                        sink = streamSink,
+                        timeSource = timeSource,
                     )
                     live.start(this)
                     try {
@@ -641,12 +737,30 @@ class CompanionClient internal constructor(
                         if (end != End.Stop && live.unpaired.isCompleted) macUnpaired(live) else end
                     } finally {
                         heardThisAttempt = heardThisAttempt || live.heardFromMac
-                        session = null
-                        live.close()
+                        endLink(live)
                     }
                 }
             } finally {
                 socket.close()
+            }
+        }
+
+        /** The link id of this attempt's session once it reached step 7, until its [StreamInput.LinkDown]. */
+        private var linkId: Long? = null
+
+        /**
+         * Ends [live]: it stops being current and is closed, its receive loop stops, and then, if it
+         * was a link, [StreamInput.LinkDown] is sunk. Uncancellable from the close on, so a
+         * cancelled flow ([cancel], [unpair], [pair]) still delivers it. Idempotent.
+         */
+        private suspend fun endLink(live: CompanionSession) {
+            if (active?.session === live) active = null
+            live.close()
+            val ended = linkId ?: return
+            linkId = null
+            withContext(NonCancellable) {
+                live.awaitStopped()
+                sinkLink(StreamInput.LinkDown(ended, live.messageTooLarge))
             }
         }
 
@@ -725,7 +839,7 @@ class CompanionClient internal constructor(
                     socket.send(initiator.writeMessage1())
                     initiator.readMessage2(socket.incoming.receive())
                     socket.send(initiator.writeMessage3())
-                    Shake.Done(initiator.handshakeHash, initiator.split())
+                    Shake.Done(initiator.handshakeHash, initiator.split(timeouts.maxMessageBytes))
                 } ?: Shake.Failed(null).also { log("handshake timed out") }
             } catch (e: RelayClosedException) {
                 log("relay closed during the handshake: ${e.code} ${e.reason}")
@@ -792,10 +906,17 @@ class CompanionClient internal constructor(
             // Step 6: register on every connect.
             register(endpoints, token)
 
-            // Step 7: connected until the socket goes or the Mac unpairs.
+            // Step 7: connected until the socket goes or the Mac unpairs. The link is current
+            // before LinkUp is sunk, so the sink can send on it; Connected follows.
             attempt = 0
-            session = live
-            setState(ClientState.Connected(helloReply.revision.coerceIn(0, Int.MAX_VALUE.toLong()).toInt()))
+            val revision = helloReply.revision.coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
+            val id = nextLinkId.getAndIncrement()
+            linkId = id
+            live.linkUp(id) {
+                active = ActiveLink(id, live)
+                sinkLink(StreamInput.LinkUp(id, revision))
+            }
+            setState(ClientState.Connected(revision))
             return select {
                 live.unpaired.onAwait { macUnpaired(live) }
                 live.ended.onAwait { End.Lost(it.relayClose) }
@@ -805,8 +926,7 @@ class CompanionClient internal constructor(
         /** The Mac sent `unpaired`: the same teardown as [unpair], without sending anything. */
         private suspend fun macUnpaired(live: CompanionSession): End {
             log("the Mac unpaired this phone")
-            session = null
-            live.close()
+            endLink(live)
             freshCode = null
             try {
                 clearStoreWithRetry()
@@ -900,7 +1020,7 @@ class CompanionClient internal constructor(
         private suspend fun checkpointConfirmed(): Boolean {
             if (!unconfirmed) return true
             return try {
-                record = onStore { advancePairing(store, record, PairingStage.CONFIRMED) }
+                record = onStore { advancePairing(store, record, PairingStage.CONFIRMED) }.also(::notePaired)
                 freshCode = null
                 true
             } catch (e: IOException) {
@@ -914,7 +1034,7 @@ class CompanionClient internal constructor(
         private suspend fun rpc(live: CompanionSession, message: PhoneMessage): MacMessage? {
             val name = message.javaClass.simpleName
             return try {
-                withTimeoutOrNull(timeouts.rpc) { live.request(message) }
+                live.request(message, timeouts.rpc, onSent = {})
                     .also { if (it == null) log("no reply to $name within ${timeouts.rpc}") }
             } catch (e: CompanionRequestException) {
                 log("$name failed: ${e.message}")
@@ -940,7 +1060,7 @@ class CompanionClient internal constructor(
                     log("registered with the relay")
                     if (record.stage != PairingStage.REGISTERED) {
                         try {
-                            record = onStore { advancePairing(store, record, PairingStage.REGISTERED) }
+                            record = onStore { advancePairing(store, record, PairingStage.REGISTERED) }.also(::notePaired)
                         } catch (e: IOException) {
                             log("could not save REGISTERED; registering again next connect: ${e.message}")
                         }

@@ -220,6 +220,48 @@ class NoiseChannelTest {
     }
 
     @Test
+    fun oversizedMessageClosesChannel() {
+        val p = pairing()
+        p.responder.readMessage1(p.initiator.writeMessage1())
+        p.initiator.readMessage2(p.responder.writeMessage2())
+        p.responder.readMessage3(p.initiator.writeMessage3())
+        val cap = 1024 * 1024
+        val phone = p.initiator.split(maxMessageBytes = cap)
+        val mac = p.responder.split()
+
+        // Under the cap: delivered whole.
+        val fits = Random(1).nextBytes(900 * 1024)
+        val delivered = mac.encryptMessage(fits).map { phone.decryptFrame(it) }
+        assertArrayEquals(fits, delivered.last())
+        assertTrue(delivered.dropLast(1).all { it == null })
+
+        // Over it: the channel closes on the chunk that would cross the cap, holding at most the cap.
+        val frames = mac.encryptMessage(ByteArray(2 * 1024 * 1024))
+        var accepted = 0
+        val failure = assertThrows(NoiseException::class.java) {
+            for (frame in frames) {
+                assertNull(phone.decryptFrame(frame))
+                accepted++
+                assertTrue("buffered ${phone.reassemblyCapacity}", phone.reassemblyCapacity <= cap)
+            }
+        }
+        assertEquals("message too large", failure.message)
+        assertEquals("closed on the chunk that crosses the cap", cap / MAX_CHUNK, accepted)
+        assertTrue(phone.isClosed)
+        assertTrue(phone.messageTooLarge)
+        assertEquals(0, phone.reassemblyCapacity)
+        assertThrows(NoiseException::class.java) { phone.decryptFrame(frames.last()) }
+    }
+
+    @Test
+    fun otherFailuresAreNotMessageTooLarge() {
+        val (_, mac) = channels()
+        assertThrows(NoiseException::class.java) { mac.decryptFrame(ByteArray(TAG_BYTES)) }
+        assertTrue(mac.isClosed)
+        assertFalse(mac.messageTooLarge)
+    }
+
+    @Test
     fun replayedFrameFails() {
         val (phone, mac) = channels()
         val frame = phone.encryptMessage("hello".toByteArray()).single()

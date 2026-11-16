@@ -348,6 +348,54 @@ class RelayConnectionTest {
     }
 
     @Test
+    fun transportOverBudgetReconnects() = runBlocking {
+        val fake = relay(FakeRelay())
+        val budget = 1024L * 1024
+        val connection = RelayConnection(client, endpoints(), ROOM, admissionTimeoutMillis = 5_000, maxQueuedBytes = budget)
+            .also { connections += it }
+        assertEquals(AdmissionResult.Admitted(TOKEN), connection.admit(Proof.Fresh))
+        // 2 MiB in 64 KiB frames, each numbered, while nothing reads incoming.
+        val frameBytes = 64 * 1024
+        repeat(32) { index -> fake.socket().send(ByteArray(frameBytes) { (index + it).toByte() }.toByteString()) }
+        assertEquals("the phone closed its side", 1000, fake.awaitClosed())
+
+        // Everything queued before the close is still delivered, in order, then the budget reason.
+        val delivered = ArrayList<ByteArray>()
+        val closed = assertThrows(RelayClosedException::class.java) {
+            runBlocking { withTimeout(5_000) { while (true) delivered += connection.incoming.receive() } }
+        }
+        assertTrue(closed.reason, closed.reason.contains("budget"))
+        assertEquals("closed locally, so not a relay close frame", 1006, closed.code)
+        assertEquals((budget / frameBytes).toInt(), delivered.size)
+        delivered.forEachIndexed { index, frame -> assertArrayEquals("frame $index", ByteArray(frameBytes) { (index + it).toByte() }, frame) }
+        assertThrows(RelaySendException::class.java) { runBlocking { connection.send(byteArrayOf(1)) } }
+        Unit
+    }
+
+    @Test
+    fun receivedFramesReleaseTheBudget() = runBlocking {
+        val fake = relay(FakeRelay())
+        val connection = RelayConnection(client, endpoints(), ROOM, admissionTimeoutMillis = 5_000, maxQueuedBytes = 100_000)
+            .also { connections += it }
+        assertEquals(AdmissionResult.Admitted(TOKEN), connection.admit(Proof.Fresh))
+        // 64 frames of 60 KB, far over the budget in all, but each read before the next is sent,
+        // alternately by receive() and by the iterator a for loop uses.
+        val iterator = connection.incoming.iterator()
+        repeat(64) { index ->
+            fake.socket().send(ByteArray(60_000) { index.toByte() }.toByteString())
+            val frame = withTimeout(5_000) {
+                if (index % 2 == 0) {
+                    connection.incoming.receive()
+                } else {
+                    check(iterator.hasNext())
+                    iterator.next()
+                }
+            }
+            assertEquals(index.toByte(), frame[0])
+        }
+    }
+
+    @Test
     fun textFrameAfterAdmissionIsFatal() = runBlocking {
         val fake = relay(FakeRelay())
         val connection = connection()
