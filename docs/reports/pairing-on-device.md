@@ -4,10 +4,11 @@ The owner fills this in on the Mac with the Pixel, after the Pairing Screens tas
 happened under each **Result** line: pass or fail, plus anything unexpected (screen text, timing,
 relay log lines).
 
-- Date:
+- Date: 2026-11-16
 - Phone and Android version:
 - iTerm2 version: 3.7.7
 - Relay commit: `b8aa2f9`
+- App build: 0.1.0-83fb3fa (Firebase App Distribution)
 
 ## Prerequisites
 
@@ -42,12 +43,12 @@ relay log lines).
    and type the code shown on the phone (`482 913` style) on the Mac.
    Expected: **Connected to iTerm2**.
 
-   **Result:**
+   **Result:** Pass. Installed through Firebase App Tester (build 0.1.0-83fb3fa), scanned the QR from iTerm2 Companion Device Settings, phone showed **Connected to iTerm2**. Relay: `admit role=mac via=open`, then `admit role=phone via=open peer=true (spliced)`.
 
 2. Force-stop the app (`adb shell am force-stop dev.bugobliterator.itermbuddy`) and reopen it.
    Expected: Connected without scanning.
 
-   **Result:**
+   **Result:** Pass. Force-stopped from Android Settings and reopened; Connected without scanning.
 
    Then grep the relay log for the phone's signed join, which proves the stored pairing was
    reused and the room is locked:
@@ -56,12 +57,12 @@ relay log lines).
 
    Expected: at least one line, timed after the reopen.
 
-   **Result:**
+   **Result:** Pass. `admit role=phone via=signed peer=true (spliced)` after the reopen; the phone drop (code 1006) also made the Mac rejoin with `admit role=mac via=signed`.
 
 3. Quit iTerm2. Expected: **Waiting for your Mac** ("Is iTerm2 running?"). Relaunch iTerm2.
    Expected: Connected.
 
-   **Result:**
+   **Result:** Not run yet (owner deferred restarting iTerm2).
 
 4. Tap **Unpair** on the phone. Expected: the phone shows **Scan to pair**, and iTerm2 shows the
    phone as unpaired.
