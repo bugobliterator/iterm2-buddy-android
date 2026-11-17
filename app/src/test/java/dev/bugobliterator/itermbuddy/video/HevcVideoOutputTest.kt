@@ -757,4 +757,33 @@ class HevcVideoOutputTest {
         assertNull(video.stats.value.decoderName)
         assertEquals("hw.hevc", video.stats.value.lastDecoderName)
     }
+
+    @Test
+    fun sizeSupportedAsksTheDecoderChosenForTheSize() {
+        catalog = FixedCatalog(listOf(decoder("hw.hevc", supports = { w, h -> w <= 4096 && h <= 2304 && w.toLong() * h <= 4_000_000 })))
+        val video = output()
+        assertTrue(video.sizeSupported(1920, 1080))
+        assertFalse("area over the limit", video.sizeSupported(4096, 2304))
+        assertFalse(video.sizeSupported(0, 0))
+        catalog = FixedCatalog(emptyList())
+        assertFalse(output().sizeSupported(1920, 1080))
+    }
+
+    @Test
+    fun outputOfACodecNoLongerWantedIsNotRenderedOrCounted() {
+        val video = ready()
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        thread.drain()
+        val codec = factory.last
+        // Hold the decoder thread so the output callback runs after the reset but before its reconcile.
+        val hold = java.util.concurrent.CountDownLatch(1)
+        thread.post { hold.await() }
+        codec.output(us(1))
+        video.reset()
+        hold.countDown()
+        thread.drain()
+        assertEquals(listOf(0 to false), codec.rendered.toList())
+        assertEquals(0L, video.stats.value.framesOutSinceReset)
+        assertEquals(0L, video.stats.value.framesOut)
+    }
 }

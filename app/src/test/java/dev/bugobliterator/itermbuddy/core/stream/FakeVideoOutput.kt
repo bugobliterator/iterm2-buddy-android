@@ -131,6 +131,11 @@ class FakeVideoOutput(private val nowMillis: () -> Long) : VideoOutput {
 
     override fun maxSize(): Pair<Int, Int>? = maxDecoderSize
 
+    /** What [sizeSupported] answers; every size by default. */
+    @Volatile var sizeSupport: (Int, Int) -> Boolean = { _, _ -> true }
+
+    override fun sizeSupported(width: Int, height: Int): Boolean = sizeSupport(width, height)
+
     /** Outputs the [count] oldest pending frames. */
     fun outputOldest(count: Int) = synchronized(lock) { repeat(count) { pending.removeFirstOrNull() } }
 

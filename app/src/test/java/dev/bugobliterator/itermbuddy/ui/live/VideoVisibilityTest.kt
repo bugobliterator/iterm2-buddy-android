@@ -19,6 +19,8 @@ import dev.bugobliterator.itermbuddy.video.TestDecoderThread
 import dev.bugobliterator.itermbuddy.video.decoder
 import dev.bugobliterator.itermbuddy.video.fakeSurface
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
@@ -62,7 +64,15 @@ class VideoVisibilityTest {
             link, video, test.backgroundScope, nowMillis = { test.currentTime }, log = {}, ackContext = EmptyCoroutineContext,
         )
 
-        val visible: Boolean get() = videoVisible(controller.state, video.stats)
+        /** The session the screen shows, as the navigator would set it on a row tap. */
+        var shown: SessionSummary = A
+
+        val visible: Boolean get() = videoVisible(controller.state, video.stats, shown.guid)
+
+        fun open(session: SessionSummary) {
+            shown = session
+            controller.open(session)
+        }
 
         val state: LiveViewState get() = controller.state.value
 
@@ -101,7 +111,7 @@ class VideoVisibilityTest {
         val rig = Rig(this)
         rig.video.attachSurface(fakeSurface())
         rig.controller.accept(StreamInput.LinkUp(1, 13))
-        rig.controller.open(A)
+        rig.open(A)
         rig.settle()
         assertEquals(LiveViewState.Starting(A), rig.state)
         assertFalse(rig.visible)
@@ -118,7 +128,7 @@ class VideoVisibilityTest {
         // Switch to B. A frame of A still in A's codec is output after the switch: it must not count.
         rig.keyframe(1, 1, pts = 20)
         val codecOfA = factory.last
-        rig.controller.open(B)
+        rig.open(B)
         rig.settle()
         assertEquals(LiveViewState.Starting(B), rig.state)
         assertFalse("A's picture under B's Starting", rig.visible)
@@ -187,6 +197,51 @@ class VideoVisibilityTest {
         rig.controller.close()
         rig.settle()
         assertFalse(rig.visible)
+    }
+
+    /**
+     * The read order, deterministically: [videoVisible] reads the state, and before it reads the
+     * stats a hook opens B and lets the controller and decoder settle. Reading the state first
+     * gives Live(A) with the post-reset count 0: hidden. Reading the stats first would pair A's
+     * old count with Live(A) and show A's picture.
+     */
+    @Test
+    fun aSwitchBetweenTheStateReadAndTheStatsReadNeverShowsTheOldPicture() = runTest {
+        val rig = Rig(this)
+        rig.video.attachSurface(fakeSurface())
+        rig.controller.accept(StreamInput.LinkUp(1, 13))
+        rig.open(A)
+        rig.settle()
+        rig.start(linkId = 1, streamID = 1)
+        rig.keyframe(1, 1, pts = 10)
+        rig.output(10)
+        assertTrue(rig.visible)
+        var hooked = 0
+        val state = AfterRead(rig.controller.state) {
+            hooked++
+            rig.controller.open(B)
+            rig.settle()
+        }
+        assertFalse(videoVisible(state, rig.video.stats, A.guid))
+        assertEquals(1, hooked)
+        assertEquals(LiveViewState.Starting(B), rig.state)
+        assertEquals(0L, rig.video.stats.value.framesOutSinceReset)
+    }
+
+    /** [inner], whose [value] runs [hook] once, after the read and before returning it. */
+    @OptIn(ExperimentalForInheritanceCoroutinesApi::class)
+    private class AfterRead<T>(private val inner: StateFlow<T>, private val hook: () -> Unit) : StateFlow<T> by inner {
+        private var fired = false
+
+        override val value: T
+            get() {
+                val read = inner.value
+                if (!fired) {
+                    fired = true
+                    hook()
+                }
+                return read
+            }
     }
 
     private companion object {
