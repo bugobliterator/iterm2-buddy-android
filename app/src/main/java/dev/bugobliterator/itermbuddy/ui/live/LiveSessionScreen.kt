@@ -81,6 +81,11 @@ interface LiveSessionActions {
 
     /** The composer's Paste ⏎ for [target]: the Return follows only a paste that was sent. */
     fun pasteThenReturn(target: InputTarget, text: String)
+
+    /** The composer's draft for [sessionGuid], kept in memory per session (not in saved state). */
+    fun composerDraft(sessionGuid: String): String
+
+    fun setComposerDraft(sessionGuid: String, draft: String)
 }
 
 /**
@@ -96,7 +101,10 @@ interface LiveSessionActions {
  * [TerminalInputView], with the [KeyBar] above it; the key bar's compose key opens the
  * [Composer]. Leaving that state lowers the keyboard. Every key and paste carries the target it
  * was made for, and the input sender discards it if the stream has moved on by the time it is
- * sent. Sticky modifiers, the tray and the draft are per session.
+ * sent; held composing text is dropped when the target changes. A keyboard that was up when input
+ * went away (a reconnect) comes back with it. Multi-line or long commits (dictation) open the
+ * composer seeded with them. Sticky modifiers, the tray and the draft are per session; the draft
+ * is cleared only once its paste was handed to the sender.
  *
  * **Fit viewport.** The size Fit computes the grid for is the content area under the top bar,
  * measured outside the IME padding: while the keyboard is hidden the canvas fills exactly that
@@ -137,20 +145,41 @@ fun LiveSessionScreen(
     val currentActions by rememberUpdatedState(actions)
     var modifierVersion by remember { mutableIntStateOf(0) }
     val modifiers = remember(session.guid) { StickyModifiers(onChange = { modifierVersion++ }) }
+    var composerOpen by rememberSaveable(session.guid) { mutableStateOf(false) }
+    // The draft lives in the app's per-session holder, not in saved state (it can be large).
+    var draft by remember(session.guid) { mutableStateOf(actions.composerDraft(session.guid)) }
+    val updateDraft = { text: String ->
+        draft = text
+        currentActions.setComposerDraft(session.guid, text)
+    }
     val translator = remember(session.guid) {
         ImeTranslator(
             modifiers,
             emit = { event -> currentTarget?.let { currentActions.key(it, event) } },
             onComposingFlushed = keyboard::restartInput,
+            toComposer = { text ->
+                // Dictation or a multi-line or long commit: the owner confirms it in the composer.
+                updateDraft(if (draft.isEmpty()) text else draft + text)
+                keyboard.hide()
+                composerOpen = true
+            },
         )
     }
     var expanded by remember(session.guid) { mutableStateOf(false) }
-    var composerOpen by rememberSaveable(session.guid) { mutableStateOf(false) }
-    var draft by rememberSaveable(session.guid) { mutableStateOf("") }
     val offersInput = target != null
+    // Raise the keyboard again when input comes back (a reconnect) if it was up when it went.
+    var restoreKeyboard by remember(session.guid) { mutableStateOf(false) }
     LaunchedEffect(offersInput) {
-        if (!offersInput) keyboard.hide()
+        if (!offersInput) {
+            if (keyboard.visible()) restoreKeyboard = true
+            keyboard.hide()
+        } else if (restoreKeyboard) {
+            restoreKeyboard = false
+            keyboard.show()
+        }
     }
+    // Held composing text and the deletion tail belong to the target they were typed for.
+    LaunchedEffect(translator, target) { translator.reset() }
     val keyBarActions = remember(translator) {
         object : KeyBarActions {
             override fun key(event: KeyEvent) = translator.keyBar(event)
@@ -279,17 +308,21 @@ fun LiveSessionScreen(
         Composer(
             title = title,
             draft = draft,
-            onDraftChange = { draft = it },
+            onDraftChange = updateDraft,
             canSend = offersInput,
             onPaste = {
-                currentTarget?.let { actions.paste(it, draft) }
-                draft = ""
-                composerOpen = false
+                currentTarget?.let {
+                    actions.paste(it, draft)
+                    updateDraft("")
+                    composerOpen = false
+                }
             },
             onPasteThenReturn = {
-                currentTarget?.let { actions.pasteThenReturn(it, draft) }
-                draft = ""
-                composerOpen = false
+                currentTarget?.let {
+                    actions.pasteThenReturn(it, draft)
+                    updateDraft("")
+                    composerOpen = false
+                }
             },
             onDismiss = { composerOpen = false },
         )
@@ -321,17 +354,19 @@ internal class TerminalKeyboard {
     }
 
     fun toggle() {
-        val input = view ?: return
-        if (input.hasFocus() && input.keyboardVisible()) input.hideKeyboard() else input.showKeyboard()
+        if (visible()) hide() else show()
     }
 
     fun restartInput() {
         view?.restartInput()
     }
+
+    /** Whether the keyboard is up for the terminal view. */
+    fun visible(): Boolean = view?.let { it.hasFocus() && it.keyboardVisible() } == true
 }
 
 /**
- * The [TerminalInputView], 1 px (a view with no size cannot take focus), behind the picture.
+ * The [TerminalInputView], 1 dp square (a view with no size cannot take focus), behind the picture.
  * [translator] null drops IME calls (no input offered).
  */
 @Composable

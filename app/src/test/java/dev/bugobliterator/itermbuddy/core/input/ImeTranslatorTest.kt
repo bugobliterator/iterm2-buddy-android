@@ -8,8 +8,9 @@ import android.view.KeyEvent as AndroidKeyEvent
 class ImeTranslatorTest {
     private val events = mutableListOf<KeyEvent>()
     private var flushes = 0
+    private val composed = mutableListOf<String>()
     private val modifiers = StickyModifiers()
-    private val ime = ImeTranslator(modifiers, emit = { events += it }, onComposingFlushed = { flushes++ })
+    private val ime = ImeTranslator(modifiers, emit = { events += it }, onComposingFlushed = { flushes++ }, toComposer = { composed += it })
 
     private fun text(s: String, modifiers: KeyModifiers = KeyModifiers()) = KeyEvent(Key.Text(s), modifiers)
 
@@ -52,13 +53,18 @@ class ImeTranslatorTest {
         assertEquals("finish is the IME's own end of composing", 0, flushes)
     }
 
+    /**
+     * The plan said `deleteSurroundingText` while composing shortens the held text. It follows the
+     * framework instead (review I4): it deletes the text *before* the composing span, so it sends
+     * backspaces and leaves the held text alone; only `KEYCODE_DEL` shortens the held text.
+     */
     @Test
     fun backspaceWhileComposingEditsHeldText() {
         ime.setComposingText("help")
         ime.deleteSurroundingText(1, 0)
-        assertEquals(emptyList<KeyEvent>(), events)
+        assertEquals(listOf(special(SpecialKey.BACKSPACE)), events)
         ime.commitText("hel")
-        assertEquals(listOf(text("hel")), events)
+        assertEquals(listOf(special(SpecialKey.BACKSPACE), text("hel")), events)
 
         events.clear()
         ime.setComposingText("ab")
@@ -67,11 +73,13 @@ class ImeTranslatorTest {
         ime.finishComposingText()
         assertEquals(listOf(special(SpecialKey.BACKSPACE)), events)
 
-        // Deleting more than is held: only the excess reaches the Mac.
+        // deleteSurroundingText deletes before the composing span: the tail "he", then two units beyond it.
         events.clear()
         ime.setComposingText("xy")
         ime.deleteSurroundingText(4, 0)
-        assertEquals(listOf(special(SpecialKey.BACKSPACE), special(SpecialKey.BACKSPACE)), events)
+        assertEquals(List(4) { special(SpecialKey.BACKSPACE) }, events)
+        ime.finishComposingText()
+        assertEquals(List(4) { special(SpecialKey.BACKSPACE) } + text("xy"), events)
         assertEquals(0, flushes)
     }
 
@@ -148,9 +156,7 @@ class ImeTranslatorTest {
         down(AndroidKeyEvent.KEYCODE_ENTER)
         assertEquals(List(4) { text("\n") }, events)
 
-        events.clear()
-        ime.commitText("a\r\nb")
-        assertEquals(listOf(text("a\nb")), events)
+        assertEquals(emptyList<String>(), composed)
     }
 
     @Test
@@ -160,7 +166,7 @@ class ImeTranslatorTest {
 
         events.clear()
         ime.setComposingText("😀")
-        ime.deleteSurroundingText(1, 0)
+        down(AndroidKeyEvent.KEYCODE_DEL)
         ime.finishComposingText()
         assertEquals("a held surrogate pair is never split", emptyList<KeyEvent>(), events)
     }
@@ -254,5 +260,119 @@ class ImeTranslatorTest {
         ime.finishComposingText()
         assertEquals(listOf(text("git")), events)
         assertEquals(1, flushes)
+    }
+
+    @Test
+    fun backspaceOverEmojiIsOneBackspace() {
+        ime.commitText("a😀")
+        ime.deleteSurroundingText(2, 0)
+        assertEquals(listOf(text("a😀"), special(SpecialKey.BACKSPACE)), events)
+        ime.deleteSurroundingText(1, 0)
+        ime.deleteSurroundingText(1, 0)
+        assertEquals("then a, then one beyond the tail", listOf(text("a😀")) + List(3) { special(SpecialKey.BACKSPACE) }, events)
+    }
+
+    @Test
+    fun backspaceOverAGraphemeIsOnePerCodePoint() {
+        ime.commitText("👍🏽")
+        ime.deleteSurroundingText(4, 0)
+        assertEquals(listOf(text("👍🏽"), special(SpecialKey.BACKSPACE), special(SpecialKey.BACKSPACE)), events)
+
+        // A count that splits a pair takes the whole code point.
+        events.clear()
+        ime.commitText("😀😀")
+        ime.deleteSurroundingText(3, 0)
+        assertEquals(listOf(text("😀😀"), special(SpecialKey.BACKSPACE), special(SpecialKey.BACKSPACE)), events)
+    }
+
+    @Test
+    fun tailIsForgottenAfterSpecialKeysReturnRestartAndReset() {
+        val ends: List<() -> Unit> = listOf(
+            { down(AndroidKeyEvent.KEYCODE_TAB) },
+            { ime.performEditorAction() },
+            { ime.keyBar(special(SpecialKey.ESCAPE)) },
+            { ime.inputRestarted() },
+            { ime.reset() },
+        )
+        for (end in ends) {
+            ime.commitText("😀")
+            end()
+            events.clear()
+            ime.deleteSurroundingText(2, 0)
+            assertEquals(List(2) { special(SpecialKey.BACKSPACE) }, events)
+            events.clear()
+        }
+    }
+
+    @Test
+    fun deleteWhileComposingLeavesHeldText() {
+        ime.commitText("😀")
+        ime.setComposingText("ab")
+        ime.deleteSurroundingText(2, 0)
+        ime.finishComposingText()
+        assertEquals(listOf(text("😀"), special(SpecialKey.BACKSPACE), text("ab")), events)
+    }
+
+    @Test
+    fun multiLineCommitGoesToComposer() {
+        modifiers.tap(ModifierKey.CONTROL, nowMillis = 0)
+        ime.commitText("make test\r\ngit status")
+        assertEquals(emptyList<KeyEvent>(), events)
+        assertEquals(listOf("make test\ngit status"), composed)
+        assertEquals("nothing typed, so nothing consumed", ModifierState.ONE_SHOT, modifiers.state(ModifierKey.CONTROL))
+
+        // Held text with a newline goes the same way when it is flushed.
+        ime.setComposingText("a\nb")
+        ime.performEditorAction()
+        assertEquals(listOf("make test\ngit status", "a\nb"), composed)
+        assertEquals(listOf(text("\n", ctrl)), events)
+    }
+
+    @Test
+    fun longCommitGoesToComposer() {
+        val limit = "x".repeat(ImeTranslator.COMPOSER_THRESHOLD)
+        ime.commitText(limit)
+        ime.commitText(limit + "y")
+        assertEquals(listOf(text(limit)), events)
+        assertEquals(listOf(limit + "y"), composed)
+    }
+
+    @Test
+    fun typedCharacterKeyFlushesComposingFirst() {
+        ime.setComposingText("ab")
+        assertTrue(ime.sendKeyEvent(AndroidKeyEvent.KEYCODE_1, AndroidKeyEvent.ACTION_DOWN, unicodeChar = '1'.code))
+        assertEquals(listOf(text("ab"), text("1")), events)
+        assertEquals(1, flushes)
+    }
+
+    @Test
+    fun hardwareControlAndAlt() {
+        val ctrlMeta = AndroidKeyEvent.META_CTRL_ON or AndroidKeyEvent.META_CTRL_LEFT_ON
+        val altMeta = AndroidKeyEvent.META_ALT_ON or AndroidKeyEvent.META_ALT_LEFT_ON
+        ime.sendKeyEvent(AndroidKeyEvent.KEYCODE_C, AndroidKeyEvent.ACTION_DOWN, 'c'.code, ctrlMeta)
+        ime.sendKeyEvent(AndroidKeyEvent.KEYCODE_C, AndroidKeyEvent.ACTION_DOWN, 'C'.code, ctrlMeta or AndroidKeyEvent.META_SHIFT_ON)
+        ime.sendKeyEvent(AndroidKeyEvent.KEYCODE_B, AndroidKeyEvent.ACTION_DOWN, 'b'.code, altMeta)
+        ime.sendKeyEvent(AndroidKeyEvent.KEYCODE_DPAD_LEFT, AndroidKeyEvent.ACTION_DOWN, 0, ctrlMeta)
+        ime.sendKeyEvent(AndroidKeyEvent.KEYCODE_A, AndroidKeyEvent.ACTION_DOWN, 'A'.code, AndroidKeyEvent.META_SHIFT_ON)
+        assertEquals(
+            listOf(
+                controlC,
+                controlC,
+                text("b", KeyModifiers(leftOption = true)),
+                special(SpecialKey.LEFT, ctrl),
+                text("A"),
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun resetDropsHeldTextUnsent() {
+        ime.setComposingText("ab")
+        ime.reset()
+        ime.finishComposingText()
+        ime.performEditorAction()
+        assertEquals(listOf(text("\n")), events)
+        assertEquals(0, flushes)
     }
 }

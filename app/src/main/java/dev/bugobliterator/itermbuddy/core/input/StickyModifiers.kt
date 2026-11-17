@@ -11,8 +11,9 @@ enum class ModifierState { OFF, ONE_SHOT, LOCKED }
  * timed here rather than by the gesture system:
  *
  * - a tap on an off modifier makes it [ModifierState.ONE_SHOT];
- * - a second tap less than [DOUBLE_TAP_MILLIS] after turning it one-shot locks it;
- * - any other tap on a one-shot or locked modifier turns it off;
+ * - a single tap on a one-shot or locked modifier turns it off;
+ * - a double tap (a second tap less than [DOUBLE_TAP_MILLIS] after the first) locks it, whatever
+ *   its state, so a double tap on a locked modifier keeps it locked (iOS `lockModifier`);
  * - left and right Option are exclusive (the Mac's key mapper reads one side only): turning one
  *   on turns the other off. Control is independent.
  *
@@ -22,19 +23,19 @@ enum class ModifierState { OFF, ONE_SHOT, LOCKED }
  */
 class StickyModifiers(private val onChange: () -> Unit = {}) {
     private val states = mutableMapOf<ModifierKey, ModifierState>()
-    private val armedAt = mutableMapOf<ModifierKey, Long>()
+    private val lastTap = mutableMapOf<ModifierKey, Long>()
 
     fun tap(key: ModifierKey, nowMillis: Long) {
-        val next = when (state(key)) {
-            ModifierState.OFF -> ModifierState.ONE_SHOT
-            ModifierState.ONE_SHOT -> {
-                val armed = armedAt[key]
-                if (armed != null && nowMillis - armed in 0 until DOUBLE_TAP_MILLIS) ModifierState.LOCKED else ModifierState.OFF
-            }
-            ModifierState.LOCKED -> ModifierState.OFF
+        val previous = lastTap[key]
+        val doubleTap = previous != null && nowMillis - previous in 0 until DOUBLE_TAP_MILLIS
+        val next = when {
+            doubleTap -> ModifierState.LOCKED
+            state(key) == ModifierState.OFF -> ModifierState.ONE_SHOT
+            else -> ModifierState.OFF
         }
         states[key] = next
-        if (next == ModifierState.ONE_SHOT) armedAt[key] = nowMillis else armedAt.remove(key)
+        // The second tap of a double tap ends it: a third tap is a single tap again.
+        if (doubleTap) lastTap.remove(key) else lastTap[key] = nowMillis
         if (next != ModifierState.OFF) {
             when (key) {
                 ModifierKey.LEFT_OPTION -> turnOff(ModifierKey.RIGHT_OPTION)
@@ -71,13 +72,13 @@ class StickyModifiers(private val onChange: () -> Unit = {}) {
     /** Everything off (iOS `reset`, for another session). */
     fun reset() {
         states.clear()
-        armedAt.clear()
+        lastTap.clear()
         onChange()
     }
 
     private fun turnOff(key: ModifierKey) {
         states[key] = ModifierState.OFF
-        armedAt.remove(key)
+        lastTap.remove(key)
     }
 
     companion object {

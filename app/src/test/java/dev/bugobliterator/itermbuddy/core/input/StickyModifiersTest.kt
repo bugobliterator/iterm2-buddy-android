@@ -78,4 +78,17 @@ class StickyModifiersTest {
         assertFalse(consumed.shift)
         assertTrue(consumed.control)
     }
+
+    @Test
+    fun doubleTapOnLockedKeepsItLocked() {
+        modifiers.tap(CONTROL, nowMillis = 0)
+        modifiers.tap(CONTROL, nowMillis = 100)
+        assertEquals(LOCKED, modifiers.state(CONTROL))
+        modifiers.tap(CONTROL, nowMillis = 2_000)
+        modifiers.tap(CONTROL, nowMillis = 2_200)
+        assertEquals(LOCKED, modifiers.state(CONTROL))
+        // A third quick tap is a single tap again.
+        modifiers.tap(CONTROL, nowMillis = 2_300)
+        assertEquals(OFF, modifiers.state(CONTROL))
+    }
 }

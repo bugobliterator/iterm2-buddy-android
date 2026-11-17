@@ -74,6 +74,10 @@ class MainActivity : ComponentActivity() {
 
         override fun pasteThenReturn(target: InputTarget, text: String) = app.input.pasteThenReturn(target, text)
 
+        override fun composerDraft(sessionGuid: String): String = app.drafts.get(sessionGuid)
+
+        override fun setComposerDraft(sessionGuid: String, draft: String) = app.drafts.set(sessionGuid, draft)
+
         override fun refresh() = app.sessions.repository.refresh()
 
         override fun reconnect() {

@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy.ui.live
 
+import android.view.inputmethod.EditorInfo
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,14 +19,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.InterceptPlatformTextInput
+import androidx.compose.ui.platform.PlatformTextInputMethodRequest
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 
 /**
  * The composer: a bottom sheet over the live view with a multi-line text field on the normal
- * keyboard (suggestions and dictation work), for text longer than typing. **Paste** sends the
+ * keyboard (suggestions and dictation work; no personalised learning), for text longer than typing. **Paste** sends the
  * draft as one `pasteText` (iTerm2's paste path, bracketed when the app enabled it); **Paste ⏎**
  * sends the paste and then Return, the Return only once the paste was sent to the same watch.
  *
@@ -63,13 +67,15 @@ fun Composer(
                     Text("✕", style = MaterialTheme.typography.titleMedium)
                 }
             }
-            OutlinedTextField(
-                value = draft,
-                onValueChange = onDraftChange,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 320.dp),
-                placeholder = { Text("Text to paste into the session") },
-                minLines = 4,
-            )
+            NoPersonalizedLearning {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = onDraftChange,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 320.dp),
+                    placeholder = { Text("Text to paste into the session") },
+                    minLines = 4,
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 FilledTonalButton(onClick = onPaste, enabled = sendable, modifier = Modifier.weight(1f)) { Text("Paste") }
                 Button(
@@ -80,4 +86,41 @@ fun Composer(
             }
         }
     }
+}
+
+/**
+ * The composer drafts, one per session GUID, in memory for the process's life: they survive
+ * rotation and leaving the view, but are never written to saved state (a draft can be large and
+ * may hold anything the owner typed). Main thread only. Cleared on unpair.
+ */
+class ComposerDrafts {
+    private val drafts = mutableMapOf<String, String>()
+
+    fun get(sessionGuid: String): String = drafts[sessionGuid].orEmpty()
+
+    fun set(sessionGuid: String, draft: String) {
+        if (draft.isEmpty()) drafts.remove(sessionGuid) else drafts[sessionGuid] = draft
+    }
+
+    fun clear() = drafts.clear()
+}
+
+/**
+ * Adds `IME_FLAG_NO_PERSONALIZED_LEARNING` to every text field in [content]: what goes to a
+ * terminal (commands, secrets) must not teach the keyboard.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun NoPersonalizedLearning(content: @Composable () -> Unit) {
+    InterceptPlatformTextInput(
+        interceptor = { request, nextHandler ->
+            val modified = PlatformTextInputMethodRequest { outAttributes ->
+                request.createInputConnection(outAttributes).also {
+                    outAttributes.imeOptions = outAttributes.imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+                }
+            }
+            nextHandler.startInputMethod(modified)
+        },
+        content = content,
+    )
 }

@@ -229,7 +229,7 @@ class InputSenderTest {
     @Test
     fun sentMessagesMatchGoldenSamples() = runTest {
         val h = harness()
-        val ime = ImeTranslator(StickyModifiers(), emit = { h.sender.key(first, it) }, onComposingFlushed = {})
+        val ime = ImeTranslator(StickyModifiers(), emit = { h.sender.key(first, it) }, onComposingFlushed = {}, toComposer = {})
         ime.keyBar(KeyEvent(Key.Text("c"), KeyModifiers(control = true)))
         ime.setComposingText("l")
         ime.commitText("ls")
