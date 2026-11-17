@@ -177,3 +177,28 @@ to pair. Re-pair afterwards for the remaining phases.
 Expected: no typed or pasted text is found.
 
 **Result:**
+
+## Input trace
+
+An opt-in trace of everything the keyboard sends, for debugging characters that do not arrive
+(for example `/` and `*` in Claude Code). It is off by default in every build. While it is on,
+logcat shows each InputConnection call, key event, translated key, sender decision and the
+`sendKey`/`pasteText` envelope, with every typed character written as a code point
+(`U+002F[/]`), never as plain text.
+
+1. Turn it on (takes effect within a second; no restart needed):
+
+       adb shell setprop log.tag.IB.Input VERBOSE
+
+2. Capture it:
+
+       adb logcat -c
+       adb logcat -s IB.Input:V > input-trace.txt
+
+3. In a live Claude Code session, type `a/b`, then Return; then `a*b`, then Return.
+4. Stop the capture (Ctrl-C) and send `input-trace.txt`.
+5. Turn it off afterwards:
+
+       adb shell setprop log.tag.IB.Input SUPPRESS
+
+**Result:**

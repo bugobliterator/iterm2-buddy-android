@@ -1,5 +1,8 @@
 package dev.bugobliterator.itermbuddy.core
 
+import dev.bugobliterator.itermbuddy.core.input.InputTrace
+import dev.bugobliterator.itermbuddy.core.input.isTracedInput
+import dev.bugobliterator.itermbuddy.core.input.traceEnvelope
 import dev.bugobliterator.itermbuddy.core.noise.NoiseChannel
 import dev.bugobliterator.itermbuddy.core.noise.NoiseException
 import dev.bugobliterator.itermbuddy.core.relay.AdmissionResult
@@ -21,25 +24,25 @@ import dev.bugobliterator.itermbuddy.core.wire.WireDecodeException
 import dev.bugobliterator.itermbuddy.core.wire.decodeEnvelope
 import dev.bugobliterator.itermbuddy.core.wire.decodePairingConfirmation
 import dev.bugobliterator.itermbuddy.core.wire.encodeEnvelope
+import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
-import java.io.IOException
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
-import kotlin.time.Duration
-import kotlin.time.Duration.Companion.seconds
 
 /**
  * One relay WebSocket as the client uses it: the surface [RelayConnection] exposes. A seam so
@@ -339,7 +342,11 @@ internal class CompanionSession(
     private suspend fun sendEnvelope(message: PhoneMessage, requestID: Long?) {
         sendLock.withLock {
             val frames = try {
-                channel.encryptMessage(encodeEnvelope(message, requestID))
+                val envelope = encodeEnvelope(message, requestID)
+                if (isTracedInput(message)) {
+                    InputTrace.current.log { "send envelope requestID=$requestID ${traceEnvelope(envelope)}" }
+                }
+                channel.encryptMessage(envelope)
             } catch (e: NoiseException) {
                 abort()
                 throw CompanionRequestException("the connection is closed", e)

@@ -53,6 +53,8 @@ fun isInputTarget(active: ActiveStream?, target: InputTarget): Boolean =
  * Logs carry the item's kind (key, paste, typed draft), counts, link ids, watch epochs, GUIDs and
  * exception class names: never typed or pasted text, never which key (a special key's name is a
  * keystroke pattern), and never an exception's message (it may quote what it failed to send).
+ * Only the opt-in [InputTrace] shows items: each at dequeue (kept, discarded, timed out, failed),
+ * its text as code points.
  *
  * @param sendBound the bound on each send, 2 s by default.
  * @param typeChunkBytes the largest piece of a typed draft, in UTF-8 bytes ([TYPE_CHUNK_BYTES]).
@@ -109,10 +111,12 @@ class InputSender(
     private suspend fun process(item: Item) {
         val target = item.target
         if (!isCurrent(target)) {
+            InputTrace.current.log { "sender: discarded stale ${traceItem(item)} for ${target.sessionGuid} link ${target.linkId} watch ${target.watchEpoch}" }
             discarded++
             log("discarded stale ${item.label} for ${target.sessionGuid} on link ${target.linkId} watch ${target.watchEpoch}; $discarded discarded in all")
             return
         }
+        InputTrace.current.log { "sender: kept ${traceItem(item)} for ${target.sessionGuid} link ${target.linkId} watch ${target.watchEpoch}" }
         when (item) {
             is KeyItem -> send(PhoneMessage.SendKey(target.sessionGuid, item.event), target, item.label)
             is PasteItem -> send(PhoneMessage.PasteText(target.sessionGuid, item.text), target, item.label)
@@ -140,16 +144,25 @@ class InputSender(
         }
     }
 
+    /** An item for the opt-in [InputTrace]: its kind and its text as code points. */
+    private fun traceItem(item: Item): String = when (item) {
+        is KeyItem -> "key ${traceKeyEvent(item.event)}"
+        is PasteItem -> "paste ${codePoints(item.text)}"
+        is TypeItem -> "type-then-Return ${codePoints(item.text)}"
+    }
+
     /** Sends [message] on [target]'s link within [sendBound]; false (logged) on a timeout or failure. */
     private suspend fun send(message: PhoneMessage, target: InputTarget, label: String): Boolean = try {
         withTimeout(sendBound) { link.send(message, onLink = target.linkId) }
         true
     } catch (_: TimeoutCancellationException) {
+        InputTrace.current.log { "sender: timed out after $sendBound: $label" }
         log("$label for ${target.sessionGuid} on link ${target.linkId} timed out after $sendBound; skipped")
         false
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
+        InputTrace.current.log { "sender: failed (${e::class.simpleName}): $label" }
         log("$label for ${target.sessionGuid} on link ${target.linkId} failed (${e::class.simpleName}); skipped")
         false
     }

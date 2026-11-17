@@ -9,6 +9,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import dev.bugobliterator.itermbuddy.core.CompanionClient
 import dev.bugobliterator.itermbuddy.core.CompanionRequestException
 import dev.bugobliterator.itermbuddy.core.input.InputSender
+import dev.bugobliterator.itermbuddy.core.input.InputTrace
 import dev.bugobliterator.itermbuddy.core.input.isInputTarget
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
 import dev.bugobliterator.itermbuddy.core.stream.StreamController
@@ -145,6 +146,12 @@ class CompanionApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // The opt-in input trace: off unless `adb shell setprop log.tag.IB.Input VERBOSE`.
+        InputTrace.current = InputTrace(
+            gate = { Log.isLoggable(InputTrace.TAG, Log.VERBOSE) },
+            nowMillis = SystemClock::uptimeMillis,
+            sink = { Log.v(InputTrace.TAG, it) },
+        )
         video = HevcVideoOutput(MediaCodecCatalog())
         sessions = wireSessions(
             scope,

@@ -50,7 +50,7 @@ import android.view.KeyEvent as AndroidKeyEvent
  * its own (^C: `text "c"` with `control`) is sent exactly as given and still consumes any armed
  * one-shot, as iOS.
  *
- * Never logs anything. Main thread only.
+ * Logs nothing but the opt-in [InputTrace] (each emitted event). Main thread only.
  *
  * @param emit receives each key event, in order.
  * @param onComposingFlushed runs after held text is sent ahead of a key or editor action.
@@ -139,7 +139,7 @@ class ImeTranslator(
         flushHeld()
         val sticky = modifiers.consume()
         tail.setLength(0)
-        emit(if (event.modifiers == KeyModifiers()) event.copy(modifiers = sticky) else event)
+        out(if (event.modifiers == KeyModifiers()) event.copy(modifiers = sticky) else event)
     }
 
     /** The key bar's compose key: held text is sent first, as for any key bar key. */
@@ -154,6 +154,12 @@ class ImeTranslator(
     fun reset() {
         held.setLength(0)
         tail.setLength(0)
+    }
+
+    /** Emits [event], with a line in the opt-in [InputTrace]. */
+    private fun out(event: KeyEvent) {
+        InputTrace.current.log { "emit ${traceKeyEvent(event)}" }
+        emit(event)
     }
 
     /** Sends held text ahead of a key, then [onComposingFlushed]; nothing when none is held. */
@@ -199,10 +205,10 @@ class ImeTranslator(
         }
         if (modifiers.anyOneShot && codePoints > 1) {
             val split = text.offsetByCodePoints(0, 1)
-            emit(KeyEvent(Key.Text(text.substring(0, split)), modifiers.consume() + extra))
-            emit(KeyEvent(Key.Text(text.substring(split)), modifiers.consume() + extra))
+            out(KeyEvent(Key.Text(text.substring(0, split)), modifiers.consume() + extra))
+            out(KeyEvent(Key.Text(text.substring(split)), modifiers.consume() + extra))
         } else {
-            emit(KeyEvent(Key.Text(text), modifiers.consume() + extra))
+            out(KeyEvent(Key.Text(text), modifiers.consume() + extra))
         }
         remember(text)
     }
@@ -221,7 +227,7 @@ class ImeTranslator(
 
     private fun sendSpecial(key: SpecialKey, clearTail: Boolean = true, extra: KeyModifiers = KeyModifiers()) {
         if (clearTail) tail.setLength(0)
-        emit(KeyEvent(Key.Special(key), modifiers.consume() + extra))
+        out(KeyEvent(Key.Special(key), modifiers.consume() + extra))
     }
 
     private operator fun KeyModifiers.plus(other: KeyModifiers) = KeyModifiers(
