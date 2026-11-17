@@ -28,7 +28,13 @@ import androidx.compose.ui.unit.dp
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.WaitReason
 
-/** The screen for [state]: a thin layout of [screenContent], with no state of its own. */
+/**
+ * The screen for [state]: a thin layout of [screenContent], with no state of its own.
+ *
+ * [AppRoot] shows it only while there is no confirmed pairing, or when a stored one failed. A
+ * connected pairing shows the home instead, and its old Connected content (the status and
+ * Unpair) is in Settings ([dev.bugobliterator.itermbuddy.ui.settings.SettingsScreen]).
+ */
 @Composable
 fun PairingScreen(
     state: ClientState,
@@ -138,12 +144,8 @@ private fun ShowCodePreview() = PreviewOf(ClientState.ShowCode("482913"))
 
 @Preview(showBackground = true)
 @Composable
-private fun ConnectedPreview() = PreviewOf(ClientState.Connected(macRevision = 15))
-
-@Preview(showBackground = true)
-@Composable
 private fun UnpairingPreview() = MaterialTheme {
-    PairingScreen(ClientState.Connected(macRevision = 15), NoActions, unpairing = true)
+    PairingScreen(ClientState.Idle, NoActions, unpairing = true)
 }
 
 @Preview(showBackground = true)

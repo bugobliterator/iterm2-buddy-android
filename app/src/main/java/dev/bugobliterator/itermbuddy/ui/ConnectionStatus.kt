@@ -166,6 +166,7 @@ private fun stateContent(state: ClientState, notice: ScanNotice?): ScreenContent
         code = CodeDisplay(formatPairingCode(state.code), spokenPairingCode(state.code)),
         buttons = listOf(CANCEL),
     )
+    // Not shown by AppRoot (a connected pairing is the home; Settings has its status and Unpair).
     is ClientState.Connected -> ScreenContent(title = "Connected to iTerm2", buttons = listOf(UNPAIR))
     is ClientState.Failed -> withScanNotice(
         ScreenContent(

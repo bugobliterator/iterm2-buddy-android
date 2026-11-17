@@ -255,6 +255,16 @@ class CompanionClient internal constructor(
     private val nextLinkId = AtomicLong(1)
 
     /**
+     * Numbers every session tree in the order it was received, across all links (see
+     * [MacMessage.SessionTreeMessage.arrival]); never reset, so a tree from an ended link is
+     * always older than any tree from a later one.
+     */
+    private val treeArrivals = AtomicLong()
+
+    /** The arrival number of the newest session tree received on any link (0 before the first). */
+    internal val newestArrival: Long get() = treeArrivals.get()
+
+    /**
      * The code [pair] is pairing, from before its record is written until the Mac confirms it;
      * [cancel] wipes a PENDING_CONFIRMATION record for it.
      */
@@ -746,6 +756,7 @@ class CompanionClient internal constructor(
                         log = log,
                         sink = streamSink,
                         sinkStall = timeouts.sinkStall,
+                        arrivals = treeArrivals,
                     )
                     live.start(this)
                     try {
