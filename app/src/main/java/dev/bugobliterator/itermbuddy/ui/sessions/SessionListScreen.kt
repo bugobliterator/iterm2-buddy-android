@@ -36,10 +36,14 @@ import java.util.Locale
 internal const val EMPTY_TREE = "No sessions are open in iTerm2."
 internal const val TREE_FAILED = "Couldn't load sessions."
 
+/** The list's text when [query] matches nothing. The query is shown, never logged. */
+internal fun noMatchText(query: String): String = "No sessions match \"${query.trim()}\"."
+
 /**
  * The Sessions list for [state]: a spinner while loading, "Couldn't load sessions." with Try
  * again on a failure, the empty text, or the rows of [sessionRows], all under pull to refresh.
- * A row tap is [onOpen] with the row's title (the navigator's `openSession`).
+ * With a [query], only the rows [filterSessionRows] keeps (re-applied to every new tree), or
+ * [noMatchText]. A row tap is [onOpen] with the row's title (the navigator's `openSession`).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -48,6 +52,7 @@ fun SessionListScreen(
     onOpen: (SessionSummary, String) -> Unit,
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
+    query: String = "",
 ) {
     PullToRefreshBox(
         isRefreshing = state is TreeState.Loaded && state.refreshing,
@@ -61,9 +66,10 @@ fun SessionListScreen(
                 if (state.retryable) Button(onClick = onRefresh) { Text("Try again") }
             }
             is TreeState.Loaded -> {
-                val rows = remember(state.tree) { sessionRows(state.tree) }
+                val rows = remember(state.tree, query) { filterSessionRows(state.tree, query) }
                 if (rows.isEmpty()) {
-                    Centered { Text(EMPTY_TREE, style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center) }
+                    val text = if (query.isBlank()) EMPTY_TREE else noMatchText(query)
+                    Centered { Text(text, style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center) }
                 } else {
                     LazyColumn(modifier = Modifier.fillMaxSize()) {
                         itemsIndexed(rows) { _, row -> RowFor(row, onOpen) }
