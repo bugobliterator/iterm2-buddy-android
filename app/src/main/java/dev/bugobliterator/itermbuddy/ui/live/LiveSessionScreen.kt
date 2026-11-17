@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
@@ -39,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
@@ -115,11 +117,15 @@ interface LiveSessionActions {
  * is cleared only once its paste was handed to the sender.
  *
  * **Fit viewport.** The size Fit computes the grid for is the content area under the top bar,
- * measured outside the IME padding: while the keyboard is hidden the canvas fills exactly that
- * area (the key bar shows only with the keyboard), and the area does not change when the
- * keyboard rises, so the viewport is always the keyboard-hidden canvas, follows rotation, split
- * screen and window resizes at once, and the IME inset is never read in composition (only by
- * `imePadding` in layout, and its visibility by the key bar slot alone).
+ * which is the canvas: the canvas never shrinks for the keyboard (the picture lifts instead, see
+ * [VideoCanvas]), so the viewport is always the keyboard-hidden canvas and follows rotation, split
+ * screen and window resizes at once.
+ *
+ * **Keyboard lift.** The key bar sits over the picture just above the keyboard. Their overlap with
+ * the canvas (the IME inset beyond the navigation bar the Scaffold already leaves out, plus the
+ * key bar) is the canvas's bottom inset, read only in its layer and gestures, never in
+ * composition; the picture's bottom (the prompt) stays just above the key bar while the keyboard
+ * animates, as iOS (`SessionView.swift:1551-1559, 1995-2005`).
  *
  * @param config the image geometry: the shown state's config, else the active stream's when it
  *   is this session's (a too-large window keeps its config for Fit).
@@ -214,6 +220,12 @@ fun LiveSessionScreen(
         }
     }
 
+    // How far the keyboard and key bar overlap the canvas, in px: the IME inset beyond what the
+    // Scaffold already keeps outside the canvas (the navigation bar), plus the key bar. Read only
+    // by the canvas's layer and gestures, so the IME animation never recomposes this screen.
+    val ime = WindowInsets.ime
+    val density = LocalDensity.current
+    var keyBarHeight by remember { mutableIntStateOf(0) }
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
@@ -264,6 +276,10 @@ fun LiveSessionScreen(
             )
         },
     ) { padding ->
+        val outsideBottom by rememberUpdatedState(with(density) { padding.calculateBottomPadding().roundToPx() })
+        val keyboardOverlap: () -> Float = remember(ime, density) {
+            { (maxOf(0, ime.getBottom(density) - outsideBottom) + keyBarHeight).toFloat() }
+        }
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -271,43 +287,51 @@ fun LiveSessionScreen(
                 .consumeWindowInsets(padding)
                 .onSizeChanged { viewport = it },
         ) {
-            Column(modifier = Modifier.fillMaxSize().imePadding()) {
-                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                    TerminalInput(keyboard, translator.takeIf { offersInput }, Modifier.align(Alignment.TopStart))
-                    VideoCanvas(
-                        source = source,
-                        imageWidth = config?.pixelWidth ?: 0,
-                        imageHeight = config?.pixelHeight ?: 0,
-                        sessionGuid = session.guid,
-                        onCanvasSize = {},
-                        onTap = { if (currentTarget != null) keyboard.show() },
+            Box(modifier = Modifier.fillMaxSize()) {
+                TerminalInput(keyboard, translator.takeIf { offersInput }, Modifier.align(Alignment.TopStart))
+                VideoCanvas(
+                    source = source,
+                    imageWidth = config?.pixelWidth ?: 0,
+                    imageHeight = config?.pixelHeight ?: 0,
+                    sessionGuid = session.guid,
+                    onCanvasSize = {},
+                    onTap = { if (currentTarget != null) keyboard.show() },
+                    bottomInset = keyboardOverlap,
+                )
+                liveOverlay(live, canFit, session.guid)?.let { overlay ->
+                    OverlayCard(
+                        overlay = overlay,
+                        busy = live is LiveViewState.Starting || live is LiveViewState.Reconnecting,
+                        onAction = { action ->
+                            when (action) {
+                                OverlayAction.BACK -> actions.back()
+                                OverlayAction.RETRY, OverlayAction.RESTART -> actions.retry()
+                                OverlayAction.FIT -> fit()
+                            }
+                        },
+                        modifier = Modifier.align(Alignment.Center),
                     )
-                    liveOverlay(live, canFit, session.guid)?.let { overlay ->
-                        OverlayCard(
-                            overlay = overlay,
-                            busy = live is LiveViewState.Starting || live is LiveViewState.Reconnecting,
-                            onAction = { action ->
-                                when (action) {
-                                    OverlayAction.BACK -> actions.back()
-                                    OverlayAction.RETRY, OverlayAction.RESTART -> actions.retry()
-                                    OverlayAction.FIT -> fit()
-                                }
-                            },
-                            modifier = Modifier.align(Alignment.Center),
-                        )
-                    }
-                    browserNote(session, macRevision)?.let { note ->
-                        Text(
-                            text = note,
-                            color = Color.White,
-                            style = MaterialTheme.typography.labelLarge,
-                            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
-                        )
-                    }
-                    if (debugBuild && videoStatsShown) {
-                        VideoStatsOverlay(source, Modifier.align(Alignment.TopStart).padding(8.dp))
-                    }
                 }
+                browserNote(session, macRevision)?.let { note ->
+                    Text(
+                        text = note,
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+                    )
+                }
+                if (debugBuild && videoStatsShown) {
+                    VideoStatsOverlay(source, Modifier.align(Alignment.TopStart).padding(8.dp))
+                }
+            }
+            // Over the picture, just above the keyboard: the canvas keeps its size and lifts instead.
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .imePadding()
+                    .onSizeChanged { keyBarHeight = it.height },
+            ) {
                 KeyBarSlot(
                     shown = offersInput && !composerOpen,
                     modifiers = modifiers,

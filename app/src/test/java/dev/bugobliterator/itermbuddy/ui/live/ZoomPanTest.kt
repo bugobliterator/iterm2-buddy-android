@@ -223,4 +223,87 @@ class ZoomPanTest {
         val envelope = file.getValue("json").toString().toByteArray()
         return (decodeEnvelope(envelope).second as MacMessage.StreamConfigMessage).config
     }
+
+    // ---- Keyboard lift: a bottom inset (IME plus key bar overlapping the canvas) ----
+
+    /** A tall image filling a 500×1000 view at fit: fit rect (0, 0, 500, 1000). */
+    private val tallFit = fitRect(1000, 2000, 500f, 1000f)
+
+    private fun bottomOf(state: ZoomState, fit: FitRect) = state.offsetY + state.scale * (fit.top + fit.height)
+
+    @Test
+    fun liftedFitSitsAboveTheKeyboard() {
+        val lifted = liftForKeyboard(ZoomState.FIT, tallFit, 500f, 1000f, fromInset = 0f, toInset = 300f)
+        assertEquals(1f, lifted.scale, eps)
+        assertEquals(-300f, lifted.offsetY, eps)
+        assertEquals("the image bottom is at viewH - inset", 700f, bottomOf(lifted, tallFit), eps)
+        // Part way through the IME animation it follows the inset.
+        assertEquals(-150f, liftForKeyboard(ZoomState.FIT, tallFit, 500f, 1000f, 0f, 150f).offsetY, eps)
+        // Clamping with the inset keeps the lift.
+        assertEquals(lifted, clampZoom(lifted, tallFit, 500f, 1000f, bottomInset = 300f))
+    }
+
+    @Test
+    fun panningUpShowsTheTopWhileLifted() {
+        val lifted = liftForKeyboard(ZoomState.FIT, tallFit, 500f, 1000f, 0f, 300f)
+        val top = applyGesture(lifted, 250f, 500f, 1f, 0f, 500f, tallFit, 500f, 1000f, maxScale = 4f, bottomInset = 300f)
+        assertEquals("the top is reachable, and no further", 0f, top.offsetY, eps)
+        val back = applyGesture(top, 250f, 500f, 1f, 0f, -1000f, tallFit, 500f, 1000f, maxScale = 4f, bottomInset = 300f)
+        assertEquals("and back down only to the keyboard's edge", 700f, bottomOf(back, tallFit), eps)
+        // Without the inset the bottom cannot go above the view's bottom.
+        val noInset = applyGesture(ZoomState.FIT, 250f, 500f, 1f, 0f, -300f, tallFit, 500f, 1000f, maxScale = 4f)
+        assertEquals(ZoomState.FIT, noInset)
+    }
+
+    @Test
+    fun closingTheKeyboardReturnsToFit() {
+        val lifted = liftForKeyboard(ZoomState.FIT, tallFit, 500f, 1000f, 0f, 300f)
+        assertEquals(ZoomState.FIT, liftForKeyboard(lifted, tallFit, 500f, 1000f, 300f, 0f))
+        val pannedUp = lifted.copy(offsetY = 0f)
+        assertEquals(ZoomState.FIT, liftForKeyboard(pannedUp, tallFit, 500f, 1000f, 300f, 0f))
+    }
+
+    @Test
+    fun zoomedOnTheBottomStaysPinned() {
+        val atBottom = ZoomState(2f, -250f, -1000f)
+        assertEquals(atBottom, clampZoom(atBottom, tallFit, 500f, 1000f))
+        val lifted = liftForKeyboard(atBottom, tallFit, 500f, 1000f, 0f, 300f)
+        assertEquals(700f, bottomOf(lifted, tallFit), eps)
+        assertEquals(atBottom.offsetX, lifted.offsetX, eps)
+        // Viewing the middle: the keyboard covers what it covers, nothing moves.
+        val middle = ZoomState(2f, -250f, -500f)
+        assertEquals(middle, liftForKeyboard(middle, tallFit, 500f, 1000f, 0f, 300f))
+    }
+
+    @Test
+    fun shortImageIsCentredAboveTheKeyboard() {
+        val wide = fitRect(2000, 1000, 500f, 1000f) // (0, 375, 500, 250)
+        val lifted = liftForKeyboard(ZoomState.FIT, wide, 500f, 1000f, 0f, 400f)
+        assertEquals("centred in the 600 px left above the keyboard", -200f, lifted.offsetY, eps)
+        assertTrue(bottomOf(lifted, wide) <= 600f + eps)
+        assertEquals(ZoomState.FIT, liftForKeyboard(lifted, wide, 500f, 1000f, 400f, 0f))
+    }
+
+    @Test
+    fun aKeyboardTallerThanTheViewNeverThrows() {
+        val lifted = liftForKeyboard(ZoomState.FIT, tallFit, 500f, 1000f, 0f, 1500f)
+        assertTrue(lifted.offsetY.isFinite())
+        assertTrue(liftForKeyboard(ZoomState.FIT, FitRect.EMPTY, 0f, 0f, 0f, 300f).offsetY.isFinite())
+    }
+
+    @Test
+    fun toggleZoomBackToFitStaysLifted() {
+        val zoomed = toggleZoom(ZoomState.FIT, 250f, 600f, tallFit, 500f, 1000f, maxScale = 4f, bottomInset = 300f)
+        assertTrue(zoomed.scale > 1f)
+        val back = toggleZoom(zoomed, 250f, 600f, tallFit, 500f, 1000f, maxScale = 4f, bottomInset = 300f)
+        assertEquals(1f, back.scale, eps)
+        assertEquals(700f, bottomOf(back, tallFit), eps)
+    }
+
+    @Test
+    fun tapsMapThroughTheLift() {
+        val lifted = liftForKeyboard(ZoomState.FIT, tallFit, 500f, 1000f, 0f, 300f)
+        assertPoint(500f to 600f, under(250f, 0f, lifted, tallFit, 1000, 2000))
+        assertPoint(500f to 1998f, under(250f, 699f, lifted, tallFit, 1000, 2000))
+    }
 }
