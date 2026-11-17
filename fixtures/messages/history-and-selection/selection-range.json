@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.selectionRange(streamID: 1, range: Optional(WireFixtures.CompanionSelectionRange(start: WireFixtures.CompanionSelectionPoint(absLine: 4010, column: 2), end: WireFixtures.CompanionSelectionPoint(absLine: 4011, column: 41)))))",
+  "json" : {"payload":{"selectionRange":{"range":{"end":{"absLine":4011,"column":41},"start":{"absLine":4010,"column":2}},"streamID":1}}}
+}

@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: Optional(7), payload: WireFixtures.CompanionHostMessage.historyTile(WireFixtures.CompanionHistoryTile(streamID: 1, generationId: 1, firstAbsLine: 3100, lineCount: 0, windowFirstAbsLine: 3100, windowLineCount: 1025, pngData: 0 bytes)))",
+  "json" : {"payload":{"historyTile":{"_0":{"firstAbsLine":3100,"generationId":1,"lineCount":0,"pngData":"","streamID":1,"windowFirstAbsLine":3100,"windowLineCount":1025}}},"requestID":7}
+}

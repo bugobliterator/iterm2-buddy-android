@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: nil, payload: WireFixtures.CompanionClientMessage.reportScrollWheel(streamID: 1, up: true, lines: 3))",
+  "json" : {"payload":{"reportScrollWheel":{"lines":3,"streamID":1,"up":true}}}
+}

@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: Optional(8), payload: WireFixtures.CompanionClientMessage.copySelection(sessionGuid: \"ptys_7K2M9Q4R8T1VH\"))",
+  "json" : {"payload":{"copySelection":{"sessionGuid":"ptys_7K2M9Q4R8T1VH"}},"requestID":8}
+}

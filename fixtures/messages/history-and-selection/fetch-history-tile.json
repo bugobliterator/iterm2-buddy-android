@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: Optional(7), payload: WireFixtures.CompanionClientMessage.fetchHistoryTile(streamID: 1, firstAbsLine: 3000, lineCount: 50, generationId: 1))",
+  "json" : {"payload":{"fetchHistoryTile":{"firstAbsLine":3000,"generationId":1,"lineCount":50,"streamID":1}},"requestID":7}
+}
