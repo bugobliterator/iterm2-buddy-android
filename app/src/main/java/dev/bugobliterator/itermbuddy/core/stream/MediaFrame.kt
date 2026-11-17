@@ -195,3 +195,32 @@ fun parseMediaFrame(bytes: ByteArray, offset: Int = 0): MediaFrame {
         bytes.copyOfRange(offset + headerSize, bytes.size),
     )
 }
+
+/**
+ * What can still be read from the header of a media frame [parseMediaFrame] rejects: the
+ * [streamID] and [ptsMilliseconds] when the version byte is 1 or 2 and enough bytes are present
+ * to cover each field, else null. A version this build does not know has an unknown layout, so
+ * nothing is read from it.
+ */
+data class MediaFrameHeaderPeek(val streamID: Long?, val ptsMilliseconds: Long?)
+
+/**
+ * Reads [MediaFrameHeaderPeek] from the frame at [offset] (after the channel marker), without
+ * validating the rest. For recovery from a frame that does not parse: ack its pts when it is
+ * readable and ask for a keyframe. A pts with the top bit set reads as null.
+ *
+ * @throws IllegalArgumentException when [offset] is outside `0..bytes.size`.
+ */
+fun peekMediaFrameHeader(bytes: ByteArray, offset: Int = 0): MediaFrameHeaderPeek {
+    require(offset in 0..bytes.size) { "offset $offset outside 0..${bytes.size}" }
+    val size = bytes.size - offset
+    if (size < 1) return MediaFrameHeaderPeek(null, null)
+    val version = bytes[offset].toInt() and 0xFF
+    if (version != MediaFrame.VERSION_LEGACY && version != MediaFrame.VERSION_CURRENT) return MediaFrameHeaderPeek(null, null)
+    val streamID = if (size >= PEEK_STREAM_ID_END) readU32(bytes, offset + 2) else null
+    val pts = if (size >= PEEK_PTS_END) readU64(bytes, offset + 10).takeIf { it >= 0 } else null
+    return MediaFrameHeaderPeek(streamID, pts)
+}
+
+private const val PEEK_STREAM_ID_END = 6
+private const val PEEK_PTS_END = 18

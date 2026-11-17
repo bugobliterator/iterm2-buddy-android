@@ -40,6 +40,12 @@ class FakeVideoOutput(private val nowMillis: () -> Long) : VideoOutput {
     /** When set, [submit] blocks on it before doing anything: a decoder whose input is stuck. */
     @Volatile var submitLatch: CountDownLatch? = null
 
+    /** When true, [reset] throws (after counting), as a codec released twice might. */
+    @Volatile var throwOnReset = false
+
+    /** When true, [readiness] throws. */
+    @Volatile var throwOnReadiness = false
+
     @Volatile var maxDecoderSize: Pair<Int, Int>? = 4096 to 4096
 
     private val lock = Any()
@@ -67,6 +73,7 @@ class FakeVideoOutput(private val nowMillis: () -> Long) : VideoOutput {
     }
 
     override fun readiness(): VideoReadiness = synchronized(lock) {
+        if (throwOnReadiness) throw IllegalStateException("readiness failed")
         if (readinessValue == VideoReadiness.Ready && !surfaceAttached) VideoReadiness.WaitingForSurface else readinessValue
     }
 
@@ -102,6 +109,7 @@ class FakeVideoOutput(private val nowMillis: () -> Long) : VideoOutput {
             pending.clear()
             lastOutputAt = Long.MIN_VALUE
         }
+        if (throwOnReset) throw IllegalStateException("reset failed")
     }
 
     override fun setKeyframeRequester(request: () -> Unit) {

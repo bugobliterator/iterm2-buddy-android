@@ -20,6 +20,11 @@ sealed interface VideoReadiness {
  * `CompanionVideoView` (`configure`, `enqueue`, `reset`, `onNeedsKeyframe`,
  * `IOS/Screens/CompanionVideoView.swift:65-185`). Calls come from the controller's single
  * consumer; the keyframe requester may be called from any thread.
+ *
+ * Implementations should not throw: a codec failure is reported through the return values, the
+ * readiness and the keyframe requester. The controller still guards every call: a throwing
+ * [configure] reads as [VideoReadiness.NoDecoder], a throwing [submit] as false, a throwing
+ * [readiness] as not ready, and a throwing [reset] is logged and skipped.
  */
 interface VideoOutput {
     /**

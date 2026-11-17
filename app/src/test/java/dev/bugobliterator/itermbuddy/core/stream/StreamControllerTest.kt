@@ -114,6 +114,7 @@ class StreamControllerTest {
             timeouts,
             nowMillis = { test.currentTime },
             log = { logs += it },
+            ackContext = EmptyCoroutineContext,
         )
         val mac = FakeMac(relay, code, macKeys.first, test.backgroundScope)
 
@@ -269,7 +270,8 @@ class StreamControllerTest {
         h.video.submitResult = { throw IllegalStateException("codec released") }
         h.mac.startStreaming((1..5).map { frame(1, it * 33L) }, 33)
         advanceTimeBy(500)
-        assertEquals(listOf(0L) + (1..5).map { it * 33L }, h.ackPts())
+        // The Mac answers the request with a keyframe at pts 34, which is acked too.
+        assertEquals(listOf(0L) + (1..5).map { it * 33L }, h.ackPts().filter { it % 33 == 0L })
         assertEquals(1, h.keyframeRequests())
         assertTrue(h.state is LiveViewState.Live)
     }
@@ -282,7 +284,8 @@ class StreamControllerTest {
         h.video.requestOnSubmit = true
         h.mac.startStreaming((1..30).map { frame(1, it * 33L) }, 33)
         advanceTimeBy(1000)
-        assertEquals(30, h.video.submits.size - 1)
+        // The 30 frames, plus the keyframes the Mac answered requests with.
+        assertEquals(30, h.video.submits.count { it.ptsMilliseconds % 33 == 0L } - 1)
         assertEquals("one per 500 ms over a second of failures", 2, h.keyframeRequests())
     }
 
@@ -306,16 +309,27 @@ class StreamControllerTest {
     fun fakeMacLimiterHoldsFramesWhenAcksStop() = runTest {
         val h = Harness(this)
         h.connect()
-        val started = h.client.request(PhoneMessage.StartSessionStream(A.guid)) as MacMessage.StreamStarted
-        h.client.send(PhoneMessage.StreamAck(started.streamID, 0, 0))
+        // A stream the phone never adopted, so only the test acks it.
+        val streamID = h.mac.beginStream()
+        h.client.send(PhoneMessage.StreamAck(streamID, 0, 0))
         runCurrent()
-        val frames = (1..60).map { frame(started.streamID, it * 33L, keyframe = it == 45) }
+        val frames = (1..60).map { frame(streamID, it * 33L, keyframe = it == 45) }
         h.mac.startStreaming(frames, 33)
         advanceTimeBy(60 * 33 + 1000L)
-        // pts 33..528 go (each sent while the lag before it is ≤ 500); then P-frames are held, the
-        // keyframe at 45 still goes, and the P-frames after it are held too.
-        assertEquals(16 + 1, h.mac.sentFrameCount)
-        assertEquals(60 - 17, h.mac.heldFrameCount)
+        // pts 33..528 go (each sent while the lead before it is ≤ 500); then everything is held,
+        // the unrequested keyframe at 45 included, and no insurance keyframe goes while blocked.
+        assertEquals(16, h.mac.sentFrameCount)
+        assertEquals(60 - 16, h.mac.heldFrameCount)
+        assertEquals(0, h.mac.insuranceKeyframeCount)
+        // An ack for another stream does not unblock this one.
+        h.client.send(PhoneMessage.StreamAck(streamID + 1, 5000, 0))
+        h.mac.startStreaming(listOf(frame(streamID, 3000)), 33)
+        advanceTimeBy(100)
+        assertEquals(16, h.mac.sentFrameCount)
+        // A requested keyframe bypasses the limiter, with the config before it.
+        h.client.send(PhoneMessage.RequestKeyframe(streamID))
+        runCurrent()
+        assertEquals(1, h.mac.keyframeAnswerCount)
     }
 
     @Test
@@ -706,6 +720,296 @@ class StreamControllerTest {
     }
 
     @Test
+    fun unparseableFramesAreAckedWhenReadableAndRecovered() = runTest {
+        val h = Harness(this)
+        h.openLive()
+        val requests = h.keyframeRequests()
+        // Version 3: nothing in the header can be trusted, so no ack, but a keyframe request.
+        h.mac.sendRaw(byteArrayOf(0x01) + frame(1, 10_000, keyframe = true).also { it[0] = 3 })
+        runCurrent()
+        assertTrue(10_000L !in h.ackPts())
+        assertEquals(requests + 1, h.keyframeRequests())
+        assertEquals(1, h.mac.keyframeAnswerCount)
+        advanceTimeBy(600)
+        // A payload-length mismatch: the header is readable, so its pts is acked.
+        h.mac.sendRaw(byteArrayOf(0x01) + frame(1, 10_033, keyframe = true).copyOf(34 + 8))
+        runCurrent()
+        assertTrue(10_033L in h.ackPts())
+        assertEquals(requests + 2, h.keyframeRequests())
+        // Another stream's unparseable frame is ignored.
+        h.mac.sendRaw(byteArrayOf(0x01) + frame(7, 20_000).copyOf(34 + 8))
+        advanceTimeBy(1000)
+        assertTrue(20_000L !in h.ackPts())
+        assertEquals(requests + 2, h.keyframeRequests())
+        assertTrue(h.state is LiveViewState.Live)
+    }
+
+    /**
+     * With the Mac's real limiter: after an idle gap a keyframe arrives corrupted, so the phone
+     * cannot ack it and the Mac blocks (lead over 500 ms, no insurance while blocked). The phone's
+     * keyframe request is answered with config and a keyframe that bypasses the limiter; its ack
+     * unblocks the stream.
+     */
+    @Test
+    fun frozenStreamRecoversThroughKeyframeRequest() = runTest {
+        val h = Harness(this)
+        h.openLive()
+        h.mac.startStreaming((1..5).map { frame(1, it * 33L) }, 33)
+        advanceTimeBy(1500) // the insurance keyframe goes at pts 465 and is acked
+        h.mac.sendCorruptedMedia(frame(1, 1200, keyframe = true))
+        runCurrent()
+        assertEquals(1, h.mac.keyframeAnswerCount)
+        val later = (1..10).map { frame(1, 1200 + it * 33L) }
+        h.mac.startStreaming(later, 33)
+        advanceTimeBy(1000)
+        assertEquals(0, h.mac.heldFrameCount)
+        assertEquals(10, h.mac.sentFrameCount - 5)
+        assertTrue((1..10).all { (1200L + it * 33) in h.video.submits.map { f -> f.ptsMilliseconds } })
+        assertTrue(1201L in h.ackPts())
+    }
+
+    /** Rotation: a request at t=0, the surface detached and back at t=200; the reattach's request goes at t=500, not never. */
+    @Test
+    fun keyframeRequestSuppressedByTheLimitIsDeferred() = runTest {
+        val h = Harness(this)
+        h.openLive()
+        h.video.requestKeyframe()
+        runCurrent()
+        assertEquals(1, h.keyframeRequests())
+        h.video.detachSurface()
+        advanceTimeBy(200)
+        h.video.attachSurface()
+        runCurrent()
+        assertEquals(1, h.keyframeRequests())
+        advanceTimeBy(299)
+        runCurrent()
+        assertEquals(1, h.keyframeRequests())
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(2, h.keyframeRequests())
+        advanceTimeBy(5000)
+        assertEquals("deferred once, not repeated", 2, h.keyframeRequests())
+    }
+
+    @Test
+    fun throwingConfigureFailsAsNoDecoder() = runTest {
+        val h = Harness(this)
+        h.video.configureResult = { throw IllegalStateException("MediaCodec.configure failed") }
+        h.connect()
+        h.controller.open(A)
+        runCurrent()
+        assertEquals(LiveViewState.Failed(A, LiveProblem.NoDecoder), h.state)
+        assertNotNull(h.active?.config)
+        h.mac.sendMedia(frame(1, 0, keyframe = true))
+        runCurrent()
+        assertEquals(listOf(0L), h.ackPts())
+    }
+
+    @Test
+    fun throwingResetStillCompletesEachTransition() = runTest {
+        val h = Harness(this)
+        h.openLive()
+        h.video.throwOnReset = true
+        h.controller.pause()
+        runCurrent()
+        assertEquals(LiveViewState.Paused(A), h.state)
+        assertEquals(listOf(1L), h.stops())
+        h.controller.resume()
+        runCurrent()
+        assertEquals(2L, h.active?.streamID)
+        assertTrue(h.state is LiveViewState.Live)
+        h.controller.retry()
+        runCurrent()
+        assertEquals(listOf(1L, 2L), h.stops())
+        assertEquals(3L, h.active?.streamID)
+        h.controller.close()
+        runCurrent()
+        assertEquals(LiveViewState.Closed, h.state)
+        assertNull(h.active)
+        assertEquals(listOf(1L, 2L, 3L), h.stops())
+        assertTrue(h.logs.any { it == "the video output failed on reset: IllegalStateException" })
+    }
+
+    @Test
+    fun throwingReadinessSkipsTheKeyframeRequest() = runTest {
+        val h = Harness(this)
+        h.openLive()
+        h.video.throwOnReadiness = true
+        h.video.requestKeyframe()
+        h.mac.sendMedia(frame(1, 33))
+        runCurrent()
+        assertEquals(0, h.keyframeRequests())
+        assertEquals(listOf(0L, 33L), h.ackPts())
+        assertTrue(h.state is LiveViewState.Live)
+    }
+
+    @Test
+    fun configResendKeepsTheStalledLabelWithoutFlicker() = runTest {
+        val h = Harness(this)
+        h.openLive()
+        h.video.autoOutput = false
+        h.mac.sendMedia(frame(1, 33))
+        advanceTimeBy(1100)
+        assertEquals(true, (h.state as LiveViewState.Live).stalled)
+        val stalledFlags = CopyOnWriteArrayList<Boolean?>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            h.controller.state.collect { stalledFlags += (it as? LiveViewState.Live)?.stalled }
+        }
+        h.mac.sendStreamConfig(1)
+        runCurrent()
+        advanceTimeBy(300)
+        assertEquals(listOf<Boolean?>(true), stalledFlags.distinct())
+    }
+
+    /** Android addition: an output that refuses every frame while Ready is labelled stalled after stallAfter. */
+    @Test
+    fun refusedFramesWhileReadyAreLabelledStalled() = runTest {
+        val h = Harness(this)
+        h.openLive()
+        h.video.submitResult = { false }
+        h.mac.startStreaming((1..20).map { frame(1, it * 33L) }, 33)
+        advanceTimeBy(900)
+        assertEquals(false, (h.state as LiveViewState.Live).stalled)
+        advanceTimeBy(300)
+        assertEquals(true, (h.state as LiveViewState.Live).stalled)
+        h.video.submitResult = null
+        h.mac.sendMedia(frame(1, 5000, keyframe = true))
+        advanceTimeBy(300)
+        assertEquals(false, (h.state as LiveViewState.Live).stalled)
+    }
+
+    @Test
+    fun pauseThenResumeBeforeReplyAdopts() = runTest {
+        val h = Harness(this)
+        h.connect()
+        h.mac.delayReply("startSessionStream", 1.seconds)
+        h.controller.open(A)
+        runCurrent()
+        h.controller.pause()
+        runCurrent()
+        assertEquals(LiveViewState.Paused(A), h.state)
+        h.controller.resume()
+        runCurrent()
+        advanceTimeBy(1500)
+        assertEquals(1, h.starts().size)
+        assertEquals(emptyList<Long>(), h.stops())
+        assertTrue(h.state is LiveViewState.Live)
+    }
+
+    @Test
+    fun replyWhilePausedIsStoppedAndResumeRestarts() = runTest {
+        val h = Harness(this)
+        h.connect()
+        h.mac.delayReply("startSessionStream", 1.seconds)
+        h.controller.open(A)
+        runCurrent()
+        h.controller.pause()
+        runCurrent()
+        advanceTimeBy(1500)
+        assertEquals(listOf(1L), h.stops())
+        assertEquals(LiveViewState.Paused(A), h.state)
+        assertEquals(1, h.starts().size)
+        h.controller.resume()
+        runCurrent()
+        assertEquals(2, h.starts().size)
+        assertTrue(h.state is LiveViewState.Live)
+    }
+
+    @Test
+    fun linkUpWithMissedLinkDownAndUnknownLinkDown() = runTest {
+        val link = ScriptedStreamLink()
+        val video = FakeVideoOutput { currentTime }
+        val controller = StreamController(
+            link, video, backgroundScope, nowMillis = { currentTime }, log = {}, ackContext = EmptyCoroutineContext,
+        )
+        makeLive(controller, link)
+        controller.accept(StreamInput.LinkDown(99))
+        runCurrent()
+        assertTrue(controller.state.value is LiveViewState.Live)
+        assertEquals(1L, controller.activeStream.value?.linkId)
+        // Link 1's LinkDown is missed; LinkUp(2) supersedes it: no stop on the dead link, a new start on 2.
+        link.currentLink = 2
+        controller.accept(StreamInput.LinkUp(2, FakeMac.MAC_REVISION))
+        runCurrent()
+        val pending = link.requests.tryReceive().getOrNull()
+        assertEquals(2L, pending?.onLink)
+        assertNull(controller.activeStream.value)
+        assertTrue(link.sent.none { it.message is PhoneMessage.StopSessionStream })
+        val submits = video.submits.size
+        controller.accept(StreamInput.Media(1, byteArrayOf(0x01) + frame(1, 500)))
+        controller.accept(StreamInput.LinkDown(1))
+        runCurrent()
+        assertEquals(submits, video.submits.size)
+        assertEquals(LiveViewState.Starting(A), controller.state.value)
+    }
+
+    @Test
+    fun otherErrorReplyFailsRetryablyWithoutLooping() = runTest {
+        val h = Harness(this)
+        h.mac.startError = "messages/session/error-reply.json"
+        h.connect()
+        h.controller.open(A)
+        runCurrent()
+        assertEquals(LiveViewState.Failed(A, LiveProblem.StartFailed(retryable = true)), h.state)
+        advanceTimeBy(30.seconds)
+        assertEquals(1, h.starts().size)
+        h.controller.retry()
+        runCurrent()
+        assertEquals(2, h.starts().size)
+        assertEquals(LiveViewState.Failed(A, LiveProblem.StartFailed(retryable = true)), h.state)
+        h.mac.startError = null
+        h.mac.dropSocket()
+        h.awaitConnected(2)
+        assertEquals(3, h.starts().size)
+        assertTrue(h.state is LiveViewState.Live)
+    }
+
+    @Test
+    fun openOtherSessionWhileLiveStopsThenStarts() = runTest {
+        val h = Harness(this)
+        h.openLive()
+        h.controller.open(B)
+        runCurrent()
+        assertEquals(listOf("startSessionStream", "stopSessionStream", "startSessionStream"), h.streamCases())
+        assertEquals(listOf(1L), h.stops())
+        assertEquals(listOf(A.guid, B.guid), h.startGuids())
+        assertEquals(B.guid, h.active?.sessionGuid)
+        assertEquals(2L, h.active?.streamID)
+        val acks = h.ackPts().size
+        h.mac.sendMedia(frame(1, 777))
+        runCurrent()
+        assertEquals(acks, h.ackPts().size)
+        assertEquals(B, (h.state as LiveViewState.Live).session)
+    }
+
+    @Test
+    fun retryFromFailedAndFromEnded() = runTest {
+        val h = Harness(this)
+        h.connect()
+        h.mac.delayReply("startSessionStream", 20.seconds)
+        h.controller.open(A)
+        runCurrent()
+        advanceTimeBy(15.seconds + 10.milliseconds)
+        assertEquals(LiveViewState.Failed(A, LiveProblem.StartFailed(retryable = true)), h.state)
+        h.controller.retry()
+        runCurrent()
+        assertEquals(2, h.starts().size)
+        assertEquals(2L, h.active?.streamID)
+        assertTrue(h.state is LiveViewState.Live)
+        h.mac.sendStreamEnded(2, "sessionClosed")
+        runCurrent()
+        assertEquals(LiveViewState.Ended(A, StreamEndReason.SESSION_CLOSED), h.state)
+        h.controller.retry()
+        runCurrent()
+        assertEquals(3, h.starts().size)
+        assertEquals(3L, h.active?.streamID)
+        assertTrue(h.state is LiveViewState.Live)
+        advanceTimeBy(10.seconds) // A's late reply (stream 1) is stopped, not adopted
+        assertEquals(listOf(1L), h.stops())
+        assertEquals(3L, h.active?.streamID)
+    }
+
+    @Test
     fun liveViewStateToStringHidesSessionName() {
         val session = SessionSummary("guid-sentinel", SENTINEL, SENTINEL, isBrowser = false)
         val config = fixtureConfig()
@@ -741,6 +1045,7 @@ class StreamControllerTest {
                 budgets = StreamBudgets(inboxMediaBytes = MIB),
                 nowMillis = { 0L },
                 log = {},
+                ackContext = EmptyCoroutineContext,
             )
             realTime { makeLive(controller, link) }
             val latch = CountDownLatch(1)
@@ -784,6 +1089,7 @@ class StreamControllerTest {
             budgets = StreamBudgets(inboxMediaBytes = MIB),
             nowMillis = { currentTime },
             log = {},
+            ackContext = EmptyCoroutineContext,
         )
         makeLive(controller, link)
         controller.accept(StreamInput.Media(1, byteArrayOf(0x01) + frame(1, 10, payload = 100 * KIB)))
