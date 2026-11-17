@@ -14,6 +14,8 @@ import com.google.mlkit.common.MlKitException
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import dev.bugobliterator.itermbuddy.core.input.InputTarget
+import dev.bugobliterator.itermbuddy.core.input.KeyEvent
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.ui.AppRoot
 import dev.bugobliterator.itermbuddy.ui.PairingActions
@@ -65,6 +67,12 @@ class MainActivity : ComponentActivity() {
             app.fitToPhone(sessionGuid, viewportWidthPx, viewportHeightPx)
 
         override fun setVideoStatsShown(shown: Boolean) = app.setVideoStatsShown(shown)
+
+        override fun key(target: InputTarget, event: KeyEvent) = app.input.key(target, event)
+
+        override fun paste(target: InputTarget, text: String) = app.input.paste(target, text)
+
+        override fun pasteThenReturn(target: InputTarget, text: String) = app.input.pasteThenReturn(target, text)
 
         override fun refresh() = app.sessions.repository.refresh()
 
