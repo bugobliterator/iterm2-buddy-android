@@ -98,6 +98,9 @@ class HistorySelectionMessagesTest {
         "history-tile-evicted" to { _ ->
             7L to MacMessage.HistoryTileMessage(HistoryTile(1, 1, 3100, 0, 3100, 1025, ByteArray(0)))
         },
+        "history-tile-clamped" to { _ ->
+            7L to MacMessage.HistoryTileMessage(HistoryTile(1, 1, 3080, 20, 3080, 1025, samplePng))
+        },
         "stream-extent" to { _ -> null to MacMessage.StreamExtent(1, firstAbsLine = 3100, totalLines = 1025) },
         "selection-range" to { _ -> null to MacMessage.SelectionRange(1, SelectionSpan(anchor, live)) },
         "selection-range-cleared" to { _ -> null to MacMessage.SelectionRange(1, null) },
@@ -176,6 +179,11 @@ class HistorySelectionMessagesTest {
         assertEquals(HistoryTile(1, 1, 3000, 50, 3000, 1025, samplePng), tile)
         assertEquals(hash, tile.hashCode())
         assertEquals(samplePng.size, tile.pngSize)
+        val (offset, length) = tile.withPng { bytes, offset, length ->
+            assertArrayEquals(samplePng, bytes.copyOfRange(offset, offset + length))
+            offset to length
+        }
+        assertEquals(0 to samplePng.size, offset to length)
     }
 
     @Test
@@ -226,6 +234,11 @@ class HistorySelectionMessagesTest {
     fun streamIdsAreCheckedOnEncode() {
         val point = SelectionPoint(0, 0)
         val messages = listOf(
+            PhoneMessage.FetchHistoryTile(1, 3000, 0, 1),
+            PhoneMessage.FetchHistoryTile(1, 3000, -1, 1),
+            PhoneMessage.FetchHistoryTile(1, 3000, 201, 1),
+            PhoneMessage.ReportScrollWheel(1, true, 0),
+            PhoneMessage.ReportScrollWheel(1, false, -2),
             PhoneMessage.FetchHistoryTile(4294967296, 0, 50, 1),
             PhoneMessage.FetchHistoryTile(1, 0, 50, -1),
             PhoneMessage.ReportScrollWheel(-1, true, 1),
@@ -236,5 +249,9 @@ class HistorySelectionMessagesTest {
         for (message in messages) {
             assertThrows("$message", IllegalArgumentException::class.java) { message.payload() }
         }
+        // The bounds themselves are accepted.
+        PhoneMessage.FetchHistoryTile(1, 3000, 1, 1).payload()
+        PhoneMessage.FetchHistoryTile(1, 3000, 200, 1).payload()
+        PhoneMessage.ReportScrollWheel(1, true, 1).payload()
     }
 }

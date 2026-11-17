@@ -380,6 +380,36 @@ class MediaChannelTest {
     }
 
     @Test
+    fun orphanHistoryTileReplyNeverReachesEvents() = runTest {
+        val h = Harness(this)
+        h.connect()
+        h.mac.onRequest("fetchHistoryTile") { null }
+        var sentID = -1L
+        val failure = runCatching {
+            h.client.request(PhoneMessage.FetchHistoryTile(1, 3000, 50, 1), timeout = 1.seconds, onSent = { sentID = it })
+        }.exceptionOrNull()
+        assertTrue("$failure", failure is CompanionRequestException)
+
+        h.mac.sendSample("messages/history-and-selection/history-tile.json", sentID)
+        h.mac.sendSample("messages/history-and-selection/selection-text.json", sentID + 100)
+        runCurrent()
+        assertTrue("${h.events}", h.events.isEmpty())
+        assertTrue("orphans are not stream inputs", h.recorded.inputs.none { it is StreamInput.Control })
+        val dropped = h.logs.filter { "orphan reply" in it }
+        assertEquals(dropped.toString(), 2, dropped.size)
+        assertTrue(dropped.toString(), dropped.any { "HistoryTileMessage" in it } && dropped.any { "SelectionText" in it })
+        assertTrue("only the kind is logged", h.logs.none { "make test" in it })
+
+        // An unsolicited push still reaches events, and the link is fine.
+        h.mac.sendSample("messages/history-and-selection/selection-range.json", null)
+        h.mac.sendSample("messages/live-session/session-tree-push.json", null)
+        runCurrent()
+        assertEquals(1, h.events.size)
+        assertTrue("${h.events}", h.events.single() is MacMessage.SessionTreeMessage)
+        assertEquals(MacMessage.Pong, h.client.request(PhoneMessage.Ping))
+    }
+
+    @Test
     fun perRequestDeadlineOverridesRpc() = runTest {
         val h = Harness(this, timeouts = ClientTimeouts(rpc = 15.seconds))
         h.connect()

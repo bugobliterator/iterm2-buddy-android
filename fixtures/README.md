@@ -173,6 +173,9 @@ docker run --rm -v "$PWD/fixtures/harness:/harness" -w /harness swift:6.2-noble 
     off; the Mac replies with 0 lines, empty `pngData`, at
     `max(requested, overflow)` (`CompanionHostBridge.swift:2124-2134`).
     `stream-extent` is that trim.
+  - `history-tile-clamped`: a 50-line request at 3050 after the overflow
+    reached 3080, clamped by `CompanionHistoryWindow` to the 20 lines left:
+    the reply starts at 3080, not where the phone asked.
   - `selection-gesture-begin-<mode>` for every `CompanionSelectionMode`
     (iOS itself only begins in `character`); move and end are `character`.
     `selection-range` is the inclusive span after that drag;
