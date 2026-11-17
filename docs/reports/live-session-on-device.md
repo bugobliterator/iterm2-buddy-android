@@ -8,17 +8,17 @@ log lines).
 - Phone and Android version: Pixel 9,
 - iTerm2 version: 3.7.7
 - Relay commit: `b8aa2f9`
-- App build: 0.1.0-ce03c39 (Firebase App Distribution, CI run 44074649885)
+- App build: 0.1.0-cc024f5 (Firebase App Distribution, CI run 44084255050)
 
 ## Prerequisites
 
 - [ ] Tailscale is connected on the Pixel, and the relay is running on the Mac behind
       `tailscale serve`.
 - [ ] The phone is paired and shows the Sessions home screen.
-- [ ] The APKs are the `pairing-apks-ce03c39` artifact of CI run 44074649885:
+- [ ] The APKs are the `pairing-apks-cc024f5` artifact of CI run 44084255050:
 
-      bc606d7b9e7a5357ee60d24e279d1ef97dd3ea6531e239df8e0b88d7506e9124  app-debug.apk
-      b11a0684a0aef556c94a1311db254a142eeeea7132d909a51410296876dc7ea7  app-debug-androidTest.apk
+      14804283aec878c76b6038d09e737699228f48b545eae2e80d88eead8e104ce2  app-debug.apk
+      7771bc2231a3095e956c786554fc53601753bb75174f22dc3a69aa3ecf9a5dee  app-debug-androidTest.apk
 
   Both are signed with the shared debug key, so `adb install -r` keeps the pairing.
 
@@ -55,7 +55,7 @@ without pulling. Pull to refresh works.
 
 ### Live picture
 
-Open a session running `top`. The picture updates about once a second. Record the time from
+Open a session running `top`. The live view fills the screen on a dark background. The picture updates about once a second. Record the time from
 tap to first picture.
 
 **Result:**
