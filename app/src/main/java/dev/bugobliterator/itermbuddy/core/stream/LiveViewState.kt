@@ -11,7 +11,7 @@ sealed interface LiveViewState {
     /** Nothing is watched. */
     data object Closed : LiveViewState
 
-    /** A stream is being started, or has started and waits for its first config. */
+    /** A stream is being started, or has started and waits for its first config (or for one with complete parameter sets). */
     data class Starting(val session: SessionSummary) : LiveViewState
 
     /** Frames are flowing for [config]. [stalled]: the decoder holds a frame it has not output for over `stallAfter`. */

@@ -74,8 +74,9 @@ class FakeCodecHandle(
     private val thread: DecoderThread,
     override val name: String = "fake.hevc",
     private val inputBuffers: Int = 4,
-    private val bufferCapacity: Int = 1 shl 20,
 ) : CodecHandle {
+    /** Input buffer size; by default the configured `KEY_MAX_INPUT_SIZE`, as MediaCodec allocates at least that. */
+    @Volatile var bufferCapacity: Int? = null
     @Volatile private var callback: CodecHandle.Callback? = null
     @Volatile var configuredFormat: CodecFormat? = null
     @Volatile var configuredSurface: Surface? = null
@@ -83,6 +84,9 @@ class FakeCodecHandle(
     @Volatile var released = false
     @Volatile var recycleInputs = true
     @Volatile var throwOnConfigure = false
+
+    /** Thrown from configure when set (once per codec), e.g. an [InsufficientResourceException]. */
+    @Volatile var configureError: RuntimeException? = null
     @Volatile var throwOnQueueInput = false
     @Volatile var throwOnStopAndRelease = false
 
@@ -99,6 +103,7 @@ class FakeCodecHandle(
 
     override fun configure(format: CodecFormat, surface: Surface) {
         if (throwOnConfigure) throw IllegalStateException("injected configure failure")
+        configureError?.let { throw it }
         configuredFormat = format
         configuredSurface = surface
     }
@@ -110,7 +115,7 @@ class FakeCodecHandle(
 
     override fun inputBuffer(index: Int): ByteBuffer? {
         check(!released) { "released" }
-        return buffers.getOrPut(index) { ByteBuffer.allocate(bufferCapacity) }
+        return buffers.getOrPut(index) { ByteBuffer.allocate(bufferCapacity ?: checkNotNull(configuredFormat).maxInputSize) }
     }
 
     override fun queueInput(index: Int, size: Int, presentationTimeUs: Long) {
@@ -167,7 +172,14 @@ class FakeCodecFactory(private val thread: DecoderThread, private val configure:
 }
 
 class FixedCatalog(private val list: List<DecoderInfo>) : HevcDecoderCatalog {
-    override fun decoders(): List<DecoderInfo> = list
+    val calls = AtomicInteger()
+    val callThreads = CopyOnWriteArrayList<String>()
+
+    override fun decoders(): List<DecoderInfo> {
+        calls.incrementAndGet()
+        callThreads += Thread.currentThread().name
+        return list
+    }
 }
 
 fun decoder(
@@ -176,7 +188,8 @@ fun decoder(
     lowLatency: Boolean = true,
     maxWidth: Int = 4096,
     maxHeight: Int = 2304,
-): DecoderInfo = DecoderInfo(name, hardware, lowLatency, maxWidth, maxHeight) { w, h -> w <= maxWidth && h <= maxHeight }
+    supports: (Int, Int) -> Boolean = { w, h -> w <= maxWidth && h <= maxHeight },
+): DecoderInfo = DecoderInfo(name, hardware, lowLatency, maxWidth, maxHeight, supports)
 
 /**
  * A [Surface] for the JVM: the android.jar stub cannot be constructed, so the instance is

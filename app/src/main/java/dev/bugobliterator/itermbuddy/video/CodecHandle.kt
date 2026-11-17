@@ -30,6 +30,8 @@ class CodecFormat(
  * Every call is made on the decoder thread; [setCallback] is called there first, and the
  * callbacks must be delivered on that same thread (the real handle posts them to its looper).
  * Any call may throw a [RuntimeException] (`CodecException`, `IllegalStateException`, ...).
+ * [configure] and [start] throw [InsufficientResourceException] when the codec reports
+ * `ERROR_INSUFFICIENT_RESOURCE`, so the output moves to another decoder at once.
  */
 interface CodecHandle {
     val name: String
@@ -62,6 +64,9 @@ interface CodecHandle {
         fun onOutputFormatChanged(width: Int, height: Int)
     }
 }
+
+/** `CodecException.ERROR_INSUFFICIENT_RESOURCE` from configure or start: this decoder cannot run now. */
+class InsufficientResourceException(cause: Throwable) : IllegalStateException("insufficient resource", cause)
 
 /** The real [CodecHandle]: `MediaCodec.createByCodecName(info.name)`. */
 fun mediaCodecHandle(info: DecoderInfo): CodecHandle = MediaCodecHandle(MediaCodec.createByCodecName(info.name))
@@ -97,10 +102,19 @@ private class MediaCodecHandle(private val codec: MediaCodec) : CodecHandle {
             setInteger(MediaFormat.KEY_PRIORITY, 0)
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, format.maxInputSize)
         }
-        codec.configure(mediaFormat, surface, null, 0)
+        resourceChecked { codec.configure(mediaFormat, surface, null, 0) }
     }
 
-    override fun start() = codec.start()
+    override fun start() = resourceChecked { codec.start() }
+
+    private inline fun resourceChecked(block: () -> Unit) {
+        try {
+            block()
+        } catch (e: MediaCodec.CodecException) {
+            if (e.errorCode == MediaCodec.CodecException.ERROR_INSUFFICIENT_RESOURCE) throw InsufficientResourceException(e)
+            throw e
+        }
+    }
 
     override fun inputBuffer(index: Int): ByteBuffer? = codec.getInputBuffer(index)
 

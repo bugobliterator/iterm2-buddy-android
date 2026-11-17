@@ -647,6 +647,69 @@ class StreamControllerTest {
     }
 
     @Test
+    fun incompleteConfigKeepsStartingAndRequestsAKeyframe() = runTest {
+        val h = Harness(this)
+        val configures = java.util.concurrent.atomic.AtomicInteger()
+        // The first config's parameter sets are incomplete; the one sent with the keyframe is not.
+        h.video.configureResult = {
+            if (configures.getAndIncrement() == 0) VideoReadiness.WaitingForConfig else VideoReadiness.Ready
+        }
+        h.connect()
+        h.controller.open(A)
+        runCurrent()
+        // The request went out (the Mac answers with config and keyframe); still not Failed.
+        assertEquals(1, h.keyframeRequests())
+        assertTrue(h.video.configures.size >= 2)
+        assertTrue("state ${h.state}", h.state is LiveViewState.Live)
+    }
+
+    @Test
+    fun incompleteConfigShowsStarting() = runTest {
+        val h = Harness(this)
+        h.video.configureResult = { VideoReadiness.WaitingForConfig }
+        h.connect()
+        h.controller.open(A)
+        runCurrent()
+        assertEquals(LiveViewState.Starting(A), h.state)
+        // Frames refused while waiting still ask for keyframes, rate-limited.
+        repeat(3) {
+            h.mac.sendMedia(frame(1, 1000L + it * 33L))
+            runCurrent()
+        }
+        assertEquals(LiveViewState.Starting(A), h.state)
+        assertTrue(h.keyframeRequests() >= 1)
+    }
+
+    @Test
+    fun outputRunningOutOfDecodersFailsAsNoDecoder() = runTest {
+        val h = Harness(this)
+        h.openLive()
+        h.video.submitResult = { false }
+        h.video.readinessOverride = VideoReadiness.NoDecoder
+        h.mac.sendMedia(frame(1, 33))
+        runCurrent()
+        assertEquals(LiveViewState.Failed(A, LiveProblem.NoDecoder), h.state)
+    }
+
+    @Test
+    fun noSurfaceIsNeverLabelledStalled() = runTest {
+        val h = Harness(this)
+        h.openLive()
+        h.video.autoOutput = false
+        h.mac.sendMedia(frame(1, 33))
+        runCurrent()
+        h.video.detachSurface()
+        advanceTimeBy(3_000)
+        runCurrent()
+        assertEquals(false, (h.state as LiveViewState.Live).stalled)
+        // Back with a surface and still nothing output: the label comes at the next check.
+        h.video.attachSurface()
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertEquals(true, (h.state as LiveViewState.Live).stalled)
+    }
+
+    @Test
     fun tooLargeFailsWithLimitsAndKeepsConfig() = runTest {
         val h = Harness(this)
         h.video.configureResult = { VideoReadiness.TooLarge(it.pixelWidth, it.pixelHeight, 1024, 768) }

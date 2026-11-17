@@ -31,14 +31,41 @@ android {
         compose = true
     }
 
-    sourceSets {
-        // HevcDecodePathDeviceTest reads the committed clip (terminal-clip.json) from the test APK's assets.
-        getByName("androidTest").assets.directories.add(rootProject.file("fixtures/media/hevc").path)
-    }
 }
 
 kotlin {
     jvmToolchain(17)
+}
+
+/** Copies the one fixture the device test reads into a generated androidTest assets directory. */
+abstract class CopyHevcClipAssets : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val clip: RegularFileProperty
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun copy() {
+        val out = outputDir.get().asFile
+        out.deleteRecursively()
+        out.mkdirs()
+        clip.get().asFile.copyTo(out.resolve(clip.get().asFile.name))
+    }
+}
+
+val hevcClipAssets = tasks.register<CopyHevcClipAssets>("hevcClipAndroidTestAssets") {
+    // HevcDecodePathDeviceTest reads terminal-clip.json (the clip as the Mac sends it) from the test APK.
+    clip.set(rootProject.layout.projectDirectory.file("fixtures/media/hevc/terminal-clip.json"))
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.deviceTests.values.forEach { deviceTest ->
+            deviceTest.sources.assets?.addGeneratedSourceDirectory(hevcClipAssets, CopyHevcClipAssets::outputDir)
+        }
+    }
 }
 
 dependencies {

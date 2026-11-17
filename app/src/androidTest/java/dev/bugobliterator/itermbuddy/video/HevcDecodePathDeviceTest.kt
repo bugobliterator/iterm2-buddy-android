@@ -80,8 +80,14 @@ class HevcDecodePathDeviceTest {
     fun everyClipFrameIsOutput() {
         val video = start()
         val began = SystemClock.uptimeMillis()
-        clip.frames.forEach { assertTrue(video.submit(it)) }
-        assertTrue("15 images within 2 s, got ${imageCount.get()}", awaitCount(clip.frames.size, began + 2_000))
+        // Paced as the Mac sends them: submitted in one burst, frame 10's IDR would replace frames
+        // still pending in the queue (a keyframe replaces everything pending).
+        clip.frames.forEachIndexed { i, frame ->
+            if (i > 0) SystemClock.sleep(FRAME_GAP_MILLIS)
+            assertTrue(video.submit(frame))
+        }
+        val deadline = began + (clip.frames.size - 1) * FRAME_GAP_MILLIS + 2_000
+        assertTrue("15 images within 2 s, got ${imageCount.get()}", awaitCount(clip.frames.size, deadline))
         clip.frames.forEach { assertNotNull("image for pts ${it.ptsMilliseconds}", arrivals[timestampNs(it)]) }
     }
 
@@ -129,22 +135,23 @@ class HevcDecodePathDeviceTest {
 
         // From configure: attach built a codec whose configure threw.
         assertTrue(awaitTrue { releases.get() == 1 })
+        assertTrue("attach and the failure", awaitTrue { requests.get() == 2 })
         assertEquals(0, video.pendingInputCount())
-        assertEquals("attach and the failure", 2, requests.get())
 
-        // From queueInput.
+        // From queueInput. The second failure with no output moves to the next candidate decoder
+        // (the Pixel lists a hardware and a software HEVC decoder).
         failQueueInput.set(true)
         assertTrue(video.submit(clip.frames[0]))
         assertTrue(awaitTrue { releases.get() == 2 })
+        assertTrue(awaitTrue { requests.get() == 3 })
         assertEquals(0, video.pendingInputCount())
-        assertEquals(3, requests.get())
 
         // From a callback.
         failCallback.set(true)
         assertTrue(video.submit(clip.frames[0]))
         assertTrue(awaitTrue { releases.get() == 3 })
+        assertTrue(awaitTrue { requests.get() == 4 })
         assertEquals(0, video.pendingInputCount())
-        assertEquals(4, requests.get())
 
         assertTrue(video.submit(clip.frames[10]))
         assertNotNull(awaitImage(clip.frames[10], SystemClock.uptimeMillis() + 2_000))
@@ -165,7 +172,11 @@ class HevcDecodePathDeviceTest {
         val clock = AtomicLong(1_000)
         val codecs = CopyOnWriteArrayList<ScriptedCodecHandle>()
         val decoderThread = HandlerDecoderThread("HevcDecodePathDeviceTest.scripted")
-        val video = start(codecFactory = { ScriptedCodecHandle(inputs = 4).also { codecs += it } }, nowMillis = clock::get, decoderThread = decoderThread)
+        val video = start(
+            codecFactory = { ScriptedCodecHandle(inputs = 4).also { codecs += it } },
+            nowMillis = clock::get,
+            decoderThread = decoderThread,
+        )
         assertTrue(video.submit(clip.frames[0]))
         clock.set(1_033)
         assertTrue(video.submit(clip.frames[1]))
@@ -181,9 +192,9 @@ class HevcDecodePathDeviceTest {
         val clock = AtomicLong(1_000)
         val codecs = CopyOnWriteArrayList<ScriptedCodecHandle>()
         val decoderThread = HandlerDecoderThread("HevcDecodePathDeviceTest.scripted")
-        // One input buffer that is never freed again: the first keyframe takes it, the rest wait.
+        // No free input buffer ever: every keyframe waits in the queue and replaces the one before.
         val video = start(
-            codecFactory = { ScriptedCodecHandle(inputs = 1, recycleInputs = false).also { codecs += it } },
+            codecFactory = { ScriptedCodecHandle(inputs = 0, recycleInputs = false).also { codecs += it } },
             nowMillis = clock::get,
             decoderThread = decoderThread,
         )
@@ -194,7 +205,9 @@ class HevcDecodePathDeviceTest {
             assertTrue(video.submit(keyframes[step % 2]))
             drain(decoderThread)
             assertEquals("after ${step * 500} ms", first, video.outputOverdueSinceMillis())
+            assertEquals(1, video.pendingInputCount())
         }
+        assertTrue(codecs.single().queued.isEmpty())
         assertEquals(1, codecs.size)
     }
 

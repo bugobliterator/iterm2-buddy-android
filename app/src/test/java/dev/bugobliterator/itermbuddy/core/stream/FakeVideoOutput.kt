@@ -43,6 +43,9 @@ class FakeVideoOutput(private val nowMillis: () -> Long) : VideoOutput {
     /** When true, [reset] throws (after counting), as a codec released twice might. */
     @Volatile var throwOnReset = false
 
+    /** When set, [readiness] reports this whatever happened before (an output that ran out of decoders, say). */
+    @Volatile var readinessOverride: VideoReadiness? = null
+
     /** When true, [readiness] throws. */
     @Volatile var throwOnReadiness = false
 
@@ -74,6 +77,7 @@ class FakeVideoOutput(private val nowMillis: () -> Long) : VideoOutput {
 
     override fun readiness(): VideoReadiness = synchronized(lock) {
         if (throwOnReadiness) throw IllegalStateException("readiness failed")
+        readinessOverride?.let { return it }
         if (readinessValue == VideoReadiness.Ready && !surfaceAttached) VideoReadiness.WaitingForSurface else readinessValue
     }
 
