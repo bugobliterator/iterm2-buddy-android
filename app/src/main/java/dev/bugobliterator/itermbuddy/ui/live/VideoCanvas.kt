@@ -78,6 +78,17 @@ class LiveVideoSource(val output: HevcVideoOutput, val state: StateFlow<LiveView
  * @param sessionGuid the session shown: the zoom's key and the stale-frame rule's owner.
  * @param onCanvasSize the canvas size in px, on every change.
  * @param onTap a single tap anywhere on the canvas (after the double-tap timeout passes).
+ * @param bottomInset how far, in px, the keyboard and key bar overlap the canvas's bottom. Read
+ *   only while laying out the layer and at each gesture event, never in composition, so the
+ *   picture follows the IME animation frame by frame without recomposing or restarting the
+ *   gesture detectors.
+ *
+ * **Keyboard lift.** The canvas never shrinks for the keyboard. The zoom kept here remembers the
+ * inset it was made for; what is shown is [liftForKeyboard] of it to the current inset, so a
+ * picture whose bottom was in view stays pinned just above the key bar while the keyboard opens
+ * (sliding up, its top may leave the screen), the owner can pan up to the top, and when the
+ * keyboard closes the picture returns to where it was (fit at scale 1). A tap maps to the image
+ * with [viewToImage] of the shown state ([shownZoom]), so it accounts for the lift.
  */
 @Composable
 fun VideoCanvas(
@@ -88,6 +99,7 @@ fun VideoCanvas(
     onCanvasSize: (IntSize) -> Unit,
     modifier: Modifier = Modifier,
     onTap: () -> Unit = {},
+    bottomInset: () -> Float = { 0f },
 ) {
     var canvas by remember { mutableStateOf(IntSize.Zero) }
     val viewW = canvas.width.toFloat()
@@ -99,13 +111,14 @@ fun VideoCanvas(
     val fit = if (image == null) FitRect.EMPTY else fitRect(image.width, image.height, viewW, viewH)
     val surfaceRect = if (fit.isEmpty) FitRect(0f, 0f, viewW, viewH) else fit
     val max = maxScale(image?.width ?: 0, fit)
-    var kept by remember(zoomKey) { mutableStateOf(ZoomState.FIT) }
-    val zoom = clampZoom(kept, fit, viewW, viewH)
+    // Read in the layer and the gesture handlers only (see bottomInset).
+    var kept by remember(zoomKey) { mutableStateOf(KeptZoom(ZoomState.FIT, 0f)) }
     val visible by remember(source, sessionGuid) { source.visibility(sessionGuid) }
         .collectAsStateWithLifecycle(initialValue = source.visible(sessionGuid))
     val density = LocalDensity.current
     val currentOnTap by rememberUpdatedState(onTap)
     val geometry by rememberUpdatedState(GestureGeometry(fit, viewW, viewH, max))
+    val currentInset by rememberUpdatedState(bottomInset)
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -121,14 +134,17 @@ fun VideoCanvas(
             .pointerInput(zoomKey) {
                 detectTransformGestures { centroid, pan, gestureZoom, _ ->
                     val g = geometry
-                    kept = applyGesture(clampZoom(kept, g.fit, g.viewW, g.viewH), centroid.x, centroid.y, gestureZoom, pan.x, pan.y, g.fit, g.viewW, g.viewH, g.max)
+                    val inset = currentInset()
+                    val shown = shownZoom(kept, g, inset)
+                    kept = KeptZoom(applyGesture(shown, centroid.x, centroid.y, gestureZoom, pan.x, pan.y, g.fit, g.viewW, g.viewH, g.max, inset), inset)
                 }
             }
             .pointerInput(zoomKey) {
                 detectTapGestures(
                     onDoubleTap = { tap ->
                         val g = geometry
-                        kept = toggleZoom(clampZoom(kept, g.fit, g.viewW, g.viewH), tap.x, tap.y, g.fit, g.viewW, g.viewH, g.max)
+                        val inset = currentInset()
+                        kept = KeptZoom(toggleZoom(shownZoom(kept, g, inset), tap.x, tap.y, g.fit, g.viewW, g.viewH, g.max, inset), inset)
                     },
                     onTap = { currentOnTap() },
                 )
@@ -136,6 +152,7 @@ fun VideoCanvas(
     ) {
         Box(
             modifier = Modifier.fillMaxSize().graphicsLayer {
+                val zoom = shownZoom(kept, geometry, currentInset())
                 transformOrigin = TransformOrigin(0f, 0f)
                 scaleX = zoom.scale
                 scaleY = zoom.scale
@@ -185,3 +202,10 @@ private fun VideoSurface(output: HevcVideoOutput, modifier: Modifier) {
 
 /** What the gesture detectors read at each event: the current fit, view size and maximum scale. */
 private class GestureGeometry(val fit: FitRect, val viewW: Float, val viewH: Float, val max: Float)
+
+/** A zoom as the owner left it, with the keyboard inset (px) it was made for. */
+internal data class KeptZoom(val state: ZoomState, val inset: Float)
+
+/** What is shown: [kept] lifted from its inset to [inset] ([liftForKeyboard]), clamped for [geometry]. */
+private fun shownZoom(kept: KeptZoom, geometry: GestureGeometry, inset: Float): ZoomState =
+    liftForKeyboard(kept.state, geometry.fit, geometry.viewW, geometry.viewH, kept.inset, inset)

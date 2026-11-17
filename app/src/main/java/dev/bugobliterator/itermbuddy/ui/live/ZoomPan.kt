@@ -70,7 +70,8 @@ fun nextZoomKey(previous: ZoomKey?, sessionGuid: String, width: Int, height: Int
  * [state] made valid for [fit] in a [viewW]×[viewH] view (content kept covering it, or centred),
  * scale unchanged: a kept zoom after the canvas changes size.
  */
-fun clampZoom(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float): ZoomState = clamp(sane(state), fit, viewW, viewH)
+fun clampZoom(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float, bottomInset: Float = 0f): ZoomState =
+    clamp(sane(state), fit, viewW, viewH, inset(bottomInset))
 
 /** [imageW]×[imageH] aspect-fit into [viewW]×[viewH] and centred; [FitRect.EMPTY] when either is empty. */
 fun fitRect(imageW: Int, imageH: Int, viewW: Float, viewH: Float): FitRect {
@@ -107,6 +108,7 @@ fun applyGesture(
     viewW: Float,
     viewH: Float,
     maxScale: Float,
+    bottomInset: Float = 0f,
 ): ZoomState {
     val current = sane(state)
     val upper = if (maxScale.isFinite()) max(1f, maxScale) else 1f
@@ -115,14 +117,14 @@ fun applyGesture(
     val ratio = scale / current.scale
     val offsetX = centroidX - (centroidX - current.offsetX) * ratio + finite(panX)
     val offsetY = centroidY - (centroidY - current.offsetY) * ratio + finite(panY)
-    return clamp(ZoomState(scale, finite(offsetX), finite(offsetY)), fit, viewW, viewH)
+    return clamp(ZoomState(scale, finite(offsetX), finite(offsetY)), fit, viewW, viewH, inset(bottomInset))
 }
 
 /** Double tap: back to fit when zoomed in, else [DOUBLE_TAP_SCALE] (at most [maxScale]) about the tap. */
-fun toggleZoom(state: ZoomState, tapX: Float, tapY: Float, fit: FitRect, viewW: Float, viewH: Float, maxScale: Float): ZoomState {
+fun toggleZoom(state: ZoomState, tapX: Float, tapY: Float, fit: FitRect, viewW: Float, viewH: Float, maxScale: Float, bottomInset: Float = 0f): ZoomState {
     val current = sane(state)
-    if (current.scale > ZOOMED_THRESHOLD) return clamp(ZoomState.FIT, fit, viewW, viewH)
-    return applyGesture(current, tapX, tapY, DOUBLE_TAP_SCALE / current.scale, 0f, 0f, fit, viewW, viewH, maxScale)
+    if (current.scale > ZOOMED_THRESHOLD) return liftForKeyboard(ZoomState.FIT, fit, viewW, viewH, 0f, bottomInset)
+    return applyGesture(current, tapX, tapY, DOUBLE_TAP_SCALE / current.scale, 0f, 0f, fit, viewW, viewH, maxScale, bottomInset)
 }
 
 /** The image pixel under screen point ([x], [y]), or null outside the image (or for an empty image or fit). */
@@ -151,11 +153,14 @@ fun imageToCell(x: Float, y: Float, config: StreamConfig): Pair<Int, Int>? {
     return column.toInt() to row.toInt()
 }
 
-/** Keeps content larger than the view covering it, and centres content smaller than it, per axis. */
-private fun clamp(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float): ZoomState = ZoomState(
+/**
+ * Keeps content larger than the visible area covering it, and centres content smaller than it, per
+ * axis. Vertically the visible area ends [bottomInset] above the view's bottom (the keyboard).
+ */
+private fun clamp(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float, bottomInset: Float = 0f): ZoomState = ZoomState(
     state.scale,
     clampAxis(state.offsetX, state.scale, fit.left, fit.width, finite(viewW)),
-    clampAxis(state.offsetY, state.scale, fit.top, fit.height, finite(viewH)),
+    clampAxis(state.offsetY, state.scale, fit.top, fit.height, finite(viewH) - bottomInset),
 )
 
 private fun clampAxis(offset: Float, scale: Float, start: Float, length: Float, view: Float): Float {
@@ -177,3 +182,28 @@ private fun sane(state: ZoomState): ZoomState =
     if (state.scale > 0f && state.scale.isFinite()) state else ZoomState.FIT
 
 private fun finite(value: Float): Float = if (value.isFinite()) value else 0f
+
+/**
+ * [state], made for a bottom inset of [fromInset], moved to [toInset]: the keyboard (and the key
+ * bar above it) opening, closing or animating over the bottom of the canvas, as iOS grows its
+ * scroll view's bottom inset by the keyboard's overlap (`SessionView.swift:1995-2005`). If the
+ * image's bottom was in view (at or above the old inset's edge), it stays pinned there: it moves
+ * by the change in inset, so at fit a tall picture slides up by the overlap and its top may leave
+ * the screen. Anything else stays put. Then the result is clamped for [toInset], so with the
+ * keyboard gone (inset 0) a picture at scale 1 is back at fit.
+ */
+fun liftForKeyboard(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float, fromInset: Float, toInset: Float): ZoomState {
+    val fromBottom = inset(fromInset)
+    val toBottom = inset(toInset)
+    val from = clamp(sane(state), fit, viewW, viewH, fromBottom)
+    if (fit.isEmpty) return clamp(from, fit, viewW, viewH, toBottom)
+    val imageBottom = from.offsetY + from.scale * (fit.top + fit.height)
+    val pinned = imageBottom <= finite(viewH) - fromBottom + PINNED_SLACK
+    val moved = if (pinned) ZoomState(from.scale, from.offsetX, finite(from.offsetY - (toBottom - fromBottom))) else from
+    return clamp(moved, fit, viewW, viewH, toBottom)
+}
+
+/** Within this of the visible bottom, the image's bottom counts as in view (rounding). */
+private const val PINNED_SLACK = 0.5f
+
+private fun inset(value: Float): Float = if (value.isFinite() && value > 0f) value else 0f
