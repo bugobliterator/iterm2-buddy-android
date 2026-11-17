@@ -83,13 +83,14 @@ class ZoomPanTest {
         assertEquals(1280f - 2 * 1280f, bottomRight.offsetX, eps)
         assertEquals(800f - 2 * 800f, bottomRight.offsetY, eps)
         assertPoint(1280f to 800f, under(1279.999f, 799.999f, bottomRight, fit, 1280, 800))
-        // Letterboxed axis (portrait): content narrower than the view stays centred.
+        // Letterboxed axis (portrait): content shorter than the view sits at its top (the space
+        // left over goes to the bottom), whatever the pan; horizontally it is centred.
         val portraitFit = fitRect(1280, 800, 1080f, 2000f)
         val portraitMax = maxScale(1280, portraitFit)
         val z = applyGesture(ZoomState(1f, 0f, 0f), 540f, 1000f, 2f, 0f, 5_000f, portraitFit, 1080f, 2000f, portraitMax)
-        // 675 × 2 = 1350 < 2000: centred vertically whatever the pan.
+        // 675 × 2 = 1350 < 2000: top-aligned.
         val top = z.offsetY + z.scale * portraitFit.top
-        assertEquals((2000f - 1350f) / 2, top, eps)
+        assertEquals(0f, top, eps)
     }
 
     @Test
@@ -276,10 +277,10 @@ class ZoomPanTest {
     }
 
     @Test
-    fun shortImageIsCentredAboveTheKeyboard() {
-        val wide = fitRect(2000, 1000, 500f, 1000f) // (0, 375, 500, 250)
+    fun shortImageStaysAtTheTopAboveTheKeyboard() {
+        val wide = visibleFitRect(2000, 1000, 500f, 1000f, topInset = 0f, bottomInset = 0f) // (0, 0, 500, 250)
         val lifted = liftForKeyboard(ZoomState.FIT, wide, 500f, 1000f, 0f, 400f)
-        assertEquals("centred in the 600 px left above the keyboard", -200f, lifted.offsetY, eps)
+        assertEquals("already above the keyboard: nothing moves", ZoomState.FIT, lifted)
         assertTrue(bottomOf(lifted, wide) <= 600f + eps)
         assertEquals(ZoomState.FIT, liftForKeyboard(lifted, wide, 500f, 1000f, 400f, 0f))
     }
@@ -305,5 +306,58 @@ class ZoomPanTest {
         val lifted = liftForKeyboard(ZoomState.FIT, tallFit, 500f, 1000f, 0f, 300f)
         assertPoint(500f to 600f, under(250f, 0f, lifted, tallFit, 1000, 2000))
         assertPoint(500f to 1998f, under(250f, 699f, lifted, tallFit, 1000, 2000))
+    }
+
+    // ---- Edge to edge: a top bar over the picture and the navigation bar below it ----
+
+    @Test
+    fun fitSitsJustBelowTheBarAndAboveTheNavigationBar() {
+        // A 1080×2400 window, a 200 px status bar plus top bar, a 60 px gesture bar.
+        val wide = visibleFitRect(1600, 1000, 1080f, 2400f, topInset = 200f, bottomInset = 60f)
+        assertEquals(0f, wide.left, eps)
+        assertEquals("top-aligned just below the bar", 200f, wide.top, eps)
+        assertEquals(675f, wide.height, eps)
+        assertEquals("clamping keeps fit where it is", ZoomState.FIT, clampZoom(ZoomState.FIT, wide, 1080f, 2400f, bottomInset = 60f, topInset = 200f))
+        // A tall image fills the visible height exactly and is centred across.
+        val tall = visibleFitRect(1000, 4280, 1080f, 2400f, topInset = 200f, bottomInset = 60f)
+        assertEquals(200f, tall.top, eps)
+        assertEquals(2140f, tall.height, eps)
+        assertEquals(2340f, tall.top + tall.height, eps)
+        assertEquals((1080f - tall.width) / 2, tall.left, eps)
+        // Never a NaN or a throw for a view smaller than its insets.
+        assertTrue(visibleFitRect(1000, 1000, 100f, 100f, 80f, 80f).isEmpty)
+    }
+
+    @Test
+    fun clampKeepsZoomedContentBetweenTheInsets() {
+        val fit = visibleFitRect(1000, 2000, 500f, 1260f, topInset = 200f, bottomInset = 60f) // (0, 200, 500, 1000)
+        val zoomed = ZoomState(2f, -250f, 0f)
+        // Dragged far down: the image's top stops at the bar's bottom edge.
+        val down = applyGesture(zoomed, 250f, 600f, 1f, 0f, 10_000f, fit, 500f, 1260f, maxScale = 4f, bottomInset = 60f, topInset = 200f)
+        assertEquals(200f, down.offsetY + down.scale * fit.top, eps)
+        // Dragged far up: its bottom stops at the navigation bar's top edge.
+        val up = applyGesture(zoomed, 250f, 600f, 1f, 0f, -10_000f, fit, 500f, 1260f, maxScale = 4f, bottomInset = 60f, topInset = 200f)
+        assertEquals(1200f, up.offsetY + up.scale * (fit.top + fit.height), eps)
+        // With the keyboard up the bottom inset takes over, the top one stays.
+        val lifted = liftForKeyboard(ZoomState.FIT, fit, 500f, 1260f, fromInset = 60f, toInset = 560f, topInset = 200f)
+        assertEquals(700f, bottomOf(lifted, fit), eps)
+        val top = applyGesture(lifted, 250f, 400f, 1f, 0f, 10_000f, fit, 500f, 1260f, maxScale = 4f, bottomInset = 560f, topInset = 200f)
+        assertEquals("panning up reaches the image's top, below the bar", 200f, top.offsetY + fit.top, eps)
+        assertEquals(ZoomState.FIT, liftForKeyboard(lifted, fit, 500f, 1260f, 560f, 60f, topInset = 200f))
+    }
+
+    @Test
+    fun tapsMapBelowTheBar() {
+        val fit = visibleFitRect(1600, 1000, 1080f, 2400f, topInset = 200f, bottomInset = 60f)
+        assertNull("the bar's area is above the image", viewToImage(540f, 199f, ZoomState.FIT, fit, 1600, 1000))
+        assertPoint(0f to 0f, under(0f, 200f, ZoomState.FIT, fit, 1600, 1000))
+        assertPoint(800f to 500f, under(540f, 200f + 337.5f, ZoomState.FIT, fit, 1600, 1000))
+    }
+
+    @Test
+    fun fitViewportIsTheAreaBetweenTheInsets() {
+        assertEquals(1080 to 2140, fitViewport(1080, 2400, topInset = 200, bottomInset = 60))
+        assertEquals(0 to 0, fitViewport(0, 0, 200, 60))
+        assertEquals(500 to 0, fitViewport(500, 100, 80, 80))
     }
 }

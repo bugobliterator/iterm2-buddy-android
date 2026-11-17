@@ -15,6 +15,11 @@ import kotlin.math.min
  * - **image**: encoded pixels of the stream, origin top-left (`browserTap` coordinates, and
  *   [StreamConfig.cellGeometry] units).
  *
+ * The canvas is edge to edge: a top inset (status bar and the top bar drawn over the picture) and a
+ * bottom inset (the navigation bar, or the keyboard and key bar while typing) bound the visible
+ * area that fit and the clamp use: zoomed in, the image can be panned until its edge meets an
+ * inset, so what lies behind the bars is reachable, and never further.
+ *
  * No function here divides by a size it has not checked: a 0×0 image, an empty view or a browser
  * config's 0×0 grid give an empty fit, scale 1 or null, never an exception or a NaN.
  */
@@ -70,8 +75,8 @@ fun nextZoomKey(previous: ZoomKey?, sessionGuid: String, width: Int, height: Int
  * [state] made valid for [fit] in a [viewW]×[viewH] view (content kept covering it, or centred),
  * scale unchanged: a kept zoom after the canvas changes size.
  */
-fun clampZoom(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float, bottomInset: Float = 0f): ZoomState =
-    clamp(sane(state), fit, viewW, viewH, inset(bottomInset))
+fun clampZoom(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float, bottomInset: Float = 0f, topInset: Float = 0f): ZoomState =
+    clamp(sane(state), fit, viewW, viewH, inset(bottomInset), inset(topInset))
 
 /** [imageW]×[imageH] aspect-fit into [viewW]×[viewH] and centred; [FitRect.EMPTY] when either is empty. */
 fun fitRect(imageW: Int, imageH: Int, viewW: Float, viewH: Float): FitRect {
@@ -109,6 +114,7 @@ fun applyGesture(
     viewH: Float,
     maxScale: Float,
     bottomInset: Float = 0f,
+    topInset: Float = 0f,
 ): ZoomState {
     val current = sane(state)
     val upper = if (maxScale.isFinite()) max(1f, maxScale) else 1f
@@ -117,14 +123,14 @@ fun applyGesture(
     val ratio = scale / current.scale
     val offsetX = centroidX - (centroidX - current.offsetX) * ratio + finite(panX)
     val offsetY = centroidY - (centroidY - current.offsetY) * ratio + finite(panY)
-    return clamp(ZoomState(scale, finite(offsetX), finite(offsetY)), fit, viewW, viewH, inset(bottomInset))
+    return clamp(ZoomState(scale, finite(offsetX), finite(offsetY)), fit, viewW, viewH, inset(bottomInset), inset(topInset))
 }
 
 /** Double tap: back to fit when zoomed in, else [DOUBLE_TAP_SCALE] (at most [maxScale]) about the tap. */
-fun toggleZoom(state: ZoomState, tapX: Float, tapY: Float, fit: FitRect, viewW: Float, viewH: Float, maxScale: Float, bottomInset: Float = 0f): ZoomState {
+fun toggleZoom(state: ZoomState, tapX: Float, tapY: Float, fit: FitRect, viewW: Float, viewH: Float, maxScale: Float, bottomInset: Float = 0f, topInset: Float = 0f): ZoomState {
     val current = sane(state)
-    if (current.scale > ZOOMED_THRESHOLD) return liftForKeyboard(ZoomState.FIT, fit, viewW, viewH, 0f, bottomInset)
-    return applyGesture(current, tapX, tapY, DOUBLE_TAP_SCALE / current.scale, 0f, 0f, fit, viewW, viewH, maxScale, bottomInset)
+    if (current.scale > ZOOMED_THRESHOLD) return restingFit(fit, viewW, viewH, inset(bottomInset), inset(topInset))
+    return applyGesture(current, tapX, tapY, DOUBLE_TAP_SCALE / current.scale, 0f, 0f, fit, viewW, viewH, maxScale, bottomInset, topInset)
 }
 
 /** The image pixel under screen point ([x], [y]), or null outside the image (or for an empty image or fit). */
@@ -154,14 +160,29 @@ fun imageToCell(x: Float, y: Float, config: StreamConfig): Pair<Int, Int>? {
 }
 
 /**
- * Keeps content larger than the visible area covering it, and centres content smaller than it, per
- * axis. Vertically the visible area ends [bottomInset] above the view's bottom (the keyboard).
+ * Keeps content larger than the visible area covering it, per axis. Across, content narrower than
+ * the view is centred; down, the visible area runs from [topInset] (below the top bar) to
+ * [bottomInset] above the view's bottom (the navigation bar, or the keyboard and key bar), and
+ * content shorter than it sits at its top, the space left over at the bottom.
  */
-private fun clamp(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float, bottomInset: Float = 0f): ZoomState = ZoomState(
+private fun clamp(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float, bottomInset: Float = 0f, topInset: Float = 0f): ZoomState = ZoomState(
     state.scale,
     clampAxis(state.offsetX, state.scale, fit.left, fit.width, finite(viewW)),
-    clampAxis(state.offsetY, state.scale, fit.top, fit.height, finite(viewH) - bottomInset),
+    clampDown(state.offsetY, state.scale, fit.top, fit.height, finite(viewH), topInset, bottomInset),
 )
+
+private fun clampDown(offset: Float, scale: Float, start: Float, length: Float, viewH: Float, top: Float, bottom: Float): Float {
+    val scaledStart = scale * start
+    val scaledLength = scale * length
+    val clamped = if (scaledLength >= viewH - top - bottom) {
+        val high = top - scaledStart
+        val low = min(viewH - bottom - scaledStart - scaledLength, high)
+        max(low, min(offset, high))
+    } else {
+        top - scaledStart
+    }
+    return finite(clamped) + 0f
+}
 
 private fun clampAxis(offset: Float, scale: Float, start: Float, length: Float, view: Float): Float {
     val scaledStart = scale * start
@@ -192,18 +213,46 @@ private fun finite(value: Float): Float = if (value.isFinite()) value else 0f
  * the screen. Anything else stays put. Then the result is clamped for [toInset], so with the
  * keyboard gone (inset 0) a picture at scale 1 is back at fit.
  */
-fun liftForKeyboard(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float, fromInset: Float, toInset: Float): ZoomState {
+fun liftForKeyboard(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float, fromInset: Float, toInset: Float, topInset: Float = 0f): ZoomState {
     val fromBottom = inset(fromInset)
     val toBottom = inset(toInset)
-    val from = clamp(sane(state), fit, viewW, viewH, fromBottom)
-    if (fit.isEmpty) return clamp(from, fit, viewW, viewH, toBottom)
+    val top = inset(topInset)
+    val from = clamp(sane(state), fit, viewW, viewH, fromBottom, top)
+    if (fit.isEmpty) return clamp(from, fit, viewW, viewH, toBottom, top)
     val imageBottom = from.offsetY + from.scale * (fit.top + fit.height)
     val pinned = imageBottom <= finite(viewH) - fromBottom + PINNED_SLACK
     val moved = if (pinned) ZoomState(from.scale, from.offsetX, finite(from.offsetY - (toBottom - fromBottom))) else from
-    return clamp(moved, fit, viewW, viewH, toBottom)
+    return clamp(moved, fit, viewW, viewH, toBottom, top)
+}
+
+/** Scale 1 at fit, with the image's bottom lifted just above [bottomInset] if that covers it. */
+private fun restingFit(fit: FitRect, viewW: Float, viewH: Float, bottomInset: Float, topInset: Float): ZoomState {
+    if (fit.isEmpty) return clamp(ZoomState.FIT, fit, viewW, viewH, bottomInset, topInset)
+    val hidden = fit.top + fit.height - (finite(viewH) - bottomInset)
+    val lifted = if (hidden > 0f) ZoomState(1f, 0f, -hidden) else ZoomState.FIT
+    return clamp(lifted, fit, viewW, viewH, bottomInset, topInset)
 }
 
 /** Within this of the visible bottom, the image's bottom counts as in view (rounding). */
 private const val PINNED_SLACK = 0.5f
 
 private fun inset(value: Float): Float = if (value.isFinite() && value > 0f) value else 0f
+
+/**
+ * Where the image is drawn at fit on an edge-to-edge canvas: aspect-fit into the area between
+ * [topInset] (the status bar and the top bar over the picture) and [bottomInset] (the navigation
+ * bar), centred across and **top-aligned** just below the bar, so any height left over is at the
+ * bottom. [FitRect.EMPTY] when that area or the image is empty.
+ */
+fun visibleFitRect(imageW: Int, imageH: Int, viewW: Float, viewH: Float, topInset: Float, bottomInset: Float): FitRect {
+    val top = inset(topInset)
+    val inner = fitRect(imageW, imageH, viewW, finite(viewH) - top - inset(bottomInset))
+    return if (inner.isEmpty) FitRect.EMPTY else FitRect(inner.left, top, inner.width, inner.height)
+}
+
+/**
+ * The Fit to phone viewport (width to height, px): the canvas between [topInset] and
+ * [bottomInset] with the keyboard hidden, so a fitted grid fills the visible area.
+ */
+fun fitViewport(canvasW: Int, canvasH: Int, topInset: Int, bottomInset: Int): Pair<Int, Int> =
+    maxOf(0, canvasW) to maxOf(0, canvasH - maxOf(0, topInset) - maxOf(0, bottomInset))
