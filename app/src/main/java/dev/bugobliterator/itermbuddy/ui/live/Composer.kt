@@ -31,7 +31,11 @@ import androidx.compose.ui.unit.dp
  * The composer: a bottom sheet over the live view with a multi-line text field on the normal
  * keyboard (suggestions and dictation work; no personalised learning), for text longer than typing. **Paste** sends the
  * draft as one `pasteText` (iTerm2's paste path, bracketed when the app enabled it); **Paste ⏎**
- * sends the paste and then Return, the Return only once the paste was sent to the same watch.
+ * types the draft as keys and then sends Return, the Return only once all of it was sent to the
+ * same watch. Owner decision 2026-11-18: Paste ⏎ types the draft, because `pasteText` is chunked
+ * and may confirm on the Mac, so a Return after it could overtake the paste (the plan had
+ * `pasteText` then Return); this is what the iOS composer does (`sendLiteral`). Each line of a
+ * typed draft is entered as typed, so a multi-line draft submits line by line.
  *
  * The draft is owned by the caller: it is cleared when sent and kept when the sheet is dismissed.
  * Neither button does anything with an empty draft or while [canSend] is false.
@@ -81,7 +85,7 @@ fun Composer(
                 Button(
                     onClick = onPasteThenReturn,
                     enabled = sendable,
-                    modifier = Modifier.weight(1f).semantics { contentDescription = "Paste and Return" },
+                    modifier = Modifier.weight(1f).semantics { contentDescription = "Type and Return" },
                 ) { Text("Paste ⏎") }
             }
         }
