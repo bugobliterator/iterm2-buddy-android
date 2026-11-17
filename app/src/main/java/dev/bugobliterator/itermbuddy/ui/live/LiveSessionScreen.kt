@@ -1,6 +1,7 @@
 package dev.bugobliterator.itermbuddy.ui.live
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +27,7 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -34,6 +36,8 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -44,20 +48,24 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
@@ -80,6 +88,7 @@ import dev.bugobliterator.itermbuddy.core.stream.fitGrid
 import dev.bugobliterator.itermbuddy.ui.LiveSessionTheme
 import dev.bugobliterator.itermbuddy.video.VideoStats
 import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 
 /** What the live view can ask for; the navigator, the controller and the input sender do the work. */
 interface LiveSessionActions {
@@ -120,10 +129,11 @@ interface LiveSessionActions {
 /**
  * The live session view, always dark ([LiveSessionTheme], with light system bar icons while it
  * shows): the session's video ([VideoCanvas]) with zoom and pan, the state's [liveOverlay] over
- * it, ⌨ (show or hide the keyboard) while input is offered, and a ⋮ menu with **Fit to phone**
- * (only when [fitGrid] gives a grid: `canResize == true`, never for a browser) and, in debug
- * builds, Video stats. The screen never opens or closes a stream itself, and Fit is sent only
- * from a tap and never undone.
+ * it, ⌨ (show or hide the keyboard) while input is offered, ⤢ **Fit to phone** ([fitButton]:
+ * shown for every terminal session, greyed with a reason in a snackbar when unavailable, as iOS's
+ * "Resize for This Screen") and, in debug builds, a ⋮ menu with Video stats. The screen never
+ * opens or closes a stream itself, and Fit is sent only from a tap (⤢ or the too-large overlay),
+ * on the active stream's link for this session, and never undone.
  *
  * **Typing.** Input is offered only while [inputTarget] gives a target: the state is `Live` for
  * this session, the session is a terminal, and the active stream is this session's (browser
@@ -208,8 +218,11 @@ private fun LiveSessionContent(
     val (viewportWidth, viewportHeight) = fitViewport(canvas.width, canvas.height, topChrome, navigationBottom, leftInset, rightInset)
     val canFit = !session.isBrowser && config != null &&
         fitGrid(viewportWidth, viewportHeight, config, source.output.maxSize(), source.output::sizeSupported) != null
+    val fitState = fitButton(session, live, config, viewportWidth, viewportHeight, source.output.maxSize(), source.output::sizeSupported)
     val fit = { actions.fitToPhone(session.guid, viewportWidth, viewportHeight) }
     var menuOpen by remember { mutableStateOf(false) }
+    val snackbar = remember { SnackbarHostState() }
+    val snackbarScope = rememberCoroutineScope()
 
     val keyboard = remember { TerminalKeyboard() }
     val currentTarget by rememberUpdatedState(target)
@@ -347,6 +360,7 @@ private fun LiveSessionContent(
             if (debugBuild && videoStatsShown) {
                 VideoStatsOverlay(source, Modifier.align(Alignment.TopStart).padding(8.dp))
             }
+            SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
         }
         LiveTopBar(
             title = title,
@@ -359,32 +373,36 @@ private fun LiveSessionContent(
                     modifier = Modifier.semantics { contentDescription = "Show or hide keyboard" },
                 ) { Text("⌨", style = MaterialTheme.typography.titleMedium) }
             }
-            if (canFit || debugBuild) {
+            if (fitState != FitButton.Hidden) {
+                val reason = (fitState as? FitButton.Disabled)?.reason
+                FitToolbarButton(
+                    enabled = reason == null,
+                    onFit = fit,
+                    onExplain = {
+                        if (reason != null) {
+                            snackbarScope.launch {
+                                snackbar.currentSnackbarData?.dismiss()
+                                snackbar.showSnackbar(reason)
+                            }
+                        }
+                    },
+                )
+            }
+            if (debugBuild) {
                 Box {
                     IconButton(
                         onClick = { menuOpen = true },
                         modifier = Modifier.semantics { contentDescription = "More options" },
                     ) { Text("⋮", style = MaterialTheme.typography.titleMedium) }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                        if (canFit) {
-                            DropdownMenuItem(
-                                text = { Text("Fit to phone") },
-                                onClick = {
-                                    menuOpen = false
-                                    fit()
-                                },
-                            )
-                        }
-                        if (debugBuild) {
-                            DropdownMenuItem(
-                                text = { Text("Video stats") },
-                                trailingIcon = { Checkbox(checked = videoStatsShown, onCheckedChange = null) },
-                                onClick = {
-                                    menuOpen = false
-                                    actions.setVideoStatsShown(!videoStatsShown)
-                                },
-                            )
-                        }
+                        DropdownMenuItem(
+                            text = { Text("Video stats") },
+                            trailingIcon = { Checkbox(checked = videoStatsShown, onCheckedChange = null) },
+                            onClick = {
+                                menuOpen = false
+                                actions.setVideoStatsShown(!videoStatsShown)
+                            },
+                        )
                     }
                 }
             }
@@ -476,6 +494,34 @@ private fun Modifier.insetBy(left: Int, top: () -> Int, right: Int, bottom: () -
         placeable.place(maxOf(0, left), minOf(topPx, vertical))
     }
 }
+
+/**
+ * ⤢ in the live bar ("Resize for this screen"). Enabled, a tap is [onFit]. Disabled, it is drawn
+ * greyed (the disabled content alpha) and still answers a tap or a long press with [onExplain],
+ * which shows why; TalkBack reads it as unavailable.
+ */
+@Composable
+private fun FitToolbarButton(enabled: Boolean, onFit: () -> Unit, onExplain: () -> Unit) {
+    val color = LocalContentColor.current.copy(alpha = if (enabled) 1f else DISABLED_ALPHA)
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .combinedClickable(
+                role = Role.Button,
+                onClick = if (enabled) onFit else onExplain,
+                onLongClick = if (enabled) null else onExplain,
+            )
+            .semantics {
+                contentDescription = "Resize for this screen"
+                if (!enabled) stateDescription = "Unavailable"
+            },
+        contentAlignment = Alignment.Center,
+    ) { Text("⤢", style = MaterialTheme.typography.titleMedium, color = color) }
+}
+
+/** Material's alpha for disabled content. */
+private const val DISABLED_ALPHA = 0.38f
 
 /** The top bar's opacity over the picture. */
 private const val TOP_BAR_ALPHA = 0.8f
