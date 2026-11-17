@@ -36,9 +36,12 @@ fun isInputTarget(active: ActiveStream?, target: InputTarget): Boolean =
  *   times out or fails is logged and skipped, and the queue goes on in order.
  * - **Paste** (the composer's) is one `pasteText`: iTerm2's paste path, bracketed when the app
  *   enabled it.
- * - **Type then Return** (the composer's Paste ⏎) is one item that types the draft as `text` key
- *   events with no modifiers, as the iOS composer does (`SessionView.swift:1846`, `sendLiteral`),
- *   then sends `text "\n"`. Owner decision 2026-11-18: Paste ⏎ types the draft, because
+ * - **Type then Return** (the composer's Paste ⏎). Owner decision 2026-11-18: single-line drafts
+ *   are typed then Returned; multi-line drafts are pasted with no Return. A draft with a newline
+ *   (`\n` or `\r`, [isMultiLineDraft]) is one `pasteText`, exactly as **Paste**, and the user
+ *   presses Return: typed, each of its lines would be entered as it went. A single-line draft is
+ *   one item that types it as `text` key events with no modifiers, as the iOS composer does
+ *   (`SessionView.swift:1846`, `sendLiteral`), then sends `text "\n"`: typed, because
  *   `pasteText` is chunked on the Mac and may ask for confirmation there, so a Return sent after
  *   it could arrive before the paste lands (the plan had `pasteText` then Return). A large draft
  *   is typed in several `text` events, in order, split at grapheme boundaries into pieces of at
@@ -94,7 +97,9 @@ class InputSender(
 
     fun paste(target: InputTarget, text: String) = enqueue(PasteItem(target, text))
 
-    fun typeThenReturn(target: InputTarget, text: String) = enqueue(TypeItem(target, text))
+    /** Paste ⏎: a single-line [text] typed then Returned; a multi-line one pasted with no Return. */
+    fun typeThenReturn(target: InputTarget, text: String) =
+        enqueue(if (isMultiLineDraft(text)) PasteItem(target, text) else TypeItem(target, text))
 
     private fun enqueue(item: Item) {
         // Unlimited: this fails only once the consumer's scope has ended.
@@ -158,6 +163,9 @@ class InputSender(
         private val RETURN = KeyEvent(Key.Text("\n"))
     }
 }
+
+/** Whether a composer draft has a line break (`\n` or `\r`): Paste ⏎ then pastes it with no Return. */
+fun isMultiLineDraft(text: String): Boolean = text.any { it == '\n' || it == '\r' }
 
 /**
  * [text] in order as pieces of at most [maxBytes] UTF-8 bytes each, split only at grapheme
