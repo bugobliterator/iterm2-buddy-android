@@ -30,6 +30,11 @@ android {
     buildFeatures {
         compose = true
     }
+
+    sourceSets {
+        // HevcDecodePathDeviceTest reads the committed clip (terminal-clip.json) from the test APK's assets.
+        getByName("androidTest").assets.directories.add(rootProject.file("fixtures/media/hevc").path)
+    }
 }
 
 kotlin {

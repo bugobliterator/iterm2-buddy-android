@@ -1,0 +1,484 @@
+package dev.bugobliterator.itermbuddy.video
+
+import android.os.SystemClock
+import android.util.Log
+import android.view.Surface
+import androidx.annotation.VisibleForTesting
+import dev.bugobliterator.itermbuddy.core.stream.MediaFrame
+import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
+import dev.bugobliterator.itermbuddy.core.stream.VideoOutput
+import dev.bugobliterator.itermbuddy.core.stream.VideoReadiness
+import dev.bugobliterator.itermbuddy.core.stream.hasCompleteHevcParameterSets
+import dev.bugobliterator.itermbuddy.core.stream.parameterSetsToCsd
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+
+/** Decoder counters for diagnostics. [lastLatencyMillis] is accept to output of the latest output frame. */
+data class VideoStats(val decoderName: String?, val framesIn: Long, val framesOut: Long, val lastLatencyMillis: Long?)
+
+/** How long [HevcVideoOutput.attachSurface], [HevcVideoOutput.detachSurface] and [HevcVideoOutput.close] wait for the decoder thread. */
+const val DEFAULT_SURFACE_CALL_TIMEOUT_MILLIS: Long = 1_000
+
+/** `KEY_MAX_INPUT_SIZE` floor: 4 MiB. */
+private const val MIN_MAX_INPUT_SIZE: Long = 4L shl 20
+
+private const val TAG = "HevcVideoOutput"
+
+/**
+ * The live view's [VideoOutput]: an async MediaCodec HEVC decoder rendering to the view's
+ * [Surface], mirroring iOS `CompanionVideoView` (`IOS/Screens/CompanionVideoView.swift`):
+ * configure from parameter sets, decode each access unit, render it at once, ask for a keyframe
+ * when there is no decoder or a decode fails, forget everything on [reset].
+ *
+ * **Threading.** Every codec call and codec callback runs on one [DecoderThread] (a
+ * `HandlerThread` in production). The public methods change the wanted state under a lock on the
+ * caller's thread and post a reconcile to the decoder thread, which releases a codec that is no
+ * longer wanted and builds one that is. [submit] offers into a [PendingInputQueue] on the caller's
+ * thread; the decoder thread polls it whenever an input buffer is free. [attachSurface],
+ * [detachSurface] and [close] wait for the decoder thread to finish (so the codec has let go of a
+ * surface before the view destroys it), but at most [surfaceCallTimeoutMillis]: a wedged codec
+ * cannot hang the UI thread past that; the work still runs when the thread frees up. [configure],
+ * [submit], [reset] and [readiness] never wait. No method throws.
+ *
+ * **Decoder lifetime.** A decoder exists only with a surface and a config whose parameter sets are
+ * complete ([hasCompleteHevcParameterSets]); an incomplete set reads as
+ * [VideoReadiness.NoDecoder] and MediaCodec is never configured from it. A config with the same
+ * extradata and pixel size keeps the decoder; anything else rebuilds it, releasing the old codec
+ * first. A keyframe never rebuilds a working decoder. Attaching a surface builds one and requests
+ * a keyframe. Until a codec's first keyframe, [submit] refuses non-keyframes.
+ *
+ * **Failures.** Any exception from a codec call or callback (a frame larger than the input buffer
+ * and an access unit that does not parse included) releases the codec, empties the pending queue
+ * and requests a keyframe; the next keyframe [submit] accepts rebuilds the codec.
+ *
+ * **Overdue clock.** A FIFO of accept times, one per frame accepted into the queue. An output pops
+ * the entries up to its presentation time (at least one; the Mac's encoder never reorders), so a
+ * partial output leaves the next frame's time at the head. Frames dropped or replaced in the queue,
+ * or lost with a released codec, take their entries with them, but when that empties the FIFO the
+ * earliest removed time is carried onto the next accepted frame, and reported meanwhile, so neither
+ * a replacing keyframe nor a codec rebuild resets the clock. Only [reset] and [close] empty it.
+ *
+ * **Ownership.** The output owns its decoder thread. Whoever constructs it (the app-scoped live
+ * view owner) calls [close] when it is done with it; until then the thread lives, idle, with the
+ * process. Process death needs nothing: the codec and thread go with the process.
+ */
+class HevcVideoOutput(
+    private val catalog: HevcDecoderCatalog,
+    private val codecFactory: (DecoderInfo) -> CodecHandle = ::mediaCodecHandle,
+    maxPendingInputBytes: Long = DEFAULT_MAX_PENDING_INPUT_BYTES,
+    private val nowMillis: () -> Long = SystemClock::uptimeMillis,
+    private val decoderThread: DecoderThread = HandlerDecoderThread(),
+    private val surfaceCallTimeoutMillis: Long = DEFAULT_SURFACE_CALL_TIMEOUT_MILLIS,
+    private val log: (String) -> Unit = { Log.i(TAG, it) },
+) : VideoOutput, AutoCloseable {
+
+    /** What the current config asks for; [format] is set only when [choice] is a usable decoder. */
+    private class Plan(
+        val extradata: ByteArray,
+        val width: Int,
+        val height: Int,
+        val complete: Boolean,
+        val choice: DecoderChoice?,
+        val format: CodecFormat?,
+    )
+
+    private class Accepted(val presentationTimeUs: Long, val acceptedAt: Long)
+
+    // ---- Guarded by lock: the wanted state, the pending queue and the overdue clock ----
+    private val lock = Any()
+    private var closed = false
+    private var plan: Plan? = null
+    private var surface: Surface? = null
+
+    /** Bumped whenever the running codec (if any) stops being the wanted one. */
+    private var epoch = 0L
+
+    /** After a codec failure: no codec until a keyframe is accepted. */
+    private var rebuildOnKeyframe = false
+    private val queue = PendingInputQueue(maxPendingInputBytes)
+    private val accepted = ArrayDeque<Accepted>()
+    private var carriedSince: Long? = null
+
+    // ---- Decoder thread only ----
+    private var codec: CodecHandle? = null
+    private var codecEpoch = -1L
+    private val freeInputs = ArrayDeque<Int>()
+
+    @Volatile private var keyframeRequester: (() -> Unit)? = null
+
+    private val statsFlow = MutableStateFlow(VideoStats(null, 0, 0, null))
+
+    /** Decoder name and frame counters. */
+    val stats: StateFlow<VideoStats> = statsFlow.asStateFlow()
+
+    private val reconcileTask = Runnable { guarded("reconcile") { reconcile() } }
+
+    // ---- VideoOutput ----
+
+    override fun configure(config: StreamConfig): VideoReadiness = guarded("configure", VideoReadiness.NoDecoder) {
+        val extradata = config.codecExtradata
+        val unchanged = synchronized(lock) {
+            if (closed) return@guarded VideoReadiness.NoDecoder
+            val current = plan
+            current != null && current.extradata.contentEquals(extradata) &&
+                current.width == config.pixelWidth && current.height == config.pixelHeight
+        }
+        if (unchanged) return@guarded readiness()
+        val next = makePlan(extradata, config.pixelWidth, config.pixelHeight)
+        synchronized(lock) {
+            if (closed) return@guarded VideoReadiness.NoDecoder
+            plan = next
+            discardWanted()
+            rebuildOnKeyframe = false
+        }
+        decoderThread.post(reconcileTask)
+        if (!next.complete) {
+            log("config of ${extradata.size} bytes lacks a VPS, SPS or PPS; not configuring a decoder")
+            // iOS asks for a keyframe when its format cannot be built: the Mac sends a config before it.
+            keyframeRequester?.invoke()
+        }
+        readiness()
+    }
+
+    override fun readiness(): VideoReadiness = guarded("readiness", VideoReadiness.NoDecoder) {
+        synchronized(lock) {
+            val current = plan
+            when {
+                closed -> VideoReadiness.NoDecoder
+                current == null -> if (surface == null) VideoReadiness.WaitingForSurface else VideoReadiness.Ready
+                !current.complete -> VideoReadiness.NoDecoder
+                else -> when (val choice = current.choice) {
+                    is DecoderChoice.TooLarge ->
+                        VideoReadiness.TooLarge(current.width, current.height, choice.maxWidth, choice.maxHeight)
+                    is DecoderChoice.Use -> if (surface == null) VideoReadiness.WaitingForSurface else VideoReadiness.Ready
+                    DecoderChoice.None, null -> VideoReadiness.NoDecoder
+                }
+            }
+        }
+    }
+
+    override fun submit(frame: MediaFrame): Boolean = guarded("submit", false) {
+        val accept = synchronized(lock) {
+            if (closed || surface == null || plan?.format == null) return@guarded false
+            if (rebuildOnKeyframe && !frame.isKeyframe) return@guarded false
+            val before = queue.size
+            val ok = queue.offer(frame)
+            removeNewest(before + (if (ok) 1 else 0) - queue.size)
+            if (ok) {
+                val now = nowMillis()
+                val since = carriedSince?.let { minOf(it, now) } ?: now
+                carriedSince = null
+                accepted.addLast(Accepted(presentationTimeUs(frame), since))
+                rebuildOnKeyframe = false
+            }
+            ok
+        }
+        if (accept) decoderThread.post(reconcileTask)
+        accept
+    }
+
+    override fun reset() = guarded("reset") {
+        synchronized(lock) {
+            plan = null
+            epoch++
+            rebuildOnKeyframe = false
+            queue.clear()
+            accepted.clear()
+            carriedSince = null
+        }
+        decoderThread.post(reconcileTask)
+        Unit
+    }
+
+    override fun setKeyframeRequester(request: () -> Unit) {
+        keyframeRequester = request
+    }
+
+    override fun outputOverdueSinceMillis(): Long? = guarded("outputOverdueSinceMillis", null) {
+        synchronized(lock) { accepted.firstOrNull()?.acceptedAt ?: carriedSince }
+    }
+
+    override fun maxSize(): Pair<Int, Int>? = guarded("maxSize", null) {
+        when (val choice = synchronized(lock) { plan?.choice }) {
+            is DecoderChoice.Use -> choice.info.maxWidth to choice.info.maxHeight
+            is DecoderChoice.TooLarge -> choice.maxWidth to choice.maxHeight
+            DecoderChoice.None, null -> null
+        }
+    }
+
+    // ---- Surface and lifetime ----
+
+    /** The view's surface is ready: builds a decoder (when the config allows) and requests a keyframe. Waits for the decoder thread. */
+    fun attachSurface(surface: Surface) = guarded("attachSurface") {
+        synchronized(lock) {
+            if (closed) return@guarded
+            this.surface = surface
+            discardWanted()
+            rebuildOnKeyframe = false
+        }
+        runOnDecoderAndWait("attachSurface") { reconcile() }
+        keyframeRequester?.invoke()
+    }
+
+    /** The view's surface is going away: releases the decoder before returning (or the timeout). */
+    fun detachSurface() = guarded("detachSurface") {
+        synchronized(lock) {
+            if (closed) return@guarded
+            surface = null
+            discardWanted()
+            rebuildOnKeyframe = false
+        }
+        runOnDecoderAndWait("detachSurface") { reconcile() }
+    }
+
+    /** Releases the codec and ends the decoder thread. Idempotent; afterwards every method is a no-op. */
+    override fun close() = guarded("close") {
+        synchronized(lock) {
+            if (closed) return@guarded
+            closed = true
+            plan = null
+            surface = null
+            epoch++
+            queue.clear()
+            accepted.clear()
+            carriedSince = null
+        }
+        runOnDecoderAndWait("close") { reconcile() }
+        decoderThread.quit()
+    }
+
+    @VisibleForTesting
+    internal fun pendingInputCount(): Int = queue.size
+
+    // ---- Wanted-state helpers (hold lock) ----
+
+    /** The running codec is no longer wanted: its frames and the queue's go, the clock carries. */
+    private fun discardWanted() {
+        epoch++
+        queue.clear()
+        removeNewest(accepted.size)
+    }
+
+    /** Removes the [count] newest clock entries; when that empties the FIFO, the earliest removed time carries. */
+    private fun removeNewest(count: Int) {
+        if (count <= 0) return
+        var earliest = Long.MAX_VALUE
+        repeat(minOf(count, accepted.size)) { earliest = minOf(earliest, accepted.removeLast().acceptedAt) }
+        if (accepted.isEmpty() && earliest != Long.MAX_VALUE) {
+            carriedSince = minOf(carriedSince ?: earliest, earliest)
+        }
+    }
+
+    private fun makePlan(extradata: ByteArray, width: Int, height: Int): Plan {
+        if (!hasCompleteHevcParameterSets(extradata)) return Plan(extradata, width, height, false, null, null)
+        val choice = try {
+            chooseDecoder(catalog.decoders(), width, height)
+        } catch (e: RuntimeException) {
+            log("listing HEVC decoders failed: ${e.javaClass.simpleName}")
+            DecoderChoice.None
+        }
+        val format = (choice as? DecoderChoice.Use)?.let {
+            val maxInput = maxOf(width.toLong() * height, MIN_MAX_INPUT_SIZE).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            CodecFormat(width, height, parameterSetsToCsd(extradata), it.info.supportsLowLatency, maxInput)
+        }
+        return Plan(extradata, width, height, true, choice, format)
+    }
+
+    // ---- Decoder thread ----
+
+    private fun reconcile() {
+        var wanted: Pair<DecoderInfo, CodecFormat>? = null
+        var wantedSurface: Surface? = null
+        var wantedEpoch = 0L
+        synchronized(lock) {
+            val current = plan
+            val choice = current?.choice
+            val format = current?.format
+            if (!closed && !rebuildOnKeyframe && surface != null && choice is DecoderChoice.Use && format != null) {
+                wanted = choice.info to format
+                wantedSurface = surface
+            }
+            wantedEpoch = epoch
+        }
+        if (codec != null && (codecEpoch != wantedEpoch || wanted == null)) releaseCodec()
+        val build = wanted
+        val target = wantedSurface
+        if (codec == null && build != null && target != null) buildCodec(build.first, build.second, target, wantedEpoch)
+        feed()
+    }
+
+    private fun buildCodec(info: DecoderInfo, format: CodecFormat, target: Surface, forEpoch: Long) {
+        val handle = try {
+            codecFactory(info)
+        } catch (e: Exception) {
+            fail(null, forEpoch, e)
+            return
+        }
+        codec = handle
+        codecEpoch = forEpoch
+        freeInputs.clear()
+        try {
+            handle.setCallback(Events(handle))
+            handle.configure(format, target)
+            handle.start()
+            log("decoder ${info.name} started for ${format.width}x${format.height}, lowLatency=${format.lowLatency}")
+            statsFlow.update { it.copy(decoderName = info.name) }
+        } catch (e: RuntimeException) {
+            fail(handle, forEpoch, e)
+        }
+    }
+
+    /** Moves pending frames into free input buffers, in order. */
+    private fun feed() {
+        val handle = codec ?: return
+        while (freeInputs.isNotEmpty()) {
+            val frame = synchronized(lock) { if (codecEpoch == epoch) queue.poll() else null } ?: return
+            val index = freeInputs.removeFirst()
+            try {
+                val buffer = handle.inputBuffer(index) ?: throw IllegalStateException("no input buffer $index")
+                buffer.clear()
+                if (frame.payloadSize > buffer.remaining()) {
+                    throw IllegalStateException("frame of ${frame.payloadSize} bytes over the ${buffer.remaining()}-byte input buffer")
+                }
+                frame.writeAnnexB(buffer)
+                handle.queueInput(index, frame.payloadSize, presentationTimeUs(frame))
+                statsFlow.update { it.copy(framesIn = it.framesIn + 1) }
+            } catch (e: Exception) {
+                fail(handle, codecEpoch, e)
+                return
+            }
+        }
+    }
+
+    private fun onOutput(handle: CodecHandle, index: Int, presentationTimeUs: Long) {
+        handle.releaseOutput(index, true)
+        val now = nowMillis()
+        var latency: Long? = null
+        synchronized(lock) {
+            if (codecEpoch != epoch) return
+            var popped: Accepted? = null
+            while (accepted.isNotEmpty() && accepted.first().presentationTimeUs <= presentationTimeUs) {
+                popped = accepted.removeFirst()
+            }
+            if (popped == null) popped = accepted.removeFirstOrNull()
+            if (popped != null) latency = now - popped.acceptedAt
+        }
+        statsFlow.update { it.copy(framesOut = it.framesOut + 1, lastLatencyMillis = latency ?: it.lastLatencyMillis) }
+    }
+
+    /**
+     * A codec call or callback failed (or [handle] could not be created, when null). When it was
+     * the wanted codec: drop its frames and the queue (the clock carries), wait for a keyframe to
+     * rebuild, release it and ask for a keyframe.
+     */
+    private fun fail(handle: CodecHandle?, forEpoch: Long, error: Exception) {
+        if (handle != null && handle !== codec) {
+            releaseQuietly(handle)
+            return
+        }
+        log("decoder failed: ${error.javaClass.simpleName}; releasing it and requesting a keyframe")
+        val request = synchronized(lock) {
+            if (forEpoch == epoch && !closed) {
+                discardWanted()
+                rebuildOnKeyframe = true
+                true
+            } else {
+                false
+            }
+        }
+        if (handle != null) releaseCodec()
+        if (request) keyframeRequester?.invoke()
+    }
+
+    private fun releaseCodec() {
+        val handle = codec ?: return
+        codec = null
+        codecEpoch = -1
+        freeInputs.clear()
+        releaseQuietly(handle)
+        statsFlow.update { it.copy(decoderName = null) }
+    }
+
+    private fun releaseQuietly(handle: CodecHandle) {
+        try {
+            handle.stop()
+        } catch (_: RuntimeException) {
+            // Stopping a codec in the error state throws; release below still frees it.
+        }
+        try {
+            handle.release()
+        } catch (e: RuntimeException) {
+            log("releasing decoder failed: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /** Callbacks of one codec; anything for a codec that is no longer current is ignored. */
+    private inner class Events(private val handle: CodecHandle) : CodecHandle.Callback {
+        override fun onInputAvailable(index: Int) = onCurrent {
+            freeInputs.addLast(index)
+            feed()
+        }
+
+        override fun onOutputAvailable(index: Int, presentationTimeUs: Long) = onCurrent {
+            onOutput(handle, index, presentationTimeUs)
+        }
+
+        override fun onError(error: RuntimeException) = onCurrent { fail(handle, codecEpoch, error) }
+
+        override fun onOutputFormatChanged(width: Int, height: Int) = onCurrent {
+            log("decoder output format ${width}x$height")
+        }
+
+        private inline fun onCurrent(block: () -> Unit) {
+            if (handle !== codec) return
+            try {
+                block()
+            } catch (e: RuntimeException) {
+                fail(handle, codecEpoch, e)
+            }
+        }
+    }
+
+    // ---- Plumbing ----
+
+    private fun runOnDecoderAndWait(what: String, task: () -> Unit) {
+        if (decoderThread.isCurrent()) {
+            task()
+            return
+        }
+        val done = CountDownLatch(1)
+        val posted = decoderThread.post {
+            try {
+                guarded(what) { task() }
+            } finally {
+                done.countDown()
+            }
+        }
+        if (!posted) return
+        try {
+            if (!done.await(surfaceCallTimeoutMillis, TimeUnit.MILLISECONDS)) {
+                log("$what did not finish on the decoder thread within $surfaceCallTimeoutMillis ms; not waiting longer")
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
+
+    private inline fun <T> guarded(what: String, fallback: T, block: () -> T): T = try {
+        block()
+    } catch (e: RuntimeException) {
+        log("$what failed: ${e.javaClass.simpleName}")
+        fallback
+    }
+
+    private inline fun guarded(what: String, block: () -> Unit) = guarded(what, Unit, block)
+
+    private fun presentationTimeUs(frame: MediaFrame): Long {
+        val pts = frame.ptsMilliseconds
+        return if (pts >= Long.MAX_VALUE / 1000) Long.MAX_VALUE else pts * 1000
+    }
+}
