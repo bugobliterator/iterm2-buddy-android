@@ -151,8 +151,13 @@ internal enum class ConfirmationMode {
  *   at most one more bound: never more than twice its bound in all. Waiting for the stream lock
  *   (an [linkUp] still announcing) is not a sink wait.
  *
+ * Session trees: each [MacMessage.SessionTreeMessage] is stamped here, before it goes to its
+ * waiter or to [onEvent], with the next value of [arrivals], so a tree pushed through the events
+ * path and a tree returned to a request can be put back in wire order by whoever applies them.
+ *
  * @param sink where stream inputs go once the link is up; null drops them.
  * @param sinkStall the longest one accept may take before the session ends.
+ * @param arrivals the session-tree arrival counter; the client shares one across all its links.
  */
 internal class CompanionSession(
     private val socket: RelaySocket,
@@ -162,6 +167,7 @@ internal class CompanionSession(
     private val log: (String) -> Unit,
     private val sink: StreamSink? = null,
     private val sinkStall: Duration = DEFAULT_SINK_STALL,
+    private val arrivals: AtomicLong = AtomicLong(),
 ) {
     private val sendLock = Mutex()
     private val nextRequestID = AtomicLong(1)
@@ -410,12 +416,14 @@ internal class CompanionSession(
             deliver("Media") { StreamInput.Media(it, plaintext) }
             return
         }
-        val (requestID, message) = try {
+        val (requestID, decoded) = try {
             decodeEnvelope(plaintext)
         } catch (e: WireDecodeException) {
             log("dropped a frame that does not decode: ${e.message}")
             return
         }
+        // The receive loop is the one place frames are in wire order: number trees here.
+        val message = if (decoded is MacMessage.SessionTreeMessage) decoded.copy(arrival = arrivals.incrementAndGet()) else decoded
         if (isStreamScoped(message)) {
             // The sink first, so the controller has the stream before the request returns. If the
             // sink has failed or stalled it never saw this, so the waiter is left to fail when

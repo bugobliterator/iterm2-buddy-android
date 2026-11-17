@@ -79,6 +79,7 @@ dependencies {
     // MlKitException comes with it (com.google.mlkit:common, as the scanner declares).
     implementation(libs.play.services.code.scanner)
     implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.process)
     implementation(libs.bouncycastle.bcprov)
     implementation(libs.noise.java)
     // JSON tree API (JsonObject) for the wire envelope; no serialization compiler plugin.

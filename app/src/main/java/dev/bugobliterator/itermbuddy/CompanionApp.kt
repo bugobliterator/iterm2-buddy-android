@@ -1,9 +1,17 @@
 package dev.bugobliterator.itermbuddy
 
 import android.app.Application
+import android.os.SystemClock
 import android.util.Log
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import dev.bugobliterator.itermbuddy.core.CompanionClient
+import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
+import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.store.KeystorePairingStore
+import dev.bugobliterator.itermbuddy.video.HevcVideoOutput
+import dev.bugobliterator.itermbuddy.video.MediaCodecCatalog
 import dev.bugobliterator.itermbuddy.ui.ScanNotice
 import dev.bugobliterator.itermbuddy.ui.ScanOutcome
 import kotlinx.coroutines.CancellationException
@@ -27,6 +35,19 @@ import kotlin.time.Duration.Companion.seconds
  * dark mode) and keeps its connection across it. The client runs in an app-lifetime scope; the
  * Notifications plan moves its ownership to a foreground service.
  *
+ * It also owns the rest of the app-scoped sessions graph, built by [wireSessions] (the same
+ * function the tests use): the [StreamController] (the client's stream sink, sending through the
+ * client), the [HevcVideoOutput] it decodes into, the [SessionTreeRepository], and the
+ * [SessionNavigator][dev.bugobliterator.itermbuddy.ui.SessionNavigator] that alone opens and
+ * closes streams. Every unpair resets the navigator (stopping the stream) and clears the tree.
+ * [ProcessLifecycleOwner] drives the controller: `ON_STOP` (the last activity stopped: lock,
+ * home, app switch) pauses it and `ON_START` resumes it; it is debounced over configuration
+ * changes, so rotation neither pauses nor resumes.
+ *
+ * [video] is never closed: it lives as long as the process. An Application has no reliable end
+ * (`onTerminate` never runs on a device), and process death takes the codec and the decoder
+ * thread with it; the decoder itself exists only while the live view attaches a surface.
+ *
  * The client is built here but started by [startOnce], which [MainActivity] calls. Starting in
  * [onCreate] would also connect whenever the process starts without the UI, such as for
  * instrumented tests, which would then race the client for the pairing store.
@@ -40,8 +61,15 @@ class CompanionApp : Application() {
         SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e -> Log.e(TAG, "uncaught in app scope", e) },
     )
 
-    lateinit var client: CompanionClient
+    /** The sessions graph; see the class comment. */
+    lateinit var sessions: SessionsGraph
         private set
+
+    /** The live view's decoder output; process-lifetime, never closed (see the class comment). */
+    lateinit var video: HevcVideoOutput
+        private set
+
+    val client: CompanionClient get() = sessions.client
 
     private val started = AtomicBoolean(false)
 
@@ -64,7 +92,24 @@ class CompanionApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        client = CompanionClient(KeystorePairingStore(this), OkHttpClient(), scope)
+        video = HevcVideoOutput(MediaCodecCatalog())
+        sessions = wireSessions(
+            scope,
+            newClient = { sink -> CompanionClient(KeystorePairingStore(this), OkHttpClient(), scope, streamSink = sink) },
+            newController = { link ->
+                StreamController(link, video, scope, nowMillis = SystemClock::uptimeMillis, log = { Log.i(STREAM_TAG, it) })
+            },
+            newRepository = { client -> SessionTreeRepository(client, scope) },
+            log = { Log.w(TAG, it) },
+        )
+        // Application.onCreate runs on the main thread, as addObserver requires.
+        ProcessLifecycleOwner.get().lifecycle.addObserver(
+            object : DefaultLifecycleObserver {
+                override fun onStart(owner: LifecycleOwner) = sessions.controller.resume()
+
+                override fun onStop(owner: LifecycleOwner) = sessions.controller.pause()
+            },
+        )
     }
 
     /** Calls [CompanionClient.start] once per process, however often the activity is recreated. */
@@ -124,6 +169,7 @@ class CompanionApp : Application() {
 
     private companion object {
         const val TAG = "CompanionApp"
+        const val STREAM_TAG = "StreamController"
         val UNPAIR_FAILED_SHOWN = 5.seconds
     }
 }

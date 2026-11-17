@@ -139,8 +139,14 @@ sealed interface MacMessage {
     /**
      * `sessionTree(CompanionSessionTree)`: the reply to [PhoneMessage.FetchSessionTree], or,
      * with no request ID, the Mac's unsolicited push (phone revision 13 or later).
+     *
+     * [arrival] orders trees that reach the app by different paths (a push through
+     * `CompanionClient.events`, a reply through `request`): `CompanionSession.handle` stamps
+     * every tree with the next number of one counter the client keeps across all its links, in
+     * the order the frames were received, so a larger [arrival] is always the newer tree. A tree
+     * decoded outside a session has 0.
      */
-    data class SessionTreeMessage(val tree: SessionTree) : MacMessage
+    data class SessionTreeMessage(val tree: SessionTree, val arrival: Long = 0) : MacMessage
 
     /**
      * `streamStarted(CompanionStreamStarted)`: [streamID] is upstream `UInt32`. The stream

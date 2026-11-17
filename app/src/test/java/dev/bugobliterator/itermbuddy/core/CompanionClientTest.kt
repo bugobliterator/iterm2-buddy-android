@@ -1141,8 +1141,12 @@ class CompanionClientTest {
         h.mac.sendSample("messages/live-session/session-tree-reply.json", requestID)
 
         val tree = reply.await() as MacMessage.SessionTreeMessage
-        assertEquals(liveSample("session-tree-reply.json"), tree)
-        assertEquals(listOf(liveSample("session-tree-push.json")), events.toList())
+        assertEquals((liveSample("session-tree-reply.json") as MacMessage.SessionTreeMessage).tree, tree.tree)
+        val push = events.single() as MacMessage.SessionTreeMessage
+        assertEquals((liveSample("session-tree-push.json") as MacMessage.SessionTreeMessage).tree, push.tree)
+        // Both paths carry the arrival order: the push came first.
+        assertTrue("${push.arrival} < ${tree.arrival}", push.arrival in 1 until tree.arrival)
+        assertEquals(tree.arrival, h.client.newestArrival)
     }
 
     @Test
@@ -1173,7 +1177,7 @@ class CompanionClientTest {
         assertTrue(h.store.load()!!.isSamePairingAs(record))
         assertEquals(1, h.mac.handshakes.get())
         assertEquals("no confirmation from a pinned Mac", 0, h.mac.confirmationsSent.get())
-        assertEquals(listOf(liveSample("session-tree-push.json")), events.toList())
+        assertEquals(listOf(MacMessage.SessionTreeMessage((liveSample("session-tree-push.json") as MacMessage.SessionTreeMessage).tree, arrival = 1)), events.toList())
         assertEquals(MacMessage.Pong, h.client.request(PhoneMessage.Ping))
     }
 
