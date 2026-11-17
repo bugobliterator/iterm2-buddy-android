@@ -57,6 +57,7 @@ class HevcDecodePathDeviceTest {
 
     @Before
     fun setUp() {
+        logDecoderCatalogOnce()
         reader = ImageReader.newInstance(clip.config.pixelWidth, clip.config.pixelHeight, ImageFormat.PRIVATE, 4)
         reader.setOnImageAvailableListener(
             { r ->
@@ -231,6 +232,23 @@ class HevcDecodePathDeviceTest {
         return video
     }
 
+    /**
+     * The device's whole HEVC decoder catalog, once per run, for the report: name, hardware or
+     * software, FEATURE_LowLatency and the largest size, in the app's preference order.
+     */
+    private fun logDecoderCatalogOnce() {
+        if (!catalogLogged.compareAndSet(false, true)) return
+        val decoders = MediaCodecCatalog().decoders()
+        Log.i(TAG, "HEVC decoder catalog: ${decoders.size} decoder(s)")
+        for ((index, info) in decoders.withIndex()) {
+            Log.i(
+                TAG,
+                "decoder ${index + 1}: ${info.name} isHardware=${info.isHardware} lowLatency=${info.supportsLowLatency} " +
+                    "max=${info.maxWidth}x${info.maxHeight}",
+            )
+        }
+    }
+
     private fun timestampNs(frame: MediaFrame) = frame.ptsMilliseconds * 1_000_000
 
     private fun awaitImage(frame: MediaFrame, deadline: Long): Long? {
@@ -352,6 +370,9 @@ class HevcDecodePathDeviceTest {
 
     private companion object {
         const val TAG = "HevcDecodePathDeviceTest"
+
+        /** The catalog is logged once per test run (the class is instantiated per test). */
+        val catalogLogged = AtomicBoolean(false)
         const val FRAME_GAP_MILLIS = 33L
     }
 }

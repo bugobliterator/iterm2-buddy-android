@@ -146,6 +146,29 @@ class InputSenderTest {
         for (line in h.log) assertFalse(line, "SENTINEL" in line || "paste-9f3c" in line)
     }
 
+    /** Discard and timeout logs give the kind and counts only: no special key's name, no length. */
+    @Test
+    fun discardAndTimeoutLogsGiveKindAndCountOnly() = runTest {
+        val h = harness()
+        h.link.behaviour = { awaitCancellation() }
+        val special = KeyEvent(Key.Special(SpecialKey.PAGE_DOWN))
+        h.sender.key(first, special)
+        settle()
+        h.current = first.copy(watchEpoch = 2)
+        h.sender.key(first, special)
+        h.sender.paste(first, "abc")
+        settle()
+        val timedOut = h.log.single { "timed out" in it }
+        val discarded = h.log.filter { "discarded" in it }
+        assertTrue(timedOut, timedOut.startsWith("key for "))
+        assertEquals(2, discarded.size)
+        assertTrue(discarded[0], discarded[0].startsWith("discarded stale key for ") && discarded[0].endsWith("; 1 discarded in all"))
+        assertTrue(discarded[1], discarded[1].startsWith("discarded stale paste for ") && discarded[1].endsWith("; 2 discarded in all"))
+        for (line in h.log) {
+            assertFalse(line, line.contains("pageDown", ignoreCase = true) || line.contains("PAGE_DOWN") || "len=" in line)
+        }
+    }
+
     @Test
     fun inputQueuedBeforeReconnectIsDiscarded() = runTest {
         val h = harness()

@@ -15,6 +15,7 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.core.stream.fitToPhone
 import dev.bugobliterator.itermbuddy.store.KeystorePairingStore
 import dev.bugobliterator.itermbuddy.ui.live.ComposerDrafts
+import dev.bugobliterator.itermbuddy.ui.live.LiveInputMemories
 import dev.bugobliterator.itermbuddy.video.HevcVideoOutput
 import dev.bugobliterator.itermbuddy.video.MediaCodecCatalog
 import dev.bugobliterator.itermbuddy.ui.ScanNotice
@@ -46,8 +47,9 @@ import kotlin.time.Duration.Companion.seconds
  * [SessionNavigator][dev.bugobliterator.itermbuddy.ui.SessionNavigator] that alone opens and
  * closes streams. Every unpair resets the navigator (stopping the stream) and clears the tree.
  * [ProcessLifecycleOwner] drives the controller: `ON_STOP` (the last activity stopped: lock,
- * home, app switch) pauses it and `ON_START` resumes it; it is debounced over configuration
- * changes, so rotation neither pauses nor resumes.
+ * home, app switch) pauses it and `ON_START` resumes it and kicks a reconnect
+ * ([CompanionClient.reconnectNow]); it is debounced over configuration changes, so rotation
+ * neither pauses nor resumes.
  *
  * [input] is the one ordered path for keys and pastes: app-scoped, so a key typed just before the
  * activity is recreated is still sent, and it sends only while its target is the controller's
@@ -82,6 +84,9 @@ class CompanionApp : Application() {
 
     /** The composer's per-session drafts, in memory only. */
     val drafts = ComposerDrafts()
+
+    /** Each session's sticky modifiers, tray and keyboard-restore flag, in memory only. */
+    val inputMemories = LiveInputMemories()
 
     /** Keys and pastes for the live session; see the class comment. */
     lateinit var input: InputSender
@@ -159,7 +164,11 @@ class CompanionApp : Application() {
         // Application.onCreate runs on the main thread, as addObserver requires.
         ProcessLifecycleOwner.get().lifecycle.addObserver(
             object : DefaultLifecycleObserver {
-                override fun onStart(owner: LifecycleOwner) = sessions.controller.resume()
+                override fun onStart(owner: LifecycleOwner) {
+                    // Back in the app: do not wait out a grown backoff (up to 30 s) to reconnect.
+                    sessions.client.reconnectNow()
+                    sessions.controller.resume()
+                }
 
                 override fun onStop(owner: LifecycleOwner) = sessions.controller.pause()
             },
@@ -197,6 +206,7 @@ class CompanionApp : Application() {
     fun unpair() {
         unpairingFlow.value = true
         drafts.clear()
+        inputMemories.clear()
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
                 client.unpair()

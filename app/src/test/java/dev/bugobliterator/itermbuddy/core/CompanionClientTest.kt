@@ -697,6 +697,74 @@ class CompanionClientTest {
         assertEquals(MacMessage.Pong, h.client.request(PhoneMessage.Ping))
     }
 
+    /** Foreground after repeated failures: the grown backoff is cut short and the count restarts. */
+    @Test
+    fun reconnectNowCutsAnOrdinaryBackoffShort() = runTest {
+        val h = Harness(this)
+        val record = h.stored(PairingStage.REGISTERED)
+        h.macPinned(record)
+        h.client.start()
+        h.await { it is ClientState.WaitingForMac }
+        advanceTimeBy(3.minutes) // the backoff has grown to its 30 s cap
+        h.mac.start()
+        runCurrent()
+        val before = h.relay.phoneAdmissions.size
+        val from = currentTime
+        assertTrue(h.client.reconnectNow())
+        h.awaitConnected()
+        assertTrue("reconnected at once, not after the backoff: ${currentTime - from} ms", currentTime - from < 1_000)
+        assertEquals(before + 1, h.relay.phoneAdmissions.size)
+        assertTrue(h.logs.contains("reconnecting now: backoff cut short"))
+    }
+
+    @Test
+    fun reconnectNowLeavesConnectedAndConnectingAlone() = runTest {
+        val h = Harness(this)
+        val record = h.stored(PairingStage.REGISTERED)
+        h.macPinned(record)
+        h.mac.start()
+        h.client.start()
+        assertFalse("connecting: no backoff to cut", h.client.reconnectNow())
+        h.awaitConnected()
+        val admissions = h.relay.phoneAdmissions.size
+        assertFalse(h.client.reconnectNow())
+        runCurrent()
+        assertTrue(h.client.state.value is ClientState.Connected)
+        assertEquals(admissions, h.relay.phoneAdmissions.size)
+        assertEquals(1, h.history.count { it.second is ClientState.Connected })
+    }
+
+    @Test
+    fun reconnectNowResumesFromIdle() = runTest {
+        val h = Harness(this)
+        val record = h.stored(PairingStage.REGISTERED)
+        h.macPinned(record)
+        h.client.start()
+        h.await { it is ClientState.WaitingForMac }
+        h.client.cancel()
+        assertEquals(ClientState.Idle, h.await { it == ClientState.Idle })
+        h.mac.start()
+        assertTrue(h.client.reconnectNow())
+        h.awaitConnected()
+    }
+
+    @Test
+    fun reconnectNowKeepsTheDisplacedWait() = runTest {
+        val h = Harness(this)
+        val record = h.stored(PairingStage.REGISTERED)
+        h.macPinned(record)
+        h.mac.start()
+        h.client.start()
+        h.awaitConnected(1)
+        h.relay.closePhone(room, 1000, "displaced")
+        runCurrent()
+        assertFalse(h.client.reconnectNow())
+        advanceTimeBy(59.seconds)
+        assertEquals("still waits 60 s after displaced", 1, h.relay.phoneAdmissions.size)
+        advanceTimeBy(2.seconds)
+        h.awaitConnected(2)
+    }
+
     @Test
     fun displacedWaitsBeforeReconnect() = runTest {
         val h = Harness(this)

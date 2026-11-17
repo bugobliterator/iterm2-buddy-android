@@ -35,12 +35,18 @@ import kotlin.time.Duration.Companion.seconds
  * @property keyframeRequestGap at most one `requestKeyframe` per this interval (Android-only).
  * @property stallPoll (addition) how often a stalled picture is checked for recovery: the
  *   [VideoOutput] has no output callback, so clearing the label is polled while it shows.
+ * @property keyframeGiveUp (addition) how long keyframe requests may follow one another (each
+ *   within four [keyframeRequestGap]s of the last) with no frame accepted by the output before
+ *   the stream is given up: stopped, and [LiveProblem.StartFailed] (retryable) shown. Bounds the
+ *   loops a stream the output can never take would cause: a config whose parameter sets never
+ *   complete, or keyframes over the decoder's largest input, each answered by another request.
  */
 data class StreamTimeouts(
     val start: Duration = 15.seconds,
     val stallAfter: Duration = 1.seconds,
     val keyframeRequestGap: Duration = 500.milliseconds,
     val stallPoll: Duration = 250.milliseconds,
+    val keyframeGiveUp: Duration = 10.seconds,
 )
 
 /**
@@ -221,6 +227,9 @@ class StreamController(
 
     /** When the output began refusing every frame while Ready (Android-only stall cause), or null. */
     private var rejectingSince: Long? = null
+
+    /** When the current run of keyframe requests with no frame accepted in between began, or null. */
+    private var requestRunSince: Long? = null
     private var stallTimer: Job? = null
     private var stallTimerAt = Long.MAX_VALUE
 
@@ -453,6 +462,7 @@ class StreamController(
         }
         if (submitted) {
             rejectingSince = null
+            requestRunSince = null
         } else {
             val readiness = readinessOrNull()
             if (readiness == VideoReadiness.Ready) {
@@ -684,8 +694,29 @@ class StreamController(
             }
             return
         }
+        // A run of requests: each within four gaps of the last, with no frame accepted between.
+        val runSince = requestRunSince
+        if (runSince == null || last == null || now - last > gap * KEYFRAME_RUN_GAPS) {
+            requestRunSince = now
+        } else if (now - runSince >= timeouts.keyframeGiveUp.inWholeMilliseconds) {
+            giveUpOnKeyframes(stream, now - runSince)
+            return
+        }
         lastKeyframeRequestAt = now
         outbox.trySend(Out.Send(PhoneMessage.RequestKeyframe(stream.streamID), stream.linkId))
+    }
+
+    /**
+     * Keyframe requests have gone on for [StreamTimeouts.keyframeGiveUp] and the output has taken
+     * no frame: the stream cannot be shown (parameter sets that never complete, keyframes over
+     * the decoder's largest input). Stop it rather than loop; Retry, a resume or a new link
+     * starts a fresh one.
+     */
+    private fun giveUpOnKeyframes(stream: Active, forMillis: Long) {
+        log("giving up on stream ${stream.streamID}: keyframe requests for $forMillis ms and no frame accepted")
+        stopActive()
+        resetVideo()
+        setState(LiveViewState.Failed(stream.session, LiveProblem.StartFailed(retryable = true)))
     }
 
     private fun readinessOrNull(): VideoReadiness? = try {
@@ -757,6 +788,7 @@ class StreamController(
     private fun setActive(stream: Active?) {
         active = stream
         rejectingSince = null
+        requestRunSince = null
         deferredKeyframe?.cancel()
         deferredKeyframe = null
         if (stream == null) cancelStallTimer()
@@ -785,6 +817,9 @@ class StreamController(
 
     private companion object {
         const val UNKNOWN_SESSION = "unknownSession"
+
+        /** Requests further apart than this many gaps start a new run (see [StreamTimeouts.keyframeGiveUp]). */
+        const val KEYFRAME_RUN_GAPS = 4
     }
 }
 

@@ -680,6 +680,68 @@ class StreamControllerTest {
         assertTrue(h.keyframeRequests() >= 1)
     }
 
+    /** A config whose parameter sets never complete: the request loop ends after keyframeGiveUp. */
+    @Test
+    fun configThatNeverCompletesGivesUpAfterTenSeconds() = runTest {
+        val h = Harness(this)
+        h.video.configureResult = { VideoReadiness.WaitingForConfig }
+        h.connect()
+        h.controller.open(A)
+        runCurrent()
+        advanceTimeBy(9.seconds)
+        assertEquals(LiveViewState.Starting(A), h.state)
+        assertTrue("the loop runs meanwhile: ${h.keyframeRequests()}", h.keyframeRequests() >= 15)
+        advanceTimeBy(2.seconds)
+        assertEquals(LiveViewState.Failed(A, LiveProblem.StartFailed(retryable = true)), h.state)
+        assertEquals(listOf(1L), h.stops())
+        assertNull(h.active)
+        val requests = h.keyframeRequests()
+        advanceTimeBy(10.seconds)
+        assertEquals("no more requests once given up", requests, h.keyframeRequests())
+        // Retry starts afresh.
+        h.video.configureResult = { VideoReadiness.Ready }
+        h.controller.retry()
+        runCurrent()
+        assertEquals(2, h.starts().size)
+        assertTrue(h.state is LiveViewState.Live)
+    }
+
+    /** Keyframes the output keeps refusing (say over 16 MiB): the same give-up, not an endless 2 per second. */
+    @Test
+    fun keyframesTheOutputKeepsRefusingGiveUpAfterTenSeconds() = runTest {
+        val h = Harness(this)
+        h.openLive()
+        h.video.submitResult = { false }
+        h.mac.sendMedia(frame(1, 33, keyframe = true))
+        runCurrent()
+        advanceTimeBy(9.seconds)
+        assertTrue(h.state is LiveViewState.Live)
+        advanceTimeBy(2.seconds)
+        assertEquals(LiveViewState.Failed(A, LiveProblem.StartFailed(retryable = true)), h.state)
+        assertEquals(listOf(1L), h.stops())
+        val requests = h.keyframeRequests()
+        assertTrue("about two a second until then: $requests", requests in 18..23)
+        advanceTimeBy(10.seconds)
+        assertEquals(requests, h.keyframeRequests())
+    }
+
+    /** Requests far apart are separate runs: an idle stream with an old unanswered request never gives up. */
+    @Test
+    fun spacedKeyframeRequestsNeverGiveUp() = runTest {
+        val h = Harness(this)
+        h.openLive()
+        h.mac.onRequest("requestKeyframe") { null } // lost: no answer
+        h.video.submitResult = { false }
+        repeat(4) {
+            h.mac.sendMedia(frame(1, 1000L + it))
+            runCurrent()
+            advanceTimeBy(20.seconds)
+        }
+        assertEquals(4, h.keyframeRequests())
+        assertTrue(h.state is LiveViewState.Live)
+        assertEquals(emptyList<Long>(), h.stops())
+    }
+
     @Test
     fun outputRunningOutOfDecodersFailsAsNoDecoder() = runTest {
         val h = Harness(this)

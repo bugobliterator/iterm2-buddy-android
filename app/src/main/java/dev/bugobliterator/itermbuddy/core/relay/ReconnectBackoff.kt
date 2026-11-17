@@ -49,6 +49,17 @@ fun requiresRescan(close: RelayClose): Boolean =
  * that: null after a local close, a drop (1006), a timeout, an HTTP failure or a rejection, and
  * never carried over from an earlier connection. Check [requiresRescan] before calling this.
  */
+/**
+ * Whether [lastClose] asks for one of the long waits (1000 "displaced", 1008 "daily quota"):
+ * those are the relay's orders and must not be cut short, even when the user comes back.
+ */
+fun isLongWait(lastClose: RelayClose?): Boolean {
+    if (lastClose == null) return false
+    val reason = lastClose.reason.lowercase(Locale.ROOT)
+    return (lastClose.code == CLOSE_NORMAL && reason.contains(CLOSE_REASON_DISPLACED)) ||
+        (lastClose.code == CLOSE_POLICY && reason.contains("daily quota"))
+}
+
 fun nextDelayMillis(attempt: Int, lastClose: RelayClose?, random: Random): Long {
     require(attempt >= 1) { "attempt is 1-based, got $attempt" }
     if (lastClose != null) {

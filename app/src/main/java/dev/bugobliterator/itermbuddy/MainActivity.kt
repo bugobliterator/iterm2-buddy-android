@@ -78,6 +78,8 @@ class MainActivity : ComponentActivity() {
 
         override fun setComposerDraft(sessionGuid: String, draft: String) = app.drafts.set(sessionGuid, draft)
 
+        override fun inputMemory(sessionGuid: String) = app.inputMemories.of(sessionGuid)
+
         override fun refresh() = app.sessions.repository.refresh()
 
         override fun reconnect() {

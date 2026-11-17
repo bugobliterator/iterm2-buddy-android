@@ -90,7 +90,9 @@ private const val TAG = "HevcVideoOutput"
  * partial output leaves the next frame's time at the head. Frames dropped or replaced in the queue,
  * or lost with a released codec, take their entries with them, but when that empties the FIFO the
  * earliest removed time is carried onto the next accepted frame, and reported meanwhile, so neither
- * a replacing keyframe nor a codec rebuild resets the clock. Only [reset] and [close] empty it.
+ * a replacing keyframe nor a codec rebuild while attached resets the clock. Only [reset], [close]
+ * and [detachSurface] empty it: with no surface nothing is overdue, and a rotation with a frame in
+ * flight must not show "Picture stalled" once the surface is back.
  *
  * **Ownership.** The output owns its decoder thread. Whoever constructs it (the app-scoped live
  * view owner) calls [close] when it is done with it; until then the thread lives, idle, with the
@@ -302,12 +304,18 @@ class HevcVideoOutput(
         keyframeRequester?.invoke()
     }
 
-    /** The view's surface is going away: releases the decoder before returning (or the timeout). */
+    /**
+     * The view's surface is going away: releases the decoder before returning (or the timeout).
+     * The overdue clock is emptied, not carried: frames in flight are lost with the surface, not
+     * held by a stuck decoder, so a rotation must not count them as a stall once the surface is back.
+     */
     fun detachSurface() = guarded("detachSurface") {
         synchronized(lock) {
             if (closed) return@guarded
             surface = null
             discardWanted()
+            accepted.clear()
+            carriedSince = null
             rebuildOnKeyframe = false
         }
         runOnDecoderAndWait("detachSurface") { reconcile() }
