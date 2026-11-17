@@ -12,6 +12,7 @@ import dev.bugobliterator.itermbuddy.core.relay.JoinSigner
 import dev.bugobliterator.itermbuddy.core.relay.RelayClosedException
 import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
 import dev.bugobliterator.itermbuddy.core.relay.RelaySendException
+import dev.bugobliterator.itermbuddy.core.stream.parseMediaFrame
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
@@ -50,7 +51,10 @@ import java.io.IOException
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.time.Duration
 
 /** One parked Mac socket: binary frames to and from the phone after admission. */
 interface MacSocket {
@@ -95,6 +99,11 @@ interface MacRelay {
  *   `unpaired`. When its socket closes it parks again.
  * - Tests drive streams with [sendMedia], [sendMessage] and [sendSample], answer requests with
  *   [onRequest], and read what the phone sent in [received].
+ * - Live streams, as `MC/CompanionHostBridge.swift` serves them: `startSessionStream` is answered
+ *   with `streamStarted` (stream IDs from 1 on each link, assigned when the request arrives) and
+ *   then a `streamConfig` ([startCodec], [startError], [configOnStart]); `stopSessionStream` with
+ *   `streamEnded(stoppedByClient)`; `streamAck` feeds the in-flight limiter of [startStreaming];
+ *   [delayReply] holds back the next reply to a case.
  */
 class FakeMac(
     private val relay: MacRelay,
@@ -162,6 +171,40 @@ class FakeMac(
     val staticMismatches = AtomicInteger()
 
     @Volatile private var job: Job? = null
+
+    /** The codec string the next `streamStarted` replies carry; v3.7.7 always sends `hevc`. */
+    @Volatile var startCodec = "hevc"
+
+    /** When set, `startSessionStream` is answered with this error fixture (path under `fixtures/`). */
+    @Volatile var startError: String? = null
+
+    /** Whether a `streamConfig` follows each `streamStarted` at once, as the Mac sends it. */
+    @Volatile var configOnStart = true
+
+    /** Stream IDs handed out on the current link: the next one is this plus one. */
+    private val streamCounter = AtomicLong()
+
+    /** One-shot reply delays by request case; see [delayReply]. */
+    private val replyDelays = ConcurrentHashMap<String, Duration>()
+
+    // The in-flight limiter (`MC/CompanionHostBridge.swift`), reset by each stream start.
+    @Volatile private var firstAckSeen = false
+    @Volatile private var lastSentPts = 0L
+    @Volatile private var lastAckedPts = 0L
+    @Volatile private var lastQueueDepth = 0
+    @Volatile private var insurance: Job? = null
+    private val sentFrames = AtomicInteger()
+    private val heldFrames = AtomicInteger()
+    private val insuranceKeyframes = AtomicInteger()
+
+    /** Media frames from [startStreaming] sent so far (insurance keyframes not included). */
+    val sentFrameCount: Int get() = sentFrames.get()
+
+    /** Non-keyframes [startStreaming] held back (not sent) because of the in-flight limiter. */
+    val heldFrameCount: Int get() = heldFrames.get()
+
+    /** Insurance keyframes sent 0.3 s after the last P-frame. */
+    val insuranceKeyframeCount: Int get() = insuranceKeyframes.get()
 
     @Volatile private var verdict: CompletableDeferred<Boolean>? = null
 
@@ -238,6 +281,75 @@ class FakeMac(
      */
     fun onRequest(case: String, answer: (JsonObject) -> JsonObject?) {
         requestHandlers[case] = answer
+    }
+
+    /** The next reply to a request whose case is [case] is sent [by] later; the serve loop is not held up. */
+    fun delayReply(case: String, by: Duration) {
+        replyDelays[case] = by
+    }
+
+    /** The bodies (`{"<case>": body}`) of the received messages whose case is [case], in order. */
+    fun receivedBodies(case: String): List<JsonObject> =
+        receivedEnvelopes().mapNotNull { (it.getValue("payload").jsonObject[case] as? JsonObject) }
+
+    /** Sends the fixture `streamConfig` for [streamID], with [patch] applied to its fields. */
+    suspend fun sendStreamConfig(streamID: Long, patch: Map<String, JsonElement> = emptyMap()) {
+        sendMessage(streamConfigPayload(streamID, patch), null)
+    }
+
+    /** Sends `streamEnded(streamID:reason:)`. */
+    suspend fun sendStreamEnded(streamID: Long, reason: String) {
+        sendMessage(streamEnded(streamID, reason), null)
+    }
+
+    /**
+     * Sends [frames] (encoded media frames, header and payload) one every [frameIntervalMillis],
+     * through the Mac's in-flight limiter: until the first `streamAck` every frame goes; after it,
+     * a non-keyframe is held (not sent, counted in [heldFrameCount]) while
+     * `lastSentPts − lastAckedPts > 500` or the last reported `queueDepth > 4`; keyframes always
+     * go. 0.3 s after the last P-frame sent, with nothing sent since, the Mac sends an insurance
+     * keyframe: the newest keyframe in [frames] so far, restamped 300 ms later. Stops quietly if
+     * the link goes away.
+     */
+    fun startStreaming(frames: List<ByteArray>, frameIntervalMillis: Long): Job = scope.launch {
+        var lastKeyframe: ByteArray? = null
+        for ((index, frame) in frames.withIndex()) {
+            if (index > 0) delay(frameIntervalMillis)
+            val parsed = parseMediaFrame(frame)
+            if (parsed.isKeyframe) lastKeyframe = frame
+            val blocked = firstAckSeen && (lastSentPts - lastAckedPts > LIMITER_MAX_IN_FLIGHT_MILLIS || lastQueueDepth > LIMITER_MAX_QUEUE_DEPTH)
+            if (!parsed.isKeyframe && blocked) {
+                heldFrames.incrementAndGet()
+                continue
+            }
+            if (!sendMediaIfLinked(frame)) return@launch
+            sentFrames.incrementAndGet()
+            lastSentPts = parsed.ptsMilliseconds
+            insurance?.cancel()
+            val keyframe = lastKeyframe
+            if (!parsed.isKeyframe && keyframe != null) {
+                val pts = parsed.ptsMilliseconds + INSURANCE_DELAY_MILLIS
+                insurance = scope.launch {
+                    delay(INSURANCE_DELAY_MILLIS)
+                    if (sendMediaIfLinked(restamp(keyframe, pts))) {
+                        insuranceKeyframes.incrementAndGet()
+                        lastSentPts = pts
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun sendMediaIfLinked(frame: ByteArray): Boolean {
+        val current = link ?: return false
+        return try {
+            send(current, byteArrayOf(MEDIA_CHANNEL) + frame)
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /** Sends raw [plaintext] on the link, such as a frame the phone cannot decode. */
@@ -320,6 +432,7 @@ class FakeMac(
             staticMismatches.incrementAndGet()
             return true
         }
+        streamCounter.set(0)
         link = current
         for (frame in socket.incoming) {
             val plaintext = channel.decryptFrame(frame) ?: continue
@@ -340,6 +453,17 @@ class FakeMac(
             return
         }
         when (case) {
+            "startSessionStream" -> if (answering) answerStart(current, requestID)
+            "stopSessionStream" -> {
+                val streamID = payload.getValue(case).jsonObject.getValue("streamID").jsonPrimitive.long
+                send(current, envelope(streamEnded(streamID, "stoppedByClient"), null))
+            }
+            "streamAck" -> {
+                val ack = payload.getValue(case).jsonObject
+                lastAckedPts = ack.getValue("lastPTSMilliseconds").jsonPrimitive.long
+                lastQueueDepth = ack.getValue("queueDepth").jsonPrimitive.long.toInt()
+                firstAckSeen = true
+            }
             "hello" -> if (answering) {
                 for (path in beforeHelloReply) send(current, sampleEnvelope(path, null))
                 send(current, helloReply(requestID))
@@ -359,6 +483,44 @@ class FakeMac(
             }
             "ping" -> if (answering) send(current, fixtureEnvelope("pong.json", requestID))
             "unpairing" -> unpairings.incrementAndGet()
+        }
+    }
+
+    /** Starts a stream at once (its ID is taken now) and replies, after any [delayReply]. */
+    private suspend fun answerStart(current: Link, requestID: Long?) {
+        val error = startError
+        val streamID = if (error == null) streamCounter.incrementAndGet() else 0L
+        if (error == null) {
+            firstAckSeen = false
+            lastSentPts = 0
+            lastAckedPts = 0
+            lastQueueDepth = 0
+        }
+        val codec = startCodec
+        val withConfig = configOnStart
+        val reply: suspend () -> Unit = {
+            if (error != null) {
+                send(current, sampleEnvelope(error, requestID))
+            } else {
+                val started = JsonObject(mapOf("codec" to JsonPrimitive(codec), "streamID" to JsonPrimitive(streamID)))
+                send(current, envelope(JsonObject(mapOf("streamStarted" to JsonObject(mapOf("_0" to started)))), requestID))
+                if (withConfig) send(current, envelope(streamConfigPayload(streamID, emptyMap()), null))
+            }
+        }
+        val wait = replyDelays.remove("startSessionStream")
+        if (wait == null) {
+            reply()
+        } else {
+            scope.launch {
+                delay(wait)
+                try {
+                    reply()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // The link went away while the reply was held back.
+                }
+            }
         }
     }
 
@@ -390,10 +552,38 @@ class FakeMac(
     }
 
     companion object {
+        const val LIMITER_MAX_IN_FLIGHT_MILLIS = 500L
+        const val LIMITER_MAX_QUEUE_DEPTH = 4
+        const val INSURANCE_DELAY_MILLIS = 300L
         const val MAC_REVISION = 15
         const val MAC_MINIMUM_PEER = 11
         const val DEFAULT_REPARK_DELAY_MILLIS = 50L
         private const val MEDIA_CHANNEL: Byte = 0x01
+
+        /** `{"streamConfig": {"_0": ...}}` from the terminal fixture, for [streamID], with [patch] applied. */
+        fun streamConfigPayload(streamID: Long, patch: Map<String, JsonElement>): JsonObject {
+            val sample = Json.parseToJsonElement(Fixtures.read("messages/live-session/stream-config-terminal.json"))
+                .jsonObject.getValue("json").jsonObject.getValue("payload").jsonObject
+            val body = sample.getValue("streamConfig").jsonObject.getValue("_0").jsonObject
+            val fields = LinkedHashMap(body)
+            fields["streamID"] = JsonPrimitive(streamID)
+            fields.putAll(patch)
+            return JsonObject(mapOf("streamConfig" to JsonObject(mapOf("_0" to JsonObject(fields)))))
+        }
+
+        fun streamEnded(streamID: Long, reason: String): JsonObject = JsonObject(
+            mapOf("streamEnded" to JsonObject(mapOf("streamID" to JsonPrimitive(streamID), "reason" to JsonPrimitive(reason)))),
+        )
+
+        /** [frame] with its pts set to [pts] and the keyframe flag set. */
+        fun restamp(frame: ByteArray, pts: Long): ByteArray {
+            val copy = frame.copyOf()
+            ByteBuffer.wrap(copy).putLong(PTS_OFFSET, pts)
+            copy[1] = (copy[1].toInt() or 1).toByte()
+            return copy
+        }
+
+        private const val PTS_OFFSET = 10
 
         /** A session sample's `json` tree. */
         fun fixtureJson(name: String): JsonObject =
