@@ -82,11 +82,11 @@ class CompanionApp : Application() {
 
     val client: CompanionClient get() = sessions.client
 
-    /** The composer's per-session drafts, in memory only. */
-    val drafts = ComposerDrafts()
+    /** The composer's per-session drafts, in memory only; emptied on unpair by the graph. */
+    val drafts: ComposerDrafts get() = sessions.drafts
 
-    /** Each session's sticky modifiers, tray and keyboard-restore flag, in memory only. */
-    val inputMemories = LiveInputMemories()
+    /** Each session's sticky modifiers, tray and keyboard-restore flag; emptied on unpair by the graph. */
+    val inputMemories: LiveInputMemories get() = sessions.inputMemories
 
     /** Keys and pastes for the live session; see the class comment. */
     lateinit var input: InputSender
@@ -205,8 +205,6 @@ class CompanionApp : Application() {
      */
     fun unpair() {
         unpairingFlow.value = true
-        drafts.clear()
-        inputMemories.clear()
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
                 client.unpair()

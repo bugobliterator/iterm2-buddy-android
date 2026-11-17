@@ -15,10 +15,12 @@ import kotlin.math.min
  * - **image**: encoded pixels of the stream, origin top-left (`browserTap` coordinates, and
  *   [StreamConfig.cellGeometry] units).
  *
- * The canvas is edge to edge: a top inset (status bar and the top bar drawn over the picture) and a
- * bottom inset (the navigation bar, or the keyboard and key bar while typing) bound the visible
- * area that fit and the clamp use: zoomed in, the image can be panned until its edge meets an
- * inset, so what lies behind the bars is reachable, and never further.
+ * The canvas is edge to edge. Insets bound the visible area that fit and the clamp use: top (the
+ * status bar and the top bar drawn over the picture), bottom (the navigation bar, or the keyboard
+ * and key bar while typing), left and right (system bars and display cutouts in landscape), as
+ * iOS's safe-area content insets. Content larger than the visible area pans until its edge meets
+ * an inset, so what lies behind the bars is reachable, and never further; smaller content is
+ * centred across and top-aligned down.
  *
  * No function here divides by a size it has not checked: a 0×0 image, an empty view or a browser
  * config's 0×0 grid give an empty fit, scale 1 or null, never an exception or a NaN.
@@ -72,11 +74,20 @@ fun nextZoomKey(previous: ZoomKey?, sessionGuid: String, width: Int, height: Int
 }
 
 /**
- * [state] made valid for [fit] in a [viewW]×[viewH] view (content kept covering it, or centred),
- * scale unchanged: a kept zoom after the canvas changes size.
+ * [state] made valid for [fit] in a [viewW]×[viewH] view with the given insets (content kept
+ * covering the visible area, or centred across and top-aligned down), scale unchanged: a kept zoom
+ * after the canvas or an inset changes.
  */
-fun clampZoom(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float, bottomInset: Float = 0f, topInset: Float = 0f): ZoomState =
-    clamp(sane(state), fit, viewW, viewH, inset(bottomInset), inset(topInset))
+fun clampZoom(
+    state: ZoomState,
+    fit: FitRect,
+    viewW: Float,
+    viewH: Float,
+    bottomInset: Float = 0f,
+    topInset: Float = 0f,
+    leftInset: Float = 0f,
+    rightInset: Float = 0f,
+): ZoomState = clamp(sane(state), fit, viewW, viewH, Edges(leftInset, topInset, rightInset, bottomInset))
 
 /** [imageW]×[imageH] aspect-fit into [viewW]×[viewH] and centred; [FitRect.EMPTY] when either is empty. */
 fun fitRect(imageW: Int, imageH: Int, viewW: Float, viewH: Float): FitRect {
@@ -99,8 +110,8 @@ fun maxScale(imageW: Int, fit: FitRect): Float {
 /**
  * One step of a pinch or drag: scale by [zoom] about the centroid ([centroidX], [centroidY]) so the
  * content under it stays under it, then move by ([panX], [panY]). The scale is clamped to
- * [1, [maxScale]]; then, on each axis, content larger than the view is kept covering it and
- * content smaller than the view is centred.
+ * [1, [maxScale]]; then the result is clamped to the visible area inside the insets (see the
+ * file comment).
  */
 fun applyGesture(
     state: ZoomState,
@@ -115,6 +126,8 @@ fun applyGesture(
     maxScale: Float,
     bottomInset: Float = 0f,
     topInset: Float = 0f,
+    leftInset: Float = 0f,
+    rightInset: Float = 0f,
 ): ZoomState {
     val current = sane(state)
     val upper = if (maxScale.isFinite()) max(1f, maxScale) else 1f
@@ -123,17 +136,33 @@ fun applyGesture(
     val ratio = scale / current.scale
     val offsetX = centroidX - (centroidX - current.offsetX) * ratio + finite(panX)
     val offsetY = centroidY - (centroidY - current.offsetY) * ratio + finite(panY)
-    return clamp(ZoomState(scale, finite(offsetX), finite(offsetY)), fit, viewW, viewH, inset(bottomInset), inset(topInset))
+    return clamp(ZoomState(scale, finite(offsetX), finite(offsetY)), fit, viewW, viewH, Edges(leftInset, topInset, rightInset, bottomInset))
 }
 
 /** Double tap: back to fit when zoomed in, else [DOUBLE_TAP_SCALE] (at most [maxScale]) about the tap. */
-fun toggleZoom(state: ZoomState, tapX: Float, tapY: Float, fit: FitRect, viewW: Float, viewH: Float, maxScale: Float, bottomInset: Float = 0f, topInset: Float = 0f): ZoomState {
+fun toggleZoom(
+    state: ZoomState,
+    tapX: Float,
+    tapY: Float,
+    fit: FitRect,
+    viewW: Float,
+    viewH: Float,
+    maxScale: Float,
+    bottomInset: Float = 0f,
+    topInset: Float = 0f,
+    leftInset: Float = 0f,
+    rightInset: Float = 0f,
+): ZoomState {
     val current = sane(state)
-    if (current.scale > ZOOMED_THRESHOLD) return restingFit(fit, viewW, viewH, inset(bottomInset), inset(topInset))
-    return applyGesture(current, tapX, tapY, DOUBLE_TAP_SCALE / current.scale, 0f, 0f, fit, viewW, viewH, maxScale, bottomInset, topInset)
+    if (current.scale > ZOOMED_THRESHOLD) return restingFit(fit, viewW, viewH, Edges(leftInset, topInset, rightInset, bottomInset))
+    return applyGesture(current, tapX, tapY, DOUBLE_TAP_SCALE / current.scale, 0f, 0f, fit, viewW, viewH, maxScale, bottomInset, topInset, leftInset, rightInset)
 }
 
-/** The image pixel under screen point ([x], [y]), or null outside the image (or for an empty image or fit). */
+/**
+ * The image pixel under screen point ([x], [y]) for the zoom as shown (lifted and inset, as the
+ * layer draws it), or null outside the image (or for an empty image or fit). For the input that
+ * maps taps to cells (selection, browser taps); nothing calls it yet.
+ */
 fun viewToImage(x: Float, y: Float, state: ZoomState, fit: FitRect, imageW: Int, imageH: Int): Pair<Float, Float>? {
     if (!(state.scale > 0f) || fit.isEmpty || imageW <= 0 || imageH <= 0) return null
     val viewX = (x - state.offsetX) / state.scale
@@ -159,41 +188,47 @@ fun imageToCell(x: Float, y: Float, config: StreamConfig): Pair<Int, Int>? {
     return column.toInt() to row.toInt()
 }
 
-/**
- * Keeps content larger than the visible area covering it, per axis. Across, content narrower than
- * the view is centred; down, the visible area runs from [topInset] (below the top bar) to
- * [bottomInset] above the view's bottom (the navigation bar, or the keyboard and key bar), and
- * content shorter than it sits at its top, the space left over at the bottom.
- */
-private fun clamp(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float, bottomInset: Float = 0f, topInset: Float = 0f): ZoomState = ZoomState(
-    state.scale,
-    clampAxis(state.offsetX, state.scale, fit.left, fit.width, finite(viewW)),
-    clampDown(state.offsetY, state.scale, fit.top, fit.height, finite(viewH), topInset, bottomInset),
-)
+/** The insets around the visible area, each finite and at least 0. */
+private class Edges(left: Float, top: Float, right: Float, bottom: Float) {
+    val left = inset(left)
+    val top = inset(top)
+    val right = inset(right)
+    val bottom = inset(bottom)
 
-private fun clampDown(offset: Float, scale: Float, start: Float, length: Float, viewH: Float, top: Float, bottom: Float): Float {
-    val scaledStart = scale * start
-    val scaledLength = scale * length
-    val clamped = if (scaledLength >= viewH - top - bottom) {
-        val high = top - scaledStart
-        val low = min(viewH - bottom - scaledStart - scaledLength, high)
-        max(low, min(offset, high))
-    } else {
-        top - scaledStart
-    }
-    return finite(clamped) + 0f
+    fun withBottom(value: Float) = Edges(left, top, right, value)
 }
 
-private fun clampAxis(offset: Float, scale: Float, start: Float, length: Float, view: Float): Float {
+/**
+ * Clamps [state] to the visible area inside [edges] (see the file comment): content larger than
+ * it on an axis keeps covering it; narrower content is centred across, shorter content sits at the
+ * top. An empty fit (no image) gives [ZoomState.FIT].
+ */
+private fun clamp(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float, edges: Edges): ZoomState {
+    if (fit.isEmpty) return ZoomState.FIT
+    return ZoomState(
+        state.scale,
+        clampAxis(state.offsetX, state.scale, fit.left, fit.width, finite(viewW), edges.left, edges.right, centre = true),
+        clampAxis(state.offsetY, state.scale, fit.top, fit.height, finite(viewH), edges.top, edges.bottom, centre = false),
+    )
+}
+
+/**
+ * One axis of [clamp]: the visible span is [lead]…`view − trail`. Content at least that long stays
+ * covering it; shorter content is centred in it ([centre]) or put at its start.
+ */
+private fun clampAxis(offset: Float, scale: Float, start: Float, length: Float, view: Float, lead: Float, trail: Float, centre: Boolean): Float {
     val scaledStart = scale * start
     val scaledLength = scale * length
-    val clamped = if (scaledLength >= view) {
+    val visible = view - lead - trail
+    val clamped = if (scaledLength >= visible) {
         // min/max rather than coerceIn: rounding must never make the bounds cross and throw.
-        val high = -scaledStart
-        val low = min(view - scaledStart - scaledLength, high)
+        val high = lead - scaledStart
+        val low = min(view - trail - scaledStart - scaledLength, high)
         max(low, min(offset, high))
+    } else if (centre) {
+        lead + (visible - scaledLength) / 2 - scaledStart
     } else {
-        (view - scaledLength) / 2 - scaledStart
+        lead - scaledStart
     }
     // + 0f turns -0f into 0f, so fit is always exactly ZoomState.FIT.
     return finite(clamped) + 0f
@@ -208,30 +243,52 @@ private fun finite(value: Float): Float = if (value.isFinite()) value else 0f
  * [state], made for a bottom inset of [fromInset], moved to [toInset]: the keyboard (and the key
  * bar above it) opening, closing or animating over the bottom of the canvas, as iOS grows its
  * scroll view's bottom inset by the keyboard's overlap (`SessionView.swift:1995-2005`). If the
- * image's bottom was in view (at or above the old inset's edge), it stays pinned there: it moves
- * by the change in inset, so at fit a tall picture slides up by the overlap and its top may leave
- * the screen. Anything else stays put. Then the result is clamped for [toInset], so with the
- * keyboard gone (inset 0) a picture at scale 1 is back at fit.
+ * image's bottom was in view (at or above the old inset's edge), it moves with the inset's edge,
+ * so at fit a tall picture slides up by the change and its top may leave the screen; but a rising
+ * bottom never goes above [topInset] plus a quarter of the height below it ([LIFT_FLOOR]), so a
+ * keyboard taller than that hides the image's bottom rather than push it off the top. An image
+ * whose bottom was hidden stays put. Then the result is clamped for [toInset], so with the
+ * keyboard gone a picture at scale 1 is back at fit.
  */
-fun liftForKeyboard(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float, fromInset: Float, toInset: Float, topInset: Float = 0f): ZoomState {
-    val fromBottom = inset(fromInset)
-    val toBottom = inset(toInset)
-    val top = inset(topInset)
-    val from = clamp(sane(state), fit, viewW, viewH, fromBottom, top)
-    if (fit.isEmpty) return clamp(from, fit, viewW, viewH, toBottom, top)
-    val imageBottom = from.offsetY + from.scale * (fit.top + fit.height)
-    val pinned = imageBottom <= finite(viewH) - fromBottom + PINNED_SLACK
-    val moved = if (pinned) ZoomState(from.scale, from.offsetX, finite(from.offsetY - (toBottom - fromBottom))) else from
-    return clamp(moved, fit, viewW, viewH, toBottom, top)
+fun liftForKeyboard(
+    state: ZoomState,
+    fit: FitRect,
+    viewW: Float,
+    viewH: Float,
+    fromInset: Float,
+    toInset: Float,
+    topInset: Float = 0f,
+    leftInset: Float = 0f,
+    rightInset: Float = 0f,
+): ZoomState {
+    val fromEdges = Edges(leftInset, topInset, rightInset, fromInset)
+    val toEdges = fromEdges.withBottom(toInset)
+    val from = clamp(sane(state), fit, viewW, viewH, fromEdges)
+    if (fit.isEmpty) return ZoomState.FIT
+    val scaledEnd = from.scale * (fit.top + fit.height)
+    val imageBottom = from.offsetY + scaledEnd
+    val pinned = imageBottom <= finite(viewH) - fromEdges.bottom + PINNED_SLACK
+    if (!pinned) return clamp(from, fit, viewW, viewH, toEdges)
+    val wanted = imageBottom - (toEdges.bottom - fromEdges.bottom)
+    val bottom = max(wanted, min(imageBottom, liftFloor(viewH, toEdges)))
+    return clamp(ZoomState(from.scale, from.offsetX, finite(bottom - scaledEnd)), fit, viewW, viewH, toEdges)
 }
 
-/** Scale 1 at fit, with the image's bottom lifted just above [bottomInset] if that covers it. */
-private fun restingFit(fit: FitRect, viewW: Float, viewH: Float, bottomInset: Float, topInset: Float): ZoomState {
-    if (fit.isEmpty) return clamp(ZoomState.FIT, fit, viewW, viewH, bottomInset, topInset)
-    val hidden = fit.top + fit.height - (finite(viewH) - bottomInset)
-    val lifted = if (hidden > 0f) ZoomState(1f, 0f, -hidden) else ZoomState.FIT
-    return clamp(lifted, fit, viewW, viewH, bottomInset, topInset)
+/** Scale 1 at fit, with the image's bottom lifted just above the bottom inset if that covers it (down to [liftFloor]). */
+private fun restingFit(fit: FitRect, viewW: Float, viewH: Float, edges: Edges): ZoomState {
+    if (fit.isEmpty) return ZoomState.FIT
+    val fitBottom = fit.top + fit.height
+    val visibleBottom = finite(viewH) - edges.bottom
+    if (fitBottom <= visibleBottom) return clamp(ZoomState.FIT, fit, viewW, viewH, edges)
+    val bottom = max(visibleBottom, min(fitBottom, liftFloor(viewH, edges)))
+    return clamp(ZoomState(1f, 0f, finite(bottom - fitBottom)), fit, viewW, viewH, edges)
 }
+
+/** The highest a lifted image's bottom goes: [LIFT_FLOOR] of the height below the top inset, below it. */
+private fun liftFloor(viewH: Float, edges: Edges): Float = edges.top + LIFT_FLOOR * max(0f, finite(viewH) - edges.top)
+
+/** A lifted image keeps at least this fraction of the height below the top bar. */
+private const val LIFT_FLOOR = 0.25f
 
 /** Within this of the visible bottom, the image's bottom counts as in view (rounding). */
 private const val PINNED_SLACK = 0.5f
@@ -239,20 +296,29 @@ private const val PINNED_SLACK = 0.5f
 private fun inset(value: Float): Float = if (value.isFinite() && value > 0f) value else 0f
 
 /**
- * Where the image is drawn at fit on an edge-to-edge canvas: aspect-fit into the area between
- * [topInset] (the status bar and the top bar over the picture) and [bottomInset] (the navigation
- * bar), centred across and **top-aligned** just below the bar, so any height left over is at the
- * bottom. [FitRect.EMPTY] when that area or the image is empty.
+ * Where the image is drawn at fit on an edge-to-edge canvas: aspect-fit into the area inside the
+ * insets ([topInset]: the status bar and the top bar; [bottomInset]: the navigation bar; the side
+ * insets: system bars and cutouts), centred across and **top-aligned** just below the bar, so any
+ * height left over is at the bottom. [FitRect.EMPTY] when that area or the image is empty.
  */
-fun visibleFitRect(imageW: Int, imageH: Int, viewW: Float, viewH: Float, topInset: Float, bottomInset: Float): FitRect {
-    val top = inset(topInset)
-    val inner = fitRect(imageW, imageH, viewW, finite(viewH) - top - inset(bottomInset))
-    return if (inner.isEmpty) FitRect.EMPTY else FitRect(inner.left, top, inner.width, inner.height)
+fun visibleFitRect(
+    imageW: Int,
+    imageH: Int,
+    viewW: Float,
+    viewH: Float,
+    topInset: Float,
+    bottomInset: Float,
+    leftInset: Float = 0f,
+    rightInset: Float = 0f,
+): FitRect {
+    val edges = Edges(leftInset, topInset, rightInset, bottomInset)
+    val inner = fitRect(imageW, imageH, finite(viewW) - edges.left - edges.right, finite(viewH) - edges.top - edges.bottom)
+    return if (inner.isEmpty) FitRect.EMPTY else FitRect(edges.left + inner.left, edges.top, inner.width, inner.height)
 }
 
 /**
- * The Fit to phone viewport (width to height, px): the canvas between [topInset] and
- * [bottomInset] with the keyboard hidden, so a fitted grid fills the visible area.
+ * The Fit to phone viewport (width to height, px): the canvas inside its insets with the keyboard
+ * hidden, so a fitted grid fills the visible area.
  */
-fun fitViewport(canvasW: Int, canvasH: Int, topInset: Int, bottomInset: Int): Pair<Int, Int> =
-    maxOf(0, canvasW) to maxOf(0, canvasH - maxOf(0, topInset) - maxOf(0, bottomInset))
+fun fitViewport(canvasW: Int, canvasH: Int, topInset: Int, bottomInset: Int, leftInset: Int = 0, rightInset: Int = 0): Pair<Int, Int> =
+    maxOf(0, canvasW - maxOf(0, leftInset) - maxOf(0, rightInset)) to maxOf(0, canvasH - maxOf(0, topInset) - maxOf(0, bottomInset))

@@ -8,6 +8,9 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamInput
 import dev.bugobliterator.itermbuddy.core.stream.StreamLink
 import dev.bugobliterator.itermbuddy.core.stream.StreamSink
 import dev.bugobliterator.itermbuddy.ui.SessionNavigator
+import dev.bugobliterator.itermbuddy.ui.live.ComposerDrafts
+import dev.bugobliterator.itermbuddy.ui.live.LiveInputMemories
+import dev.bugobliterator.itermbuddy.ui.sessions.SessionSearch
 import kotlinx.coroutines.CoroutineScope
 
 /**
@@ -17,13 +20,18 @@ import kotlinx.coroutines.CoroutineScope
  *   controller sends through the client (its [StreamLink]);
  * - [repository] reads the client's state, events and requests;
  * - [navigator] drives [controller]'s `open`/`close`;
- * - on every unpair, [navigator] is reset (closing the stream) and [repository] cleared.
+ * - [search], [drafts] and [inputMemories] hold what the owner typed in the UI, app-scoped;
+ * - on every unpair (local, Mac-sent, or a re-scan), [navigator] is reset (closing the stream),
+ *   [repository] cleared, and the search, drafts and input memories emptied.
  */
 class SessionsGraph(
     val client: CompanionClient,
     val controller: StreamController,
     val repository: SessionTreeRepository,
     val navigator: SessionNavigator,
+    val search: SessionSearch,
+    val drafts: ComposerDrafts,
+    val inputMemories: LiveInputMemories,
 )
 
 /**
@@ -49,8 +57,16 @@ fun wireSessions(
     sink.target = controller
     val repository = newRepository(client)
     val navigator = SessionNavigator(open = controller::open, close = controller::close)
-    clearOnUnpair(client.paired, scope, listOf(navigator::reset, repository::clear), log)
-    return SessionsGraph(client, controller, repository, navigator)
+    val search = SessionSearch()
+    val drafts = ComposerDrafts()
+    val inputMemories = LiveInputMemories()
+    clearOnUnpair(
+        client.paired,
+        scope,
+        listOf(navigator::reset, repository::clear, search::clear, drafts::clear, inputMemories::clear),
+        log,
+    )
+    return SessionsGraph(client, controller, repository, navigator, search, drafts, inputMemories)
 }
 
 /** The client's stream sink before the controller exists; forwards every input once it does. */

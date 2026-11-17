@@ -126,4 +126,12 @@ class SessionSearchTest {
     fun noMatchTextQuotesTheTrimmedQuery() {
         assertEquals("No sessions match \"web srv\".", noMatchText("  web srv "))
     }
+
+    @Test
+    fun anEmptyTreeSaysSoWhateverTheQuery() {
+        val empty = SessionTree(emptyList())
+        assertEquals(EMPTY_TREE, emptyListText(empty, "claude"))
+        assertEquals(EMPTY_TREE, emptyListText(empty, ""))
+        assertEquals(noMatchText("nothing"), emptyListText(tree, "nothing"))
+    }
 }

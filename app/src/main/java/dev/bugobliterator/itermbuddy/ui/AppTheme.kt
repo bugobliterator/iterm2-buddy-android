@@ -9,6 +9,7 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -21,7 +22,8 @@ import androidx.core.view.WindowCompat
 @Composable
 fun AppTheme(content: @Composable () -> Unit) {
     val context = LocalContext.current
-    val scheme = if (isSystemInDarkTheme()) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+    val dark = isSystemInDarkTheme()
+    val scheme = remember(context, dark) { if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context) }
     MaterialTheme(colorScheme = scheme, content = content)
 }
 
@@ -46,7 +48,9 @@ fun LiveSessionTheme(content: @Composable () -> Unit) {
             if (lightNavigation != null) controller.isAppearanceLightNavigationBars = lightNavigation
         }
     }
-    MaterialTheme(colorScheme = dynamicDarkColorScheme(LocalContext.current), content = content)
+    val context = LocalContext.current
+    val scheme = remember(context) { dynamicDarkColorScheme(context) }
+    MaterialTheme(colorScheme = scheme, content = content)
 }
 
 private fun Context.findActivity(): Activity? {

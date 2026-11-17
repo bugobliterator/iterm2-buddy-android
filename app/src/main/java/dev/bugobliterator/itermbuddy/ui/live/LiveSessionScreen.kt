@@ -9,17 +9,21 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.imeAnimationSource
+import androidx.compose.foundation.layout.imeAnimationTarget
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Checkbox
@@ -46,8 +50,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
@@ -55,7 +61,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.constrainHeight
+import androidx.compose.ui.unit.constrainWidth
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.offset
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.bugobliterator.itermbuddy.core.input.ImeTranslator
@@ -70,6 +79,7 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
 import dev.bugobliterator.itermbuddy.core.stream.fitGrid
 import dev.bugobliterator.itermbuddy.ui.LiveSessionTheme
 import dev.bugobliterator.itermbuddy.video.VideoStats
+import kotlin.math.roundToInt
 
 /** What the live view can ask for; the navigator, the controller and the input sender do the work. */
 interface LiveSessionActions {
@@ -127,21 +137,24 @@ interface LiveSessionActions {
  * is cleared only once its paste was handed to the sender.
  *
  * **Edge to edge** (iOS `SessionView.swift:870-889, 1985-2005`). The canvas is the whole window
- * on black; the compact [LiveTopBar] (status bar scrim and a 48 dp row) and the navigation bar
- * sit over it, and their heights are the canvas's top and bottom insets. At fit the picture sits
- * just below the bar, top-aligned in the area between the insets ([visibleFitRect]), with any
- * height left over at the bottom; zoomed in, it pans until its edges meet the insets. Overlays
- * are centred in that area.
+ * on black; the compact [LiveTopBar] (status bar scrim and a 48 dp row), the navigation bar, and
+ * in landscape the side system bars and display cutout sit over it, and are the canvas's insets
+ * (the sides from `systemBars ∪ displayCutout`, never the IME). At fit the picture sits just below
+ * the bar, centred across and top-aligned in the area inside the insets ([visibleFitRect]), with
+ * any height left over at the bottom; zoomed in, it pans until its edges meet the insets.
+ * Overlays are centred in that area, whose bottom follows the keyboard (read in layout).
  *
- * **Fit viewport.** Fit to phone computes its grid for the area between the insets with the
+ * **Fit viewport.** Fit to phone computes its grid for the area inside the insets with the
  * keyboard hidden ([fitViewport]), so a fitted grid fills it; the canvas never shrinks for the
  * keyboard, so it follows rotation, split screen and window resizes at once.
  *
- * **Keyboard lift.** The key bar sits over the picture just above the keyboard. While it is up,
- * the keyboard (its inset includes the navigation bar) plus the key bar is the canvas's bottom
- * inset instead of the navigation bar, read only in the canvas's layer and gestures, never in
- * composition; the picture's bottom (the prompt) stays just above the key bar while the keyboard
- * animates, as iOS (`SessionView.swift:1551-1559, 1995-2005`).
+ * **Keyboard lift.** The key bar sits over the picture, padded by `ime ∪ navigationBars`. While
+ * the keyboard is up, the taller of the keyboard and the navigation bar plus the key bar (its
+ * height coming in with the IME's progress) is the canvas's bottom inset, read only in the
+ * canvas's layer and gestures and the overlays' layout, never in composition; the picture's
+ * bottom (the prompt) stays just above the key bar while the keyboard animates, as iOS
+ * (`SessionView.swift:1551-1559, 1995-2005`), but never rises past a quarter of the height below
+ * the bar ([liftForKeyboard]).
  *
  * @param config the image geometry: the shown state's config, else the active stream's when it
  *   is this session's (a too-large window keeps its config for Fit).
@@ -166,6 +179,7 @@ fun LiveSessionScreen(
 }
 
 /** [LiveSessionScreen] inside its dark theme. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun LiveSessionContent(
     title: String,
@@ -186,7 +200,12 @@ private fun LiveSessionContent(
     var canvas by remember { mutableStateOf(IntSize.Zero) }
     var topChrome by remember { mutableIntStateOf(0) }
     val navigationBottom = WindowInsets.navigationBars.getBottom(density)
-    val (viewportWidth, viewportHeight) = fitViewport(canvas.width, canvas.height, topChrome, navigationBottom)
+    // Side insets in landscape: system bars and display cutouts (never the IME), as iOS's safe area.
+    val sides = WindowInsets.systemBars.union(WindowInsets.displayCutout)
+    val layoutDirection = LocalLayoutDirection.current
+    val leftInset = sides.getLeft(density, layoutDirection)
+    val rightInset = sides.getRight(density, layoutDirection)
+    val (viewportWidth, viewportHeight) = fitViewport(canvas.width, canvas.height, topChrome, navigationBottom, leftInset, rightInset)
     val canFit = !session.isBrowser && config != null &&
         fitGrid(viewportWidth, viewportHeight, config, source.output.maxSize(), source.output::sizeSupported) != null
     val fit = { actions.fitToPhone(session.guid, viewportWidth, viewportHeight) }
@@ -259,13 +278,22 @@ private fun LiveSessionContent(
     }
 
     val ime = WindowInsets.ime
+    val imeSource = WindowInsets.imeAnimationSource
+    val imeTarget = WindowInsets.imeAnimationTarget
     var keyBarHeight by remember { mutableIntStateOf(0) }
     val currentNavigationBottom by rememberUpdatedState(navigationBottom)
-    // What covers the canvas's bottom now, in px: the navigation bar, or the keyboard (whose inset
-    // includes it) plus the key bar. Read only by the canvas's layer and gestures, so the IME
+    // What covers the canvas's bottom now, in px: the navigation bar or the keyboard (whose inset
+    // includes it), whichever is taller, plus the key bar. The key bar shows as soon as the IME
+    // starts to open, so its height comes in with the IME's progress rather than in one jump.
+    // Read only by the canvas's layer, its gestures and the overlays' layout, so the IME
     // animation never recomposes this screen.
-    val bottomCover: () -> Float = remember(ime, density) {
-        { maxOf(currentNavigationBottom, ime.getBottom(density) + keyBarHeight).toFloat() }
+    val bottomCover: () -> Float = remember(ime, imeSource, imeTarget, density) {
+        {
+            val now = ime.getBottom(density)
+            val full = maxOf(imeSource.getBottom(density), imeTarget.getBottom(density), now)
+            val progress = if (full > 0) now.toFloat() / full else 0f
+            maxOf(currentNavigationBottom, now) + keyBarHeight * progress
+        }
     }
     Box(
         modifier = modifier
@@ -284,15 +312,15 @@ private fun LiveSessionContent(
             topInset = topChrome.toFloat(),
             restBottomInset = navigationBottom.toFloat(),
             bottomInset = bottomCover,
+            leftInset = leftInset.toFloat(),
+            rightInset = rightInset.toFloat(),
         )
-        // The visible area between the bars, for what is drawn over the picture.
+        // The visible area inside the insets, for what is drawn over the picture: its bottom follows
+        // the keyboard (read in layout), so an overlay's button is never behind the key bar.
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(
-                    top = with(density) { topChrome.toDp() },
-                    bottom = with(density) { navigationBottom.toDp() },
-                ),
+                .insetBy(left = leftInset, top = { topChrome }, right = rightInset, bottom = { bottomCover().roundToInt() }),
         ) {
             liveOverlay(live, canFit, session.guid)?.let { overlay ->
                 OverlayCard(
@@ -366,7 +394,7 @@ private fun LiveSessionContent(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .imePadding()
+                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars).only(WindowInsetsSides.Bottom))
                 .onSizeChanged { keyBarHeight = it.height },
         ) {
             KeyBarSlot(
@@ -432,6 +460,20 @@ private fun LiveTopBar(title: String, onBack: () -> Unit, modifier: Modifier, ac
             )
             actions()
         }
+    }
+}
+
+/**
+ * Pads the content by [left] and [right] (px) and by [top] and [bottom] (px, read at layout, so a
+ * change such as the IME animating relayouts without recomposing).
+ */
+private fun Modifier.insetBy(left: Int, top: () -> Int, right: Int, bottom: () -> Int): Modifier = layout { measurable, constraints ->
+    val horizontal = (maxOf(0, left) + maxOf(0, right)).coerceAtMost(constraints.maxWidth)
+    val topPx = maxOf(0, top())
+    val vertical = (topPx + maxOf(0, bottom())).coerceAtMost(constraints.maxHeight)
+    val placeable = measurable.measure(constraints.offset(-horizontal, -vertical))
+    layout(constraints.constrainWidth(placeable.width + horizontal), constraints.constrainHeight(placeable.height + vertical)) {
+        placeable.place(maxOf(0, left), minOf(topPx, vertical))
     }
 }
 

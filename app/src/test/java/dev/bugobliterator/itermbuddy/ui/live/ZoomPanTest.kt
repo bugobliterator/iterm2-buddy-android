@@ -360,4 +360,53 @@ class ZoomPanTest {
         assertEquals(0 to 0, fitViewport(0, 0, 200, 60))
         assertEquals(500 to 0, fitViewport(500, 100, 80, 80))
     }
+
+    // ---- Side insets (landscape) and the lift's floor ----
+
+    @Test
+    fun landscapeSideNavigationBarIsAnInset() {
+        // A 2400×1080 landscape window: 150 px of bar on top, a 130 px navigation bar on the right.
+        val fit = visibleFitRect(1600, 1000, 2400f, 1080f, topInset = 150f, bottomInset = 0f, leftInset = 0f, rightInset = 130f)
+        assertEquals(930f, fit.height, eps)
+        assertEquals(1488f, fit.width, eps)
+        assertEquals("centred in the 2270 px left of the bar", (2270f - 1488f) / 2, fit.left, eps)
+        assertTrue(fit.left + fit.width <= 2270f + eps)
+        assertEquals(ZoomState.FIT, clampZoom(ZoomState.FIT, fit, 2400f, 1080f, 0f, 150f, 0f, 130f))
+        // Zoomed in and dragged far left: the image's right edge stops at the navigation bar.
+        val zoomed = ZoomState(2f, 0f, 0f)
+        val left = applyGesture(zoomed, 1200f, 540f, 1f, -10_000f, 0f, fit, 2400f, 1080f, maxScale = 4f, bottomInset = 0f, topInset = 150f, leftInset = 0f, rightInset = 130f)
+        assertEquals(2270f, left.offsetX + left.scale * (fit.left + fit.width), eps)
+        // And far right: its left edge stops at the left inset (a cutout here).
+        val cutoutFit = visibleFitRect(1600, 1000, 2400f, 1080f, 150f, 0f, leftInset = 100f, rightInset = 0f)
+        val right = applyGesture(zoomed, 1200f, 540f, 1f, 10_000f, 0f, cutoutFit, 2400f, 1080f, maxScale = 4f, bottomInset = 0f, topInset = 150f, leftInset = 100f)
+        assertEquals(100f, right.offsetX + right.scale * cutoutFit.left, eps)
+        assertTrue(cutoutFit.left >= 100f)
+    }
+
+    @Test
+    fun fitViewportExcludesSideInsets() {
+        assertEquals(2270 to 930, fitViewport(2400, 1080, topInset = 150, bottomInset = 0, leftInset = 0, rightInset = 130))
+        assertEquals(2200 to 930, fitViewport(2400, 1080, 150, 0, leftInset = 100, rightInset = 100))
+    }
+
+    @Test
+    fun liftNeverPushesTheBottomAboveAQuarterBelowTheBar() {
+        // A keyboard covering 900 of 1000 px: unfloored the bottom would be at 100.
+        val lifted = liftForKeyboard(ZoomState.FIT, tallFit, 500f, 1000f, 0f, 900f)
+        assertEquals(250f, bottomOf(lifted, tallFit), eps)
+        assertEquals(ZoomState.FIT, liftForKeyboard(lifted, tallFit, 500f, 1000f, 900f, 0f))
+        // With a top bar the quarter is of the height below it.
+        val belowBar = visibleFitRect(1000, 2000, 500f, 1200f, topInset = 200f, bottomInset = 0f)
+        val liftedBelow = liftForKeyboard(ZoomState.FIT, belowBar, 500f, 1200f, 0f, 1100f, topInset = 200f)
+        assertEquals(450f, bottomOf(liftedBelow, belowBar), eps)
+        // Double tap back to fit honours the floor too.
+        val zoomed = ZoomState(2f, -250f, -1000f)
+        assertEquals(250f, bottomOf(toggleZoom(zoomed, 1f, 1f, tallFit, 500f, 1000f, 4f, bottomInset = 900f), tallFit), eps)
+    }
+
+    @Test
+    fun anEmptyFitClampsToIdentity() {
+        assertEquals(ZoomState.FIT, clampZoom(ZoomState(2f, 37f, -12f), FitRect.EMPTY, 500f, 1000f, 300f, 100f))
+        assertEquals(ZoomState.FIT, liftForKeyboard(ZoomState(2f, 5f, 5f), FitRect.EMPTY, 500f, 1000f, 0f, 300f))
+    }
 }

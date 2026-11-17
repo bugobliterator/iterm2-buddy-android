@@ -14,6 +14,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -47,6 +48,10 @@ class UnpairCleanupTest {
         assertEquals(SessionsRig.ORIGIN, rig.client.relayOrigin.value)
         assertTrue(rig.controller.state.value is LiveViewState.Live)
         assertNotNull(rig.controller.activeStream.value)
+        // What the owner typed in the UI: the search, a draft and an armed tray.
+        rig.graph.search.set("claude")
+        rig.graph.drafts.set(session.guid, "make test")
+        rig.graph.inputMemories.of(session.guid).expanded = true
 
         if (fromMac) {
             rig.mac.sendUnpaired()
@@ -61,6 +66,9 @@ class UnpairCleanupTest {
         assertEquals(HomeDestination.SessionList, rig.navigator.destination.value)
         assertEquals(LiveViewState.Closed, rig.controller.state.value)
         assertNull(rig.controller.activeStream.value)
+        assertEquals("", rig.graph.search.query.value)
+        assertEquals("", rig.graph.drafts.get(session.guid))
+        assertFalse(rig.graph.inputMemories.of(session.guid).expanded)
 
         // Pair again, with another Mac: it connects, and nothing of the old watch starts.
         val keys = newStaticKeyPair()
@@ -77,6 +85,24 @@ class UnpairCleanupTest {
         assertEquals(emptyList<String>(), second.receivedCases().filter { it == "startSessionStream" })
         assertEquals(LiveViewState.Closed, rig.controller.state.value)
         assertEquals(TreeState.Loaded(SessionsRig.treeOf(SessionsRig.PUSH), refreshing = false), rig.repository.state.value)
+    }
+
+    @Test
+    fun searchSurvivesOpeningASessionAndComingBack() = runTest {
+        val rig = SessionsRig(this)
+        rig.answerFetches()
+        rig.connect()
+        runCurrent()
+        val loaded = rig.repository.state.value as TreeState.Loaded
+        val session = loaded.tree.windows.first().tabs.last().panes.single().session
+        rig.graph.search.set("vim")
+        rig.navigator.openSession(session, session.name)
+        runCurrent()
+        rig.navigator.back()
+        runCurrent()
+        assertEquals(HomeDestination.SessionList, rig.navigator.destination.value)
+        assertEquals("vim", rig.graph.search.query.value)
+        assertFalse("the holder never shows the query", "vim" in rig.graph.search.toString())
     }
 
     @Test
