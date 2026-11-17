@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: nil, payload: WireFixtures.CompanionClientMessage.clearSelection(streamID: 1))",
+  "json" : {"payload":{"clearSelection":{"streamID":1}}}
+}

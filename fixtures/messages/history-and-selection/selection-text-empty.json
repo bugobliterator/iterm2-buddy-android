@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: Optional(8), payload: WireFixtures.CompanionHostMessage.selectionText(text: \"\"))",
+  "json" : {"payload":{"selectionText":{"text":""}},"requestID":8}
+}

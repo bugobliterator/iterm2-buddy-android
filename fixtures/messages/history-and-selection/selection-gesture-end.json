@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: nil, payload: WireFixtures.CompanionClientMessage.selectionGesture(streamID: 1, phase: WireFixtures.CompanionSelectionPhase.end, mode: WireFixtures.CompanionSelectionMode.character, point: WireFixtures.CompanionSelectionPoint(absLine: 4011, column: 41)))",
+  "json" : {"payload":{"selectionGesture":{"mode":"character","phase":"end","point":{"absLine":4011,"column":41},"streamID":1}}}
+}

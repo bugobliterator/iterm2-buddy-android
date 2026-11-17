@@ -180,6 +180,10 @@ private fun decodeMacCase(case: String, body: JsonElement, payload: JsonObject):
     "streamStarted" -> decodeStreamStarted(body)
     "streamConfig" -> decodeStreamConfig(body)
     "streamEnded" -> decodeStreamEnded(body)
+    "historyTile" -> decodeHistoryTile(body)
+    "streamExtent" -> decodeStreamExtent(body)
+    "selectionRange" -> decodeSelectionRange(body)
+    "selectionText" -> decodeSelectionText(body)
     "error" -> {
         val error = body.asObject(case)[UNLABELLED] as? JsonObject
             ?: throw WireDecodeException("error.$UNLABELLED is missing or not an object")

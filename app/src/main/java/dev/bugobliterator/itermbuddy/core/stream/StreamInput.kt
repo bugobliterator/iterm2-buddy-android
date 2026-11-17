@@ -88,9 +88,15 @@ fun interface StreamSink {
     suspend fun accept(input: StreamInput)
 }
 
-/** Whether [message] belongs to a stream and so goes to the [StreamSink] rather than to `events`. */
+/**
+ * Whether [message] belongs to a stream and so goes to the [StreamSink] rather than to `events`.
+ * `streamExtent` and `selectionRange` ride the Mac's coalescing lane and can arrive after newer
+ * media frames (*notes* → Ordering after start); the sink keeps them in wire order with the rest.
+ * A `historyTile` reply is not stream-scoped: it goes to its request's waiter.
+ */
 fun isStreamScoped(message: MacMessage): Boolean = when (message) {
-    is MacMessage.StreamStarted, is MacMessage.StreamConfigMessage, is MacMessage.StreamEnded -> true
+    is MacMessage.StreamStarted, is MacMessage.StreamConfigMessage, is MacMessage.StreamEnded,
+    is MacMessage.StreamExtent, is MacMessage.SelectionRange -> true
     else -> false
 }
 

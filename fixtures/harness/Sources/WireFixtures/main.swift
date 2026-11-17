@@ -712,3 +712,11 @@ try writeSessionSamples(allLiveSessionSamples,
 print("wire-fixtures: wrote \(messagesDirectory.path)/live-session: samples=\(liveSessionSampleList.count) "
       + "olderMac=\(olderMacSampleList.count)")
 try writeMediaFixtures(clip: terminalClip, to: outputDirectory.appendingPathComponent("media", isDirectory: true))
+
+// MARK: - History tile and selection samples (HistorySelectionSamples.swift)
+
+let historySelectionSampleList = try historySelectionSamples()
+try checkSessionSamples(historySelectionSampleList)
+try writeSessionSamples(historySelectionSampleList,
+                        to: outputDirectory.appendingPathComponent("messages/history-and-selection", isDirectory: true))
+print("wire-fixtures: wrote \(messagesDirectory.path)/history-and-selection: samples=\(historySelectionSampleList.count)")

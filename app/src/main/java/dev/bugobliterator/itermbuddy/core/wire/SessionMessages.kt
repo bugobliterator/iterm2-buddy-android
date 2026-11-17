@@ -8,9 +8,10 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 /**
- * A message the phone sends to the Mac: the pairing and live-session subset of upstream
- * `CompanionClientMessage` (`sources/Companion/Shared/CompanionMessages.swift`).
- * The live-session cases' encoders are in `StreamMessages.kt`.
+ * A message the phone sends to the Mac: the pairing, live-session, history and selection
+ * subset of upstream `CompanionClientMessage` (`sources/Companion/Shared/CompanionMessages.swift`).
+ * The live-session cases' encoders are in `StreamMessages.kt`, the history and selection
+ * ones in `HistorySelectionMessages.kt`.
  *
  * Payloads follow Swift's synthesized enum coding: `{"<case>": {...}}`, labelled
  * values by name, an unlabelled value under `_0`, `{}` for a case with no values,
@@ -107,12 +108,55 @@ sealed interface PhoneMessage {
     data class ResizeSession(val sessionGuid: String, val columns: Int, val rows: Int) : PhoneMessage {
         override fun payload(): JsonObject = encodeResizeSession(this)
     }
+
+    /**
+     * `fetchHistoryTile(streamID:firstAbsLine:lineCount:generationId:)`, a request: the Mac
+     * replies with [MacMessage.HistoryTileMessage] or an error. [streamID] and [generationId]
+     * are upstream `UInt32`, [firstAbsLine] `Int64`. The Mac renders at most 200 lines.
+     */
+    data class FetchHistoryTile(val streamID: Long, val firstAbsLine: Long, val lineCount: Int, val generationId: Long) :
+        PhoneMessage {
+        override fun payload(): JsonObject = encodeFetchHistoryTile(this)
+    }
+
+    /**
+     * `reportScrollWheel(streamID:up:lines:)`, fire-and-forget: only while the config has both
+     * `altScreen` and `scrollWheelReporting`. [up] reveals older content; [lines] is the notch count.
+     */
+    data class ReportScrollWheel(val streamID: Long, val up: Boolean, val lines: Int) : PhoneMessage {
+        override fun payload(): JsonObject = encodeReportScrollWheel(this)
+    }
+
+    /** `selectionGesture(streamID:phase:mode:point:)`, fire-and-forget; [mode] is read only on begin. */
+    data class SelectionGesture(
+        val streamID: Long,
+        val phase: SelectionPhase,
+        val mode: SelectionMode,
+        val point: SelectionPoint,
+    ) : PhoneMessage {
+        override fun payload(): JsonObject = encodeSelectionGesture(this)
+    }
+
+    /** `clearSelection(streamID:)`, fire-and-forget; a [MacMessage.SelectionRange] follows. */
+    data class ClearSelection(val streamID: Long) : PhoneMessage {
+        override fun payload(): JsonObject = encodeStreamOnlyCase("clearSelection", streamID)
+    }
+
+    /** `selectAllInStream(streamID:)`, fire-and-forget; a [MacMessage.SelectionRange] follows. */
+    data class SelectAllInStream(val streamID: Long) : PhoneMessage {
+        override fun payload(): JsonObject = encodeStreamOnlyCase("selectAllInStream", streamID)
+    }
+
+    /** `copySelection(sessionGuid:)`, a request: the Mac replies with [MacMessage.SelectionText]. */
+    data class CopySelection(val sessionGuid: String) : PhoneMessage {
+        override fun payload(): JsonObject = encodeCopySelection(this)
+    }
 }
 
 /**
- * A message the Mac sends to the phone: the pairing and live-session subset of upstream
- * `CompanionHostMessage`. Every other host case decodes to [Unsupported]. The
- * live-session decoders are in `StreamMessages.kt`.
+ * A message the Mac sends to the phone: the pairing, live-session, history and selection
+ * subset of upstream `CompanionHostMessage`. Every other host case decodes to [Unsupported].
+ * The decoders are in `StreamMessages.kt` and `HistorySelectionMessages.kt`.
  */
 sealed interface MacMessage {
     /**
@@ -159,6 +203,30 @@ sealed interface MacMessage {
 
     /** `streamEnded(streamID:reason:)`, unsolicited. */
     data class StreamEnded(val streamID: Long, val reason: StreamEndReason) : MacMessage
+
+    /** `historyTile(CompanionHistoryTile)`: the reply to [PhoneMessage.FetchHistoryTile]. */
+    data class HistoryTileMessage(val tile: HistoryTile) : MacMessage
+
+    /**
+     * `streamExtent(streamID:firstAbsLine:totalLines:)`, unsolicited: history was trimmed
+     * ([firstAbsLine] advanced) or cleared ([totalLines] dropped). Latest wins on the Mac's
+     * coalescing lane, so it can arrive after newer media frames.
+     */
+    data class StreamExtent(val streamID: Long, val firstAbsLine: Long, val totalLines: Int) : MacMessage
+
+    /**
+     * `selectionRange(streamID:range:)`, unsolicited after any selection change on the Mac or
+     * the phone: [range] is null when nothing is selected. Latest wins on the coalescing lane.
+     */
+    data class SelectionRange(val streamID: Long, val range: SelectionSpan?) : MacMessage
+
+    /**
+     * `selectionText(text:)`: the reply to [PhoneMessage.CopySelection], `""` when nothing is
+     * selected. [text] is terminal content: [toString] shows only its length.
+     */
+    data class SelectionText(val text: String) : MacMessage {
+        override fun toString(): String = "SelectionText(text(len=${text.length}))"
+    }
 
     /**
      * A case this build does not handle: [case] is its discriminator and [raw] the

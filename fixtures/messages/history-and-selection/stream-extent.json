@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.streamExtent(streamID: 1, firstAbsLine: 3100, totalLines: 1025))",
+  "json" : {"payload":{"streamExtent":{"firstAbsLine":3100,"streamID":1,"totalLines":1025}}}
+}

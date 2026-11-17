@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: Optional(7), payload: WireFixtures.CompanionHostMessage.error(CompanionProtocol.CompanionError(code: CompanionProtocol.CompanionError.Code.badRequest, message: \"No such stream.\")))",
+  "json" : {"payload":{"error":{"_0":{"code":"badRequest","message":"No such stream."}}},"requestID":7}
+}
