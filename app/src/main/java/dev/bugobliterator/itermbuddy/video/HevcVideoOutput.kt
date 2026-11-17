@@ -18,8 +18,23 @@ import kotlinx.coroutines.flow.update
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-/** Decoder counters for diagnostics. [lastLatencyMillis] is accept to output of the latest output frame. */
-data class VideoStats(val decoderName: String?, val framesIn: Long, val framesOut: Long, val lastLatencyMillis: Long?)
+/**
+ * Decoder counters for diagnostics. [lastLatencyMillis] is accept to output of the latest output
+ * frame. [decoderName] is the running decoder (null while there is none); [lastDecoderName] the
+ * most recent one started, kept after it is released (Settings shows it).
+ * [framesOutSinceReset] counts frames rendered since the last [HevcVideoOutput.reset] or decoder
+ * rebuild for a new config: the live view's stale-frame signal. It is zeroed under the output's
+ * lock in the same step that retires the old decoder's frames, so an output of a decoder that is
+ * no longer wanted never counts.
+ */
+data class VideoStats(
+    val decoderName: String?,
+    val framesIn: Long,
+    val framesOut: Long,
+    val lastLatencyMillis: Long?,
+    val framesOutSinceReset: Long = 0,
+    val lastDecoderName: String? = null,
+)
 
 /** How long [HevcVideoOutput.detachSurface] and [HevcVideoOutput.close] wait for the decoder thread. */
 const val DEFAULT_SURFACE_CALL_TIMEOUT_MILLIS: Long = 1_000
@@ -176,6 +191,8 @@ class HevcVideoOutput(
             plan = next
             discardWanted()
             rebuildOnKeyframe = false
+            // A new decoder is a new picture: the surface's last buffer is the old one's.
+            statsFlow.update { it.copy(framesOutSinceReset = 0) }
         }
         decoderThread.post(reconcileTask)
         if (!next.complete) log("config of ${extradata.size} bytes lacks a VPS, SPS or PPS; waiting for a complete one")
@@ -243,6 +260,7 @@ class HevcVideoOutput(
             queue.clear()
             accepted.clear()
             carriedSince = null
+            statsFlow.update { it.copy(framesOutSinceReset = 0) }
         }
         decoderThread.post(reconcileTask)
     }
@@ -302,6 +320,7 @@ class HevcVideoOutput(
             queue.clear()
             accepted.clear()
             carriedSince = null
+            statsFlow.update { it.copy(framesOutSinceReset = 0) }
         }
         runOnDecoderAndWait("close") { reconcile() }
         decoderThread.quit()
@@ -377,7 +396,7 @@ class HevcVideoOutput(
             handle.configure(format, target)
             handle.start()
             log("decoder ${info.name} started for ${format.width}x${format.height}, lowLatency=${format.lowLatency}")
-            statsFlow.update { it.copy(decoderName = info.name) }
+            statsFlow.update { it.copy(decoderName = info.name, lastDecoderName = info.name) }
         } catch (e: RuntimeException) {
             fail(handle, forEpoch, e)
         }
@@ -439,8 +458,16 @@ class HevcVideoOutput(
             }
             if (popped == null) popped = accepted.removeFirstOrNull()
             if (popped != null) latency = now - popped.acceptedAt
+            // Under the lock, so a reset racing this output either sees it counted and zeroes it,
+            // or retires this codec first and it does not count.
+            statsFlow.update {
+                it.copy(
+                    framesOut = it.framesOut + 1,
+                    framesOutSinceReset = it.framesOutSinceReset + 1,
+                    lastLatencyMillis = latency ?: it.lastLatencyMillis,
+                )
+            }
         }
-        statsFlow.update { it.copy(framesOut = it.framesOut + 1, lastLatencyMillis = latency ?: it.lastLatencyMillis) }
     }
 
     /**

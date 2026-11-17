@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy
 
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
@@ -19,8 +20,11 @@ import dev.bugobliterator.itermbuddy.ui.PairingActions
 import dev.bugobliterator.itermbuddy.ui.ScanOutcome
 import dev.bugobliterator.itermbuddy.ui.home.HomeActions
 import dev.bugobliterator.itermbuddy.ui.home.HomeModel
+import dev.bugobliterator.itermbuddy.ui.live.LiveVideoSource
 import dev.bugobliterator.itermbuddy.ui.scanFailureOutcome
 import dev.bugobliterator.itermbuddy.ui.scanOutcome
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 class MainActivity : ComponentActivity() {
     private val app: CompanionApp get() = application as CompanionApp
@@ -55,6 +59,13 @@ class MainActivity : ComponentActivity() {
 
         override fun back() = app.sessions.navigator.back()
 
+        override fun retry() = app.sessions.controller.retry()
+
+        override fun fitToPhone(sessionGuid: String, viewportWidthPx: Int, viewportHeightPx: Int) =
+            app.fitToPhone(sessionGuid, viewportWidthPx, viewportHeightPx)
+
+        override fun setVideoStatsShown(shown: Boolean) = app.setVideoStatsShown(shown)
+
         override fun refresh() = app.sessions.repository.refresh()
 
         override fun reconnect() {
@@ -75,6 +86,11 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val version = appVersion()
         val sessions = app.sessions
+        val video = LiveVideoSource(app.video, sessions.controller.state)
+        val debugBuild = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        // The live view reads the stream's session and config; liveTop moves with the output, so
+        // it is dropped here rather than recompose the whole home on every scroll.
+        val activeForView = sessions.controller.activeStream.map { it?.copy(liveTop = null) }.distinctUntilChanged()
         setContent {
             val state by app.client.state.collectAsStateWithLifecycle()
             val paired by app.client.paired.collectAsStateWithLifecycle()
@@ -85,10 +101,15 @@ class MainActivity : ComponentActivity() {
             val tree by sessions.repository.state.collectAsStateWithLifecycle()
             val live by sessions.controller.state.collectAsStateWithLifecycle()
             val relayOrigin by app.client.relayOrigin.collectAsStateWithLifecycle()
+            val activeStream by activeForView.collectAsStateWithLifecycle(initialValue = null)
+            val videoStatsShown by app.videoStatsShown.collectAsStateWithLifecycle()
             MaterialTheme {
                 AppRoot(
                     paired = paired,
-                    home = HomeModel(state, destination, tree, live, unpairing, unpairFailed, version, relayOrigin),
+                    home = HomeModel(
+                        state, destination, tree, live, unpairing, unpairFailed, version, relayOrigin,
+                        activeStream, video, debugBuild, videoStatsShown,
+                    ),
                     homeActions = homeActions,
                     pairingActions = actions,
                     scanNotice = notice,

@@ -7,8 +7,10 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import dev.bugobliterator.itermbuddy.core.CompanionClient
+import dev.bugobliterator.itermbuddy.core.CompanionRequestException
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
 import dev.bugobliterator.itermbuddy.core.stream.StreamController
+import dev.bugobliterator.itermbuddy.core.stream.fitToPhone
 import dev.bugobliterator.itermbuddy.store.KeystorePairingStore
 import dev.bugobliterator.itermbuddy.video.HevcVideoOutput
 import dev.bugobliterator.itermbuddy.video.MediaCodecCatalog
@@ -89,6 +91,38 @@ class CompanionApp : Application() {
     val unpairFailed: StateFlow<Boolean> = unpairFailedFlow.asStateFlow()
 
     private var unpairFailedTimer: Job? = null
+
+    private val videoStatsShownFlow = MutableStateFlow(false)
+
+    /** Debug builds: whether the live view shows the decoder's stats overlay (Settings toggles it; not persisted). */
+    val videoStatsShown: StateFlow<Boolean> = videoStatsShownFlow.asStateFlow()
+
+    fun setVideoStatsShown(shown: Boolean) {
+        videoStatsShownFlow.value = shown
+    }
+
+    /**
+     * Fit to phone for [sessionGuid], from an explicit tap only: sends `resizeSession` with
+     * [fitGrid][dev.bugobliterator.itermbuddy.core.stream.fitGrid] on the active stream's link
+     * ([fitToPhone]), in the app scope so leaving the view does not cut it short. Nothing is sent
+     * unless the active stream is that session's; nothing ever undoes it (owner decision). Logs the
+     * GUID and the grid only.
+     */
+    fun fitToPhone(sessionGuid: String, viewportWidthPx: Int, viewportHeightPx: Int) {
+        val stream = sessions.controller.activeStream.value
+        if (stream == null || stream.sessionGuid != sessionGuid) {
+            Log.i(STREAM_TAG, "fit to phone for $sessionGuid skipped: not the active stream")
+            return
+        }
+        scope.launch {
+            try {
+                val grid = fitToPhone(client, stream, viewportWidthPx, viewportHeightPx, video.maxSize())
+                Log.i(STREAM_TAG, "fit to phone for $sessionGuid: ${grid?.let { "${it.columns}x${it.rows}" } ?: "no grid"}")
+            } catch (e: CompanionRequestException) {
+                Log.w(STREAM_TAG, "fit to phone for $sessionGuid failed: ${e.message}")
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
