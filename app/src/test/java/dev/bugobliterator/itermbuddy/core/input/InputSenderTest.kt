@@ -251,17 +251,64 @@ class InputSenderTest {
             listOf(sendKey("make test") to 1L, sendKey("\n") to 1L, sendKey("y") to 1L),
             h.link.completed.map { it.message to it.onLink },
         )
-        assertFalse("Paste ⏎ never uses pasteText", h.link.attempted.any { it.message is PhoneMessage.PasteText })
+        assertFalse("a single-line Paste ⏎ never uses pasteText", h.link.attempted.any { it.message is PhoneMessage.PasteText })
+    }
+
+    /** Owner decision 2026-11-18: a single-line draft is typed, then Return. */
+    @Test
+    fun singleLineDraftIsTypedThenReturned() = runTest {
+        val h = harness()
+        h.sender.typeThenReturn(first, "git status")
+        settle()
+        assertEquals(listOf(sendKey("git status"), sendKey("\n")), h.link.completed.map { it.message })
+    }
+
+    /** Owner decision 2026-11-18: a multi-line draft is one pasteText, no sendKey, no Return. */
+    @Test
+    fun multiLineDraftIsPastedWithNoReturn() = runTest {
+        val h = harness()
+        h.sender.typeThenReturn(first, "make test\ngit status --short\n")
+        settle()
+        assertEquals(
+            listOf(PhoneMessage.PasteText(guid, "make test\ngit status --short\n") to 1L),
+            h.link.attempted.map { it.message to it.onLink },
+        )
+        assertFalse(h.link.attempted.any { it.message is PhoneMessage.SendKey })
+    }
+
+    @Test
+    fun carriageReturnLineFeedDraftCountsAsMultiLine() = runTest {
+        val h = harness()
+        h.sender.typeThenReturn(first, "echo a\r\necho b")
+        h.sender.typeThenReturn(first, "echo c\recho d")
+        settle()
+        assertEquals(
+            listOf(PhoneMessage.PasteText(guid, "echo a\r\necho b"), PhoneMessage.PasteText(guid, "echo c\recho d")),
+            h.link.attempted.map { it.message },
+        )
+        assertTrue(isMultiLineDraft("a\r\nb"))
+        assertFalse(isMultiLineDraft("a b"))
+    }
+
+    /** The multi-line Paste ⏎ is exactly the upstream `pasteText` sample. */
+    @Test
+    fun multiLinePasteReturnMatchesTheGoldenSample() = runTest {
+        val h = harness()
+        h.sender.typeThenReturn(first, "make test\ngit status --short\n")
+        settle()
+        val expected = Json.parseToJsonElement(Fixtures.read("messages/live-session/paste-text-multiline.json")).jsonObject.getValue("json")
+        val actual = h.link.completed.map { buildJsonObject { put("payload", it.message.payload()) } }
+        assertEquals(listOf(expected), actual)
     }
 
     @Test
     fun largeDraftIsTypedInOrderedChunks() = runTest {
         val h = harness(typeChunkBytes = 8)
-        val draft = "abc👍🏽defgh\nij"
+        val draft = "abc👍🏽defgh ij"
         h.sender.typeThenReturn(first, draft)
         settle()
         val typed = h.link.completed.map { ((it.message as PhoneMessage.SendKey).event.key as Key.Text).text }
-        assertEquals(listOf("abc", "👍🏽", "defgh\nij", "\n"), typed)
+        assertEquals(listOf("abc", "👍🏽", "defgh ij", "\n"), typed)
         assertEquals(draft, typed.dropLast(1).joinToString(""))
         assertTrue(h.link.completed.all { (it.message as PhoneMessage.SendKey).event.modifiers == KeyModifiers() })
     }

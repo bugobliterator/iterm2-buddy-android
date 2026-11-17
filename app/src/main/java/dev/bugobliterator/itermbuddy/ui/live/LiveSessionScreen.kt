@@ -81,8 +81,9 @@ interface LiveSessionActions {
     fun paste(target: InputTarget, text: String)
 
     /**
-     * The composer's Paste ⏎ for [target]: types [text] as keys, then Return, which follows only
-     * typing that was all sent (owner decision 2026-11-18; see `InputSender`).
+     * The composer's Paste ⏎ for [target]. Owner decision 2026-11-18: single-line drafts are typed
+     * then Returned; multi-line drafts are pasted with no Return. The Return follows only typing
+     * that was all sent (see `InputSender`).
      */
     fun typeThenReturn(target: InputTarget, text: String)
 

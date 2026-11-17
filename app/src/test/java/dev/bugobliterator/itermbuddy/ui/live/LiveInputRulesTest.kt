@@ -67,4 +67,12 @@ class LiveInputRulesTest {
             inputTarget(session, LiveViewState.Live(session, config(isBrowser = true)), active()),
         )
     }
+
+    /** The button reads "Paste ⏎" either way; its accessibility label says what it will do. */
+    @Test
+    fun pasteReturnLabelFollowsTheDraft() {
+        assertEquals("Type and Return", pasteReturnLabel("git status"))
+        assertEquals("Paste", pasteReturnLabel("make test\ngit status"))
+        assertEquals("Paste", pasteReturnLabel("echo a\r\necho b"))
+    }
 }
