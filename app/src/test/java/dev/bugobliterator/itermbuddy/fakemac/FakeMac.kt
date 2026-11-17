@@ -12,7 +12,7 @@ import dev.bugobliterator.itermbuddy.core.relay.JoinSigner
 import dev.bugobliterator.itermbuddy.core.relay.RelayClosedException
 import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
 import dev.bugobliterator.itermbuddy.core.relay.RelaySendException
-import dev.bugobliterator.itermbuddy.core.stream.parseMediaFrame
+import dev.bugobliterator.itermbuddy.core.stream.peekMediaFrameHeader
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
@@ -99,11 +99,14 @@ interface MacRelay {
  *   `unpaired`. When its socket closes it parks again.
  * - Tests drive streams with [sendMedia], [sendMessage] and [sendSample], answer requests with
  *   [onRequest], and read what the phone sent in [received].
- * - Live streams, as `MC/CompanionHostBridge.swift` serves them: `startSessionStream` is answered
- *   with `streamStarted` (stream IDs from 1 on each link, assigned when the request arrives) and
- *   then a `streamConfig` ([startCodec], [startError], [configOnStart]); `stopSessionStream` with
- *   `streamEnded(stoppedByClient)`; `streamAck` feeds the in-flight limiter of [startStreaming];
- *   [delayReply] holds back the next reply to a case.
+ * - Live streams, as `MC/CompanionHostBridge.swift` and `CompanionSessionStreamer.swift` serve
+ *   them: `startSessionStream` is answered with `streamStarted` (stream IDs from 1 on each link,
+ *   assigned when the request arrives) and then a `streamConfig` ([startCodec], [startError],
+ *   [configOnStart]); `stopSessionStream` ends the stream with `streamEnded(stoppedByClient)`;
+ *   `streamAck` feeds that stream's own in-flight limiter (`CompanionInFlightLimiter.swift`);
+ *   `requestKeyframe` is answered at once with the stream's config and a keyframe, which bypasses
+ *   the limiter, as a requested keyframe does on the Mac; [delayReply] holds back the next reply
+ *   to a case.
  */
 class FakeMac(
     private val relay: MacRelay,
@@ -187,15 +190,48 @@ class FakeMac(
     /** One-shot reply delays by request case; see [delayReply]. */
     private val replyDelays = ConcurrentHashMap<String, Duration>()
 
-    // The in-flight limiter (`MC/CompanionHostBridge.swift`), reset by each stream start.
-    @Volatile private var firstAckSeen = false
-    @Volatile private var lastSentPts = 0L
-    @Volatile private var lastAckedPts = 0L
-    @Volatile private var lastQueueDepth = 0
-    @Volatile private var insurance: Job? = null
+    /**
+     * One stream's state on the Mac: its in-flight limiter (`CompanionInFlightLimiter.swift`:
+     * before any ack everything may go; after it, nothing but a requested keyframe while
+     * `lastSentPts − lastAckedPts > 500` or `queueDepth > 4`), its newest config, and when the
+     * last frame went and whether it was a keyframe (for the insurance keyframe).
+     */
+    private class MacStream(val streamID: Long) {
+        var haveAck = false
+        var lastSentPts = 0L
+        var lastAckedPts = 0L
+        var queueDepth = 0
+        var stopped = false
+        var config: JsonObject = streamConfigPayload(streamID, emptyMap())
+        var insurance: Job? = null
+
+        fun mayEmit(): Boolean {
+            if (!haveAck) return true
+            if (queueDepth > LIMITER_MAX_QUEUE_DEPTH) return false
+            return maxOf(0, lastSentPts - lastAckedPts) <= LIMITER_MAX_IN_FLIGHT_MILLIS
+        }
+
+        fun noteSent(pts: Long) {
+            lastSentPts = maxOf(lastSentPts, pts)
+        }
+
+        fun noteAck(pts: Long, depth: Int) {
+            haveAck = true
+            lastAckedPts = maxOf(lastAckedPts, pts)
+            queueDepth = depth
+        }
+    }
+
+    /** Streams on the current link by stream ID. */
+    private val streams = ConcurrentHashMap<Long, MacStream>()
+
     private val sentFrames = AtomicInteger()
     private val heldFrames = AtomicInteger()
     private val insuranceKeyframes = AtomicInteger()
+    private val keyframeAnswers = AtomicInteger()
+
+    /** `requestKeyframe`s answered with config and a keyframe. */
+    val keyframeAnswerCount: Int get() = keyframeAnswers.get()
 
     /** Media frames from [startStreaming] sent so far (insurance keyframes not included). */
     val sentFrameCount: Int get() = sentFrames.get()
@@ -263,9 +299,37 @@ class FakeMac(
         send(current, sampleEnvelope(path, requestID))
     }
 
-    /** Sends one media frame: [encodedFrame] (header and payload) behind the `0x01` channel byte. */
+    /**
+     * Sends one media frame: [encodedFrame] (header and payload) behind the `0x01` channel byte,
+     * whatever the limiter says (a test forcing a frame). A frame whose header names a known stream
+     * counts as sent by that stream's limiter.
+     */
     suspend fun sendMedia(encodedFrame: ByteArray) {
         sendRaw(byteArrayOf(MEDIA_CHANNEL) + encodedFrame)
+        noteSentBy(encodedFrame)
+    }
+
+    /**
+     * A frame the Mac sent ([encodedFrame], counted as sent by its stream's limiter) that reaches
+     * the phone corrupted: its version byte reads 3, so the phone cannot parse even its header.
+     */
+    suspend fun sendCorruptedMedia(encodedFrame: ByteArray) {
+        val corrupted = encodedFrame.copyOf().also { it[0] = 3 }
+        sendRaw(byteArrayOf(MEDIA_CHANNEL) + corrupted)
+        noteSentBy(encodedFrame)
+    }
+
+    /** A stream the Mac is serving with no phone request behind it (one the phone never adopted). */
+    fun beginStream(): Long {
+        val streamID = streamCounter.incrementAndGet()
+        streams[streamID] = MacStream(streamID)
+        return streamID
+    }
+
+    private fun noteSentBy(encodedFrame: ByteArray) {
+        val peek = peekMediaFrameHeader(encodedFrame)
+        val stream = peek.streamID?.let { streams[it] } ?: return
+        peek.ptsMilliseconds?.let { stream.noteSent(it) }
     }
 
     /** Sends the payload [message] (`{"<case>": {...}}`) in an envelope with [requestID]. */
@@ -294,7 +358,9 @@ class FakeMac(
 
     /** Sends the fixture `streamConfig` for [streamID], with [patch] applied to its fields. */
     suspend fun sendStreamConfig(streamID: Long, patch: Map<String, JsonElement> = emptyMap()) {
-        sendMessage(streamConfigPayload(streamID, patch), null)
+        val payload = streamConfigPayload(streamID, patch)
+        streams[streamID]?.config = payload
+        sendMessage(payload, null)
     }
 
     /** Sends `streamEnded(streamID:reason:)`. */
@@ -303,41 +369,60 @@ class FakeMac(
     }
 
     /**
-     * Sends [frames] (encoded media frames, header and payload) one every [frameIntervalMillis],
-     * through the Mac's in-flight limiter: until the first `streamAck` every frame goes; after it,
-     * a non-keyframe is held (not sent, counted in [heldFrameCount]) while
-     * `lastSentPts − lastAckedPts > 500` or the last reported `queueDepth > 4`; keyframes always
-     * go. 0.3 s after the last P-frame sent, with nothing sent since, the Mac sends an insurance
-     * keyframe: the newest keyframe in [frames] so far, restamped 300 ms later. Stops quietly if
-     * the link goes away.
+     * Sends [frames] (encoded media frames, header and payload, all for one stream) one every
+     * [frameIntervalMillis], as the Mac's streamer tick does (`CompanionSessionStreamer.swift`
+     * `tick`): while that stream's limiter blocks, a frame is held (not sent, counted in
+     * [heldFrameCount]), keyframe flag or not, since only a requested keyframe bypasses it (and
+     * those are answered in [answerKeyframeRequest]). 0.3 s after a P-frame, with nothing sent
+     * since, the Mac sends an insurance keyframe, but only once the limiter lets it emit
+     * (`!blocked`). Stops when the stream is stopped or the link goes away.
      */
     fun startStreaming(frames: List<ByteArray>, frameIntervalMillis: Long): Job = scope.launch {
-        var lastKeyframe: ByteArray? = null
         for ((index, frame) in frames.withIndex()) {
             if (index > 0) delay(frameIntervalMillis)
-            val parsed = parseMediaFrame(frame)
-            if (parsed.isKeyframe) lastKeyframe = frame
-            val blocked = firstAckSeen && (lastSentPts - lastAckedPts > LIMITER_MAX_IN_FLIGHT_MILLIS || lastQueueDepth > LIMITER_MAX_QUEUE_DEPTH)
-            if (!parsed.isKeyframe && blocked) {
+            val peek = peekMediaFrameHeader(frame)
+            val streamID = checkNotNull(peek.streamID) { "not a media frame" }
+            val pts = checkNotNull(peek.ptsMilliseconds)
+            val stream = streams.getOrPut(streamID) { MacStream(streamID) }
+            if (stream.stopped) return@launch
+            if (!stream.mayEmit()) {
                 heldFrames.incrementAndGet()
                 continue
             }
             if (!sendMediaIfLinked(frame)) return@launch
             sentFrames.incrementAndGet()
-            lastSentPts = parsed.ptsMilliseconds
-            insurance?.cancel()
-            val keyframe = lastKeyframe
-            if (!parsed.isKeyframe && keyframe != null) {
-                val pts = parsed.ptsMilliseconds + INSURANCE_DELAY_MILLIS
-                insurance = scope.launch {
-                    delay(INSURANCE_DELAY_MILLIS)
-                    if (sendMediaIfLinked(restamp(keyframe, pts))) {
-                        insuranceKeyframes.incrementAndGet()
-                        lastSentPts = pts
-                    }
-                }
-            }
+            stream.noteSent(pts)
+            stream.insurance?.cancel()
+            val keyframe = frame[1].toInt() and 1 != 0
+            if (!keyframe) stream.insurance = scope.launch { sendInsurance(stream, pts) }
         }
+    }
+
+    private suspend fun sendInsurance(stream: MacStream, lastPts: Long) {
+        delay(INSURANCE_DELAY_MILLIS)
+        // The Mac re-evaluates each tick: no insurance while blocked; it goes once unblocked.
+        while (!stream.mayEmit()) {
+            if (stream.stopped || link == null) return
+            delay(TICK_MILLIS)
+        }
+        if (stream.stopped) return
+        val pts = maxOf(lastPts + INSURANCE_DELAY_MILLIS, stream.lastSentPts + 1)
+        if (sendMediaIfLinked(keyframeFor(stream, pts))) {
+            insuranceKeyframes.incrementAndGet()
+            stream.noteSent(pts)
+        }
+    }
+
+    /** `requestKeyframe`: the config again (same generation), then a keyframe that bypasses the limiter. */
+    private suspend fun answerKeyframeRequest(current: Link, streamID: Long) {
+        val stream = streams[streamID] ?: return
+        if (stream.stopped) return
+        stream.insurance?.cancel()
+        send(current, envelope(stream.config, null))
+        val pts = stream.lastSentPts + 1
+        send(current, byteArrayOf(MEDIA_CHANNEL) + keyframeFor(stream, pts))
+        stream.noteSent(pts)
+        keyframeAnswers.incrementAndGet()
     }
 
     private suspend fun sendMediaIfLinked(frame: ByteArray): Boolean {
@@ -433,6 +518,8 @@ class FakeMac(
             return true
         }
         streamCounter.set(0)
+        streams.values.forEach { it.insurance?.cancel() }
+        streams.clear()
         link = current
         for (frame in socket.incoming) {
             val plaintext = channel.decryptFrame(frame) ?: continue
@@ -456,13 +543,24 @@ class FakeMac(
             "startSessionStream" -> if (answering) answerStart(current, requestID)
             "stopSessionStream" -> {
                 val streamID = payload.getValue(case).jsonObject.getValue("streamID").jsonPrimitive.long
+                streams[streamID]?.let {
+                    it.stopped = true
+                    it.insurance?.cancel()
+                }
                 send(current, envelope(streamEnded(streamID, "stoppedByClient"), null))
             }
             "streamAck" -> {
+                // Routed by stream ID to that stream's limiter (CompanionHostBridge.swift).
                 val ack = payload.getValue(case).jsonObject
-                lastAckedPts = ack.getValue("lastPTSMilliseconds").jsonPrimitive.long
-                lastQueueDepth = ack.getValue("queueDepth").jsonPrimitive.long.toInt()
-                firstAckSeen = true
+                val streamID = ack.getValue("streamID").jsonPrimitive.long
+                streams[streamID]?.noteAck(
+                    ack.getValue("lastPTSMilliseconds").jsonPrimitive.long,
+                    ack.getValue("queueDepth").jsonPrimitive.long.toInt(),
+                )
+            }
+            "requestKeyframe" -> {
+                val streamID = payload.getValue(case).jsonObject.getValue("streamID").jsonPrimitive.long
+                answerKeyframeRequest(current, streamID)
             }
             "hello" -> if (answering) {
                 for (path in beforeHelloReply) send(current, sampleEnvelope(path, null))
@@ -490,12 +588,7 @@ class FakeMac(
     private suspend fun answerStart(current: Link, requestID: Long?) {
         val error = startError
         val streamID = if (error == null) streamCounter.incrementAndGet() else 0L
-        if (error == null) {
-            firstAckSeen = false
-            lastSentPts = 0
-            lastAckedPts = 0
-            lastQueueDepth = 0
-        }
+        if (error == null) streams[streamID] = MacStream(streamID)
         val codec = startCodec
         val withConfig = configOnStart
         val reply: suspend () -> Unit = {
@@ -555,6 +648,7 @@ class FakeMac(
         const val LIMITER_MAX_IN_FLIGHT_MILLIS = 500L
         const val LIMITER_MAX_QUEUE_DEPTH = 4
         const val INSURANCE_DELAY_MILLIS = 300L
+        const val TICK_MILLIS = 33L
         const val MAC_REVISION = 15
         const val MAC_MINIMUM_PEER = 11
         const val DEFAULT_REPARK_DELAY_MILLIS = 50L
@@ -575,15 +669,18 @@ class FakeMac(
             mapOf("streamEnded" to JsonObject(mapOf("streamID" to JsonPrimitive(streamID), "reason" to JsonPrimitive(reason)))),
         )
 
-        /** [frame] with its pts set to [pts] and the keyframe flag set. */
-        fun restamp(frame: ByteArray, pts: Long): ByteArray {
-            val copy = frame.copyOf()
-            ByteBuffer.wrap(copy).putLong(PTS_OFFSET, pts)
-            copy[1] = (copy[1].toInt() or 1).toByte()
-            return copy
+        /** A version 2 keyframe for [stream] at [pts], in its config's generation, with a 16-byte payload. */
+        private fun keyframeFor(stream: MacStream, pts: Long): ByteArray {
+            val config = stream.config.getValue("streamConfig").jsonObject.getValue("_0").jsonObject
+            val generation = config.getValue("generationId").jsonPrimitive.long
+            val payload = 16
+            return ByteBuffer.allocate(KEYFRAME_HEADER + payload)
+                .put(2).put(1).putInt(stream.streamID.toInt()).putInt(0).putLong(pts)
+                .putInt(generation.toInt()).putLong(0).putInt(payload)
+                .array()
         }
 
-        private const val PTS_OFFSET = 10
+        private const val KEYFRAME_HEADER = 34
 
         /** A session sample's `json` tree. */
         fun fixtureJson(name: String): JsonObject =

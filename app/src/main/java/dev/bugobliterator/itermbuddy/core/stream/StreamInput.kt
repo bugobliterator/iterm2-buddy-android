@@ -49,6 +49,9 @@ sealed interface StreamInput {
         /** Parses the media frame; the result owns a copy of the payload. Throws [MediaFrameException]. */
         fun parse(): MediaFrame = parseMediaFrame(channelFrame, offset = 1)
 
+        /** The stream ID and pts readable from a frame [parse] rejects ([peekMediaFrameHeader]). */
+        fun peekHeader(): MediaFrameHeaderPeek = peekMediaFrameHeader(channelFrame, offset = 1)
+
         /** A copy of the media frame's bytes, marker excluded: for tests and inspection. */
         fun copyBytes(): ByteArray = channelFrame.copyOfRange(1, channelFrame.size)
 

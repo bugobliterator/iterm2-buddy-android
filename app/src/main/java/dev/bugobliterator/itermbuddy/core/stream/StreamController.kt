@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlin.coroutines.ContinuationInterceptor
+import kotlin.coroutines.CoroutineContext
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -94,10 +95,20 @@ data class ActiveStream(
  * guard, `AppModel.swift:4598-4603`); every other `streamStarted` on the current link is stopped,
  * as is an adopted one whose codec is not HEVC.
  *
+ * **Recovery.** A frame that does not parse is acked when its header gives this stream's pts,
+ * and a keyframe is requested. A keyframe request held back by the rate limit is deferred to the
+ * end of the gap and re-checked then, never dropped. Every [VideoOutput] call is guarded.
+ *
+ * **Stalled (Android-only).** While Live, the picture is labelled stalled once a frame accepted by
+ * the output has not been output for `stallAfter`, or once the output has refused every frame for
+ * `stallAfter` while Ready (MediaCodec can do either; iOS VideoToolbox outputs or fails).
+ *
  * @param nowMillis a monotonic clock in milliseconds; the [VideoOutput] must use the same one for
  *   [VideoOutput.outputOverdueSinceMillis].
  * @param log diagnostics; given GUIDs, stream and link IDs, sizes and counts, never terminal
  *   content or session names.
+ * @param ackContext where the [AckSender] runs: a background dispatcher by default, so acks never
+ *   depend on [scope]'s dispatcher (which may be the main thread); tests pass their own.
  */
 class StreamController(
     private val link: StreamLink,
@@ -107,6 +118,7 @@ class StreamController(
     private val budgets: StreamBudgets = StreamBudgets(),
     private val nowMillis: () -> Long,
     private val log: (String) -> Unit,
+    ackContext: CoroutineContext = Dispatchers.Default,
 ) : StreamSink {
     private val stateFlow = MutableStateFlow<LiveViewState>(LiveViewState.Closed)
 
@@ -163,8 +175,11 @@ class StreamController(
     private val serial: CoroutineDispatcher =
         (scope.coroutineContext[ContinuationInterceptor] as? CoroutineDispatcher ?: Dispatchers.Default).limitedParallelism(1)
 
-    /** On [scope]'s own dispatcher, not [serial]: acks keep going out while the consumer is busy in a submit. */
-    private val acks = AckSender(link, scope)
+    /**
+     * On [ackContext] (a background dispatcher by default), never [serial]: acks keep going out
+     * while the consumer is busy in a submit, whatever dispatcher [scope] has.
+     */
+    private val acks = AckSender(link, CoroutineScope(scope.coroutineContext + ackContext))
 
     // ---- State, touched only by the consumer ----
 
@@ -202,6 +217,10 @@ class StreamController(
     private var attempt: Attempt? = null
     private var active: Active? = null
     private var lastKeyframeRequestAt: Long? = null
+    private var deferredKeyframe: Job? = null
+
+    /** When the output began refusing every frame while Ready (Android-only stall cause), or null. */
+    private var rejectingSince: Long? = null
     private var stallTimer: Job? = null
     private var stallTimerAt = Long.MAX_VALUE
 
@@ -312,7 +331,7 @@ class StreamController(
         }
         epoch++
         stopActive()
-        video.reset()
+        resetVideo()
         intent = Intent(session, epoch)
         showWaiting(session)
         maybeStart()
@@ -322,7 +341,7 @@ class StreamController(
         epoch++
         intent = null
         stopActive()
-        video.reset()
+        resetVideo()
         setState(LiveViewState.Closed)
     }
 
@@ -330,14 +349,14 @@ class StreamController(
         if (!foreground) return
         foreground = false
         stopActive()
-        video.reset()
+        resetVideo()
         intent?.let { setState(LiveViewState.Paused(it.session)) }
     }
 
     private fun onResume() {
         val fromBackground = !foreground
         foreground = true
-        if (fromBackground) video.reset()
+        if (fromBackground) resetVideo()
         val watched = intent ?: return
         if (active == null && (fromBackground || stateFlow.value is LiveViewState.Failed)) showWaiting(watched.session)
         maybeStart()
@@ -356,7 +375,7 @@ class StreamController(
             return
         }
         stopActive()
-        video.reset()
+        resetVideo()
         showWaiting(watched.session)
         maybeStart()
     }
@@ -372,7 +391,7 @@ class StreamController(
         // A newer link supersedes the old one even if its LinkDown was missed: nothing to stop on it.
         forgetLink()
         currentLink = up.linkId
-        video.reset()
+        resetVideo()
         val watched = intent ?: return
         showWaiting(watched.session)
         maybeStart()
@@ -386,7 +405,7 @@ class StreamController(
         val had = active
         currentLink = null
         forgetLink()
-        video.reset()
+        resetVideo()
         val watched = intent ?: return
         if (down.messageTooLarge && had != null) {
             // An oversized message on the active stream's link: restarting would loop, so end.
@@ -413,7 +432,7 @@ class StreamController(
         val frame = try {
             media.parse()
         } catch (e: MediaFrameException) {
-            log("dropped a media frame of ${media.size} bytes: ${e.message}")
+            onUnparseable(stream, media, e)
             return
         }
         if (frame.streamID != stream.streamID) return
@@ -432,8 +451,33 @@ class StreamController(
             log("the video output failed on a frame of stream ${stream.streamID}: ${e.javaClass.simpleName}")
             false
         }
-        if (!submitted) requestKeyframe()
+        if (submitted) {
+            rejectingSince = null
+        } else {
+            if (readinessOrNull() == VideoReadiness.Ready) {
+                if (rejectingSince == null) rejectingSince = nowMillis()
+            } else {
+                rejectingSince = null
+            }
+            requestKeyframe()
+        }
         checkStall()
+    }
+
+    /**
+     * A frame on the active link that does not parse. It may have been a keyframe the Mac's
+     * limiter now waits on, so: ack its pts when the header is readable and is this stream's, and
+     * ask for a keyframe (the Mac answers with config and a keyframe that bypasses its limiter).
+     * A frame readably for another stream is ignored, as any other stream's media is.
+     */
+    private fun onUnparseable(stream: Active, media: StreamInput.Media, error: MediaFrameException) {
+        val peek = media.peekHeader()
+        log("dropped a media frame of ${media.size} bytes on stream ${peek.streamID ?: "?"}: ${error.message}")
+        if (peek.streamID != null && peek.streamID != stream.streamID) return
+        if (peek.streamID != null && peek.ptsMilliseconds != null) {
+            acks.ack(stream.linkId, stream.streamID, peek.ptsMilliseconds)
+        }
+        requestKeyframe()
     }
 
     private fun onControl(control: StreamInput.Control) {
@@ -480,9 +524,17 @@ class StreamController(
             stream.liveTop = config.firstAbsLine + maxOf(0, config.totalLines - config.rows)
         }
         publishActive()
+        val wasStalled = (stateFlow.value as? LiveViewState.Live)?.stalled ?: false
+        val readiness = try {
+            video.configure(config)
+        } catch (e: RuntimeException) {
+            log("the video output failed to configure stream ${stream.streamID}: ${e.javaClass.simpleName}")
+            VideoReadiness.NoDecoder
+        }
         setState(
-            when (val readiness = video.configure(config)) {
-                VideoReadiness.Ready, VideoReadiness.WaitingForSurface -> LiveViewState.Live(stream.session, config)
+            when (readiness) {
+                // The stalled flag carries over until the check below says otherwise: no flicker on a resend.
+                VideoReadiness.Ready, VideoReadiness.WaitingForSurface -> LiveViewState.Live(stream.session, config, wasStalled)
                 VideoReadiness.NoDecoder -> LiveViewState.Failed(stream.session, LiveProblem.NoDecoder)
                 is VideoReadiness.TooLarge -> LiveViewState.Failed(
                     stream.session,
@@ -499,7 +551,7 @@ class StreamController(
         if (stream.linkId != linkId || stream.streamID != ended.streamID) return
         log("stream ${ended.streamID} on link $linkId ended: ${ended.reason}")
         setActive(null)
-        video.reset()
+        resetVideo()
         intent = null
         setState(LiveViewState.Ended(stream.session, ended.reason))
     }
@@ -576,7 +628,7 @@ class StreamController(
         val watched = intent ?: return
         if (watched.session.guid != started.guid) return
         intent = null
-        video.reset()
+        resetVideo()
         setState(LiveViewState.Ended(watched.session, StreamEndReason.SESSION_CLOSED))
     }
 
@@ -603,15 +655,39 @@ class StreamController(
     private fun requestKeyframe() {
         val stream = active ?: return
         if (stream.linkId != currentLink) return
-        when (video.readiness()) {
-            VideoReadiness.NoDecoder, VideoReadiness.WaitingForSurface, is VideoReadiness.TooLarge -> return
-            VideoReadiness.Ready -> Unit
-        }
+        if (readinessOrNull() != VideoReadiness.Ready) return
         val now = nowMillis()
         val last = lastKeyframeRequestAt
-        if (last != null && now - last < timeouts.keyframeRequestGap.inWholeMilliseconds) return
+        val gap = timeouts.keyframeRequestGap.inWholeMilliseconds
+        if (last != null && now - last < gap) {
+            // Deferred, not dropped: the need is re-checked (gate and limit) when the gap ends, so a
+            // request suppressed here (say on a surface reattach) is not lost on an idle screen.
+            if (deferredKeyframe?.isActive != true) {
+                deferredKeyframe = scope.launch(serial) {
+                    delay(last + gap - now)
+                    post(Event.KeyframeNeeded)
+                }
+            }
+            return
+        }
         lastKeyframeRequestAt = now
         outbox.trySend(Out.Send(PhoneMessage.RequestKeyframe(stream.streamID), stream.linkId))
+    }
+
+    private fun readinessOrNull(): VideoReadiness? = try {
+        video.readiness()
+    } catch (e: RuntimeException) {
+        log("the video output failed on readiness: ${e.javaClass.simpleName}")
+        null
+    }
+
+    /** iOS `CompanionVideoView.reset`; a throw is logged and skipped so the transition still completes. */
+    private fun resetVideo() {
+        try {
+            video.reset()
+        } catch (e: RuntimeException) {
+            log("the video output failed on reset: ${e.javaClass.simpleName}")
+        }
     }
 
     // ---- Stalled label (Android-only) ----
@@ -622,7 +698,14 @@ class StreamController(
             cancelStallTimer()
             return
         }
-        val overdueSince = video.outputOverdueSinceMillis()
+        val overdue = try {
+            video.outputOverdueSinceMillis()
+        } catch (e: RuntimeException) {
+            log("the video output failed on outputOverdueSinceMillis: ${e.javaClass.simpleName}")
+            null
+        }
+        // Either cause counts: a frame accepted and not output, or every frame refused while Ready.
+        val overdueSince = listOfNotNull(overdue, rejectingSince).minOrNull()
         val now = nowMillis()
         val stallMillis = timeouts.stallAfter.inWholeMilliseconds
         val stalled = overdueSince != null && now - overdueSince >= stallMillis
@@ -657,6 +740,9 @@ class StreamController(
 
     private fun setActive(stream: Active?) {
         active = stream
+        rejectingSince = null
+        deferredKeyframe?.cancel()
+        deferredKeyframe = null
         if (stream == null) cancelStallTimer()
         publishActive()
     }
