@@ -18,6 +18,7 @@ import dev.bugobliterator.itermbuddy.store.InMemoryPairingStore
 import dev.bugobliterator.itermbuddy.store.PairingStage
 import dev.bugobliterator.itermbuddy.store.advancePairing
 import dev.bugobliterator.itermbuddy.store.beginFreshPairing
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -633,6 +634,91 @@ class MediaChannelTest {
         assertTrue(h.logs.joinToString("\n"), h.logs.any { it.contains("receive queue over budget") })
     }
 
+
+    /**
+     * A stream-scoped reply queued behind a stalled sink is drained, not delivered: its request
+     * fails when the link ends rather than report a stream the sink never saw.
+     */
+    @Test
+    fun streamStartedDrainedAfterStallFailsItsRequest() = runTest {
+        val sink = StuckSink()
+        val h = Harness(this, sink, ClientTimeouts(sinkStall = 30.seconds))
+        h.connect()
+        h.mac.onRequest("startSessionStream") { null }
+        var sentID = -1L
+        val startedAt = currentTime
+        val started = async {
+            runCatching {
+                h.client.request(PhoneMessage.StartSessionStream("ptys_7K2M9Q4R8T1VH"), timeout = 2.minutes, onSent = { sentID = it })
+            }
+        }
+        runCurrent()
+        h.mac.sendMedia(byteArrayOf(1))
+        h.mac.sendSample("messages/live-session/stream-started.json", sentID)
+        val outcome = started.await()
+        assertTrue("$outcome", outcome.exceptionOrNull() is CompanionRequestException)
+        assertTrue(currentTime - startedAt <= 31_000)
+        h.awaitConnected(2)
+        assertTrue("${sink.inputs}", sink.inputs.none { it is StreamInput.Control })
+        assertTrue(h.logs.any { it.contains("dropped a stream input (StreamStarted)") })
+    }
+
+    /** A relay close frame queued behind a stalled sink is still attributed: "displaced" keeps its 60 s wait. */
+    @Test
+    fun displacedBehindStalledSinkKeepsItsWait() = runTest {
+        val sink = RecordingSink()
+        sink.onAccept = { if (it is StreamInput.Media) CompletableDeferred<Unit>().await() }
+        val h = Harness(this, sink, ClientTimeouts(sinkStall = 30.seconds))
+        h.connect()
+        h.mac.sendMedia(byteArrayOf(1))
+        runCurrent()
+        h.relay.closePhone(room, 1000, "displaced")
+        advanceTimeBy(30.seconds)
+        runCurrent()
+        assertTrue(h.logs.joinToString("\n"), h.logs.any { it.contains("relay closed the connection: 1000 displaced") })
+        advanceTimeBy(59.seconds)
+        assertEquals("waits 60 s after displaced", 1, h.relay.phoneAdmissions.size)
+        advanceTimeBy(2.seconds)
+        assertTrue(h.relay.phoneAdmissions.size >= 2)
+        h.awaitConnected(2)
+    }
+
+    /** A LinkUp the sink misses ends the link before anything else reaches the sink on it. */
+    @Test
+    fun missedLinkUpEndsTheLinkBeforeAnyInput() = runTest {
+        val sink = RecordingSink()
+        sink.onAccept = { if (it is StreamInput.LinkUp) delay(60.seconds) }
+        val h = Harness(this, sink, ClientTimeouts(sinkStall = 30.seconds))
+        h.storedAndPinned()
+        h.mac.start()
+        h.client.start()
+        advanceTimeBy(10.seconds)
+        h.mac.sendMedia(byteArrayOf(1))
+        advanceTimeBy(2.minutes)
+
+        assertTrue("${sink.inputs}", sink.inputs.none { it is StreamInput.Media || it is StreamInput.LinkUp })
+        assertTrue(h.logs.joinToString("\n"), h.logs.any { it.contains("missed LinkUp(linkId=1") })
+        assertTrue("never Connected on a link the sink did not see", h.client.state.value !is ClientState.Connected)
+        assertTrue("a new link each time", h.relay.phoneAdmissions.size >= 2)
+        assertTrue(sink.inputs.contains(StreamInput.LinkDown(1)))
+    }
+
+    /** A sink that throws a CancellationException of its own (its scope died) ends the link deliberately, with a log. */
+    @Test
+    fun sinkThrowingItsOwnCancellationEndsTheLink() = runTest {
+        val sink = RecordingSink()
+        sink.onAccept = { if (it is StreamInput.Media) throw CancellationException("controller scope is dead") }
+        val h = Harness(this, sink)
+        h.connect()
+        h.mac.sendMedia(byteArrayOf(1))
+        h.awaitConnected(2)
+        runCurrent()
+        assertTrue(h.logs.joinToString("\n"), h.logs.any { it == "the stream sink failed on Media: CancellationException; ending the link" })
+        assertEquals(
+            listOf(StreamInput.LinkUp(1, FakeMac.MAC_REVISION), StreamInput.LinkDown(1), StreamInput.LinkUp(2, FakeMac.MAC_REVISION)),
+            sink.markers,
+        )
+    }
 
     /** Messages that are not stream-scoped keep their paths while a stream runs. */
     @Test
