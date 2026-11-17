@@ -454,10 +454,16 @@ class StreamController(
         if (submitted) {
             rejectingSince = null
         } else {
-            if (readinessOrNull() == VideoReadiness.Ready) {
+            val readiness = readinessOrNull()
+            if (readiness == VideoReadiness.Ready) {
                 if (rejectingSince == null) rejectingSince = nowMillis()
             } else {
                 rejectingSince = null
+            }
+            if (readiness == VideoReadiness.NoDecoder && stateFlow.value is LiveViewState.Live) {
+                // The output ran out of decoders after configure said Ready (every candidate failed).
+                log("no decoder left for stream ${stream.streamID}")
+                setState(LiveViewState.Failed(stream.session, LiveProblem.NoDecoder))
             }
             requestKeyframe()
         }
@@ -535,6 +541,8 @@ class StreamController(
             when (readiness) {
                 // The stalled flag carries over until the check below says otherwise: no flicker on a resend.
                 VideoReadiness.Ready, VideoReadiness.WaitingForSurface -> LiveViewState.Live(stream.session, config, wasStalled)
+                // Incomplete parameter sets: still starting; the request below asks the Mac for a fresh config.
+                VideoReadiness.WaitingForConfig -> LiveViewState.Starting(stream.session)
                 VideoReadiness.NoDecoder -> LiveViewState.Failed(stream.session, LiveProblem.NoDecoder)
                 is VideoReadiness.TooLarge -> LiveViewState.Failed(
                     stream.session,
@@ -542,6 +550,7 @@ class StreamController(
                 )
             },
         )
+        if (readiness == VideoReadiness.WaitingForConfig) requestKeyframe()
         checkStall()
     }
 
@@ -651,11 +660,16 @@ class StreamController(
         outbox.trySend(Out.Send(PhoneMessage.StopSessionStream(streamID), linkId))
     }
 
-    /** iOS `onNeedsKeyframe`, skipped while the output cannot use one and rate-limited (Android-only). */
+    /**
+     * iOS `onNeedsKeyframe`, skipped while the output cannot use one and rate-limited
+     * (Android-only). An output waiting for a complete config can use one: the Mac sends a config
+     * before every requested keyframe.
+     */
     private fun requestKeyframe() {
         val stream = active ?: return
         if (stream.linkId != currentLink) return
-        if (readinessOrNull() != VideoReadiness.Ready) return
+        val readiness = readinessOrNull()
+        if (readiness != VideoReadiness.Ready && readiness != VideoReadiness.WaitingForConfig) return
         val now = nowMillis()
         val last = lastKeyframeRequestAt
         val gap = timeouts.keyframeRequestGap.inWholeMilliseconds
@@ -708,14 +722,16 @@ class StreamController(
         val overdueSince = listOfNotNull(overdue, rejectingSince).minOrNull()
         val now = nowMillis()
         val stallMillis = timeouts.stallAfter.inWholeMilliseconds
-        val stalled = overdueSince != null && now - overdueSince >= stallMillis
+        // Without a surface nothing can be output, so nothing is stalled; re-checked after a poll.
+        val noSurface = readinessOrNull() == VideoReadiness.WaitingForSurface
+        val stalled = !noSurface && overdueSince != null && now - overdueSince >= stallMillis
         if (stalled != live.stalled) {
             log("picture ${if (stalled) "stalled" else "recovered"} on stream ${activeFlow.value?.streamID}")
             setState(live.copy(stalled = stalled))
         }
         when {
             overdueSince == null -> cancelStallTimer()
-            stalled -> armStallTimer(now + timeouts.stallPoll.inWholeMilliseconds)
+            stalled || noSurface -> armStallTimer(now + timeouts.stallPoll.inWholeMilliseconds)
             else -> armStallTimer(overdueSince + stallMillis)
         }
     }

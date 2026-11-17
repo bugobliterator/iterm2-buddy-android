@@ -4,6 +4,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import androidx.annotation.VisibleForTesting
+import dev.bugobliterator.itermbuddy.core.stream.HevcFramingException
 import dev.bugobliterator.itermbuddy.core.stream.MediaFrame
 import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
 import dev.bugobliterator.itermbuddy.core.stream.VideoOutput
@@ -20,11 +21,17 @@ import java.util.concurrent.TimeUnit
 /** Decoder counters for diagnostics. [lastLatencyMillis] is accept to output of the latest output frame. */
 data class VideoStats(val decoderName: String?, val framesIn: Long, val framesOut: Long, val lastLatencyMillis: Long?)
 
-/** How long [HevcVideoOutput.attachSurface], [HevcVideoOutput.detachSurface] and [HevcVideoOutput.close] wait for the decoder thread. */
+/** How long [HevcVideoOutput.detachSurface] and [HevcVideoOutput.close] wait for the decoder thread. */
 const val DEFAULT_SURFACE_CALL_TIMEOUT_MILLIS: Long = 1_000
 
 /** `KEY_MAX_INPUT_SIZE` floor: 4 MiB. */
 private const val MIN_MAX_INPUT_SIZE: Long = 4L shl 20
+
+/** The `KEY_MAX_INPUT_SIZE` a decoder is rebuilt with, once, for a keyframe over the first one: 16 MiB. */
+private const val ENLARGED_MAX_INPUT_SIZE: Int = 16 shl 20
+
+/** Failures of one decoder, with no output in between, before the next candidate is tried. */
+private const val FAILURES_BEFORE_FALLBACK = 2
 
 private const val TAG = "HevcVideoOutput"
 
@@ -32,28 +39,36 @@ private const val TAG = "HevcVideoOutput"
  * The live view's [VideoOutput]: an async MediaCodec HEVC decoder rendering to the view's
  * [Surface], mirroring iOS `CompanionVideoView` (`IOS/Screens/CompanionVideoView.swift`):
  * configure from parameter sets, decode each access unit, render it at once, ask for a keyframe
- * when there is no decoder or a decode fails, forget everything on [reset].
+ * when a decode fails, forget everything on [reset].
  *
  * **Threading.** Every codec call and codec callback runs on one [DecoderThread] (a
  * `HandlerThread` in production). The public methods change the wanted state under a lock on the
  * caller's thread and post a reconcile to the decoder thread, which releases a codec that is no
  * longer wanted and builds one that is. [submit] offers into a [PendingInputQueue] on the caller's
- * thread; the decoder thread polls it whenever an input buffer is free. [attachSurface],
- * [detachSurface] and [close] wait for the decoder thread to finish (so the codec has let go of a
- * surface before the view destroys it), but at most [surfaceCallTimeoutMillis]: a wedged codec
- * cannot hang the UI thread past that; the work still runs when the thread frees up. [configure],
- * [submit], [reset] and [readiness] never wait. No method throws.
+ * thread; the decoder thread polls it whenever an input buffer is free. Only [detachSurface] and
+ * [close] wait for the decoder thread (so the codec has let go of the surface before the view
+ * destroys it), and at most [surfaceCallTimeoutMillis]: a wedged codec cannot hang the UI thread
+ * past that; the work still runs when the thread frees up. [attachSurface] never waits for the
+ * build. No method throws. The decoder list is read once per output, on the decoder thread when
+ * it gets there first (the constructor posts it), else by the first [configure].
  *
  * **Decoder lifetime.** A decoder exists only with a surface and a config whose parameter sets are
- * complete ([hasCompleteHevcParameterSets]); an incomplete set reads as
- * [VideoReadiness.NoDecoder] and MediaCodec is never configured from it. A config with the same
- * extradata and pixel size keeps the decoder; anything else rebuilds it, releasing the old codec
- * first. A keyframe never rebuilds a working decoder. Attaching a surface builds one and requests
- * a keyframe. Until a codec's first keyframe, [submit] refuses non-keyframes.
+ * complete ([hasCompleteHevcParameterSets]); for an incomplete set the readiness is
+ * [VideoReadiness.WaitingForConfig] and MediaCodec is never configured from it. A config with the
+ * same extradata and pixel size keeps the decoder; anything else rebuilds it, releasing the old
+ * codec first. A keyframe never rebuilds a working decoder, with one exception: a keyframe over
+ * `KEY_MAX_INPUT_SIZE` (`max(w × h, 4 MiB)`) rebuilds it once with 16 MiB; past that, frames over
+ * the limit are refused. Attaching a new surface builds one and requests a keyframe; attaching the
+ * same surface again does nothing. Until a codec's first keyframe, [submit] refuses non-keyframes.
  *
- * **Failures.** Any exception from a codec call or callback (a frame larger than the input buffer
- * and an access unit that does not parse included) releases the codec, empties the pending queue
- * and requests a keyframe; the next keyframe [submit] accepts rebuilds the codec.
+ * **Failures and fallback.** Any exception from a codec call or callback releases the codec,
+ * empties the pending queue and requests a keyframe; the next keyframe [submit] accepts rebuilds
+ * the codec. The candidates are [decoderCandidates] for the size; after
+ * [FAILURES_BEFORE_FALLBACK] failures of one candidate with no output in between, or at once on
+ * [InsufficientResourceException], the next is used. An output resets the count. When every
+ * candidate has failed, the readiness is [VideoReadiness.NoDecoder] until a new config or [reset].
+ * An access unit that does not parse is dropped (with the queue behind it) and a keyframe
+ * requested, without counting against the decoder.
  *
  * **Overdue clock.** A FIFO of accept times, one per frame accepted into the queue. An output pops
  * the entries up to its presentation time (at least one; the Mac's encoder never reorders), so a
@@ -76,15 +91,26 @@ class HevcVideoOutput(
     private val log: (String) -> Unit = { Log.i(TAG, it) },
 ) : VideoOutput, AutoCloseable {
 
-    /** What the current config asks for; [format] is set only when [choice] is a usable decoder. */
+    /**
+     * What the current config asks for. [candidates] are the decoders that take the size, in
+     * preference order; [candidate], [failures], [maxInputSize] and [enlarged] change under lock.
+     */
     private class Plan(
         val extradata: ByteArray,
         val width: Int,
         val height: Int,
         val complete: Boolean,
         val choice: DecoderChoice?,
-        val format: CodecFormat?,
-    )
+        val candidates: List<DecoderInfo>,
+        val csd: ByteArray?,
+        var maxInputSize: Int,
+    ) {
+        var candidate = 0
+        var failures = 0
+        var enlarged = false
+
+        fun current(): DecoderInfo? = if (complete && choice is DecoderChoice.Use) candidates.getOrNull(candidate) else null
+    }
 
     private class Accepted(val presentationTimeUs: Long, val acceptedAt: Long)
 
@@ -106,6 +132,7 @@ class HevcVideoOutput(
     // ---- Decoder thread only ----
     private var codec: CodecHandle? = null
     private var codecEpoch = -1L
+    private var codecHasOutput = false
     private val freeInputs = ArrayDeque<Int>()
 
     @Volatile private var keyframeRequester: (() -> Unit)? = null
@@ -116,6 +143,21 @@ class HevcVideoOutput(
     val stats: StateFlow<VideoStats> = statsFlow.asStateFlow()
 
     private val reconcileTask = Runnable { guarded("reconcile") { reconcile() } }
+
+    /** The device's HEVC decoders, read once; a failing catalog reads as none. */
+    private val decoderList: List<DecoderInfo> by lazy {
+        try {
+            catalog.decoders()
+        } catch (e: RuntimeException) {
+            log("listing HEVC decoders failed: ${e.javaClass.simpleName}")
+            emptyList()
+        }
+    }
+
+    init {
+        // Read the decoder list on the decoder thread, off the controller's, before the first config.
+        decoderThread.post { guarded("decoder list") { decoderList } }
+    }
 
     // ---- VideoOutput ----
 
@@ -136,11 +178,7 @@ class HevcVideoOutput(
             rebuildOnKeyframe = false
         }
         decoderThread.post(reconcileTask)
-        if (!next.complete) {
-            log("config of ${extradata.size} bytes lacks a VPS, SPS or PPS; not configuring a decoder")
-            // iOS asks for a keyframe when its format cannot be built: the Mac sends a config before it.
-            keyframeRequester?.invoke()
-        }
+        if (!next.complete) log("config of ${extradata.size} bytes lacks a VPS, SPS or PPS; waiting for a complete one")
         readiness()
     }
 
@@ -150,12 +188,16 @@ class HevcVideoOutput(
             when {
                 closed -> VideoReadiness.NoDecoder
                 current == null -> if (surface == null) VideoReadiness.WaitingForSurface else VideoReadiness.Ready
-                !current.complete -> VideoReadiness.NoDecoder
+                !current.complete -> VideoReadiness.WaitingForConfig
                 else -> when (val choice = current.choice) {
                     is DecoderChoice.TooLarge ->
                         VideoReadiness.TooLarge(current.width, current.height, choice.maxWidth, choice.maxHeight)
-                    is DecoderChoice.Use -> if (surface == null) VideoReadiness.WaitingForSurface else VideoReadiness.Ready
-                    DecoderChoice.None, null -> VideoReadiness.NoDecoder
+                    is DecoderChoice.Use -> when {
+                        current.current() == null -> VideoReadiness.NoDecoder
+                        surface == null -> VideoReadiness.WaitingForSurface
+                        else -> VideoReadiness.Ready
+                    }
+                    DecoderChoice.None, DecoderChoice.UnsupportedSize, null -> VideoReadiness.NoDecoder
                 }
             }
         }
@@ -163,8 +205,20 @@ class HevcVideoOutput(
 
     override fun submit(frame: MediaFrame): Boolean = guarded("submit", false) {
         val accept = synchronized(lock) {
-            if (closed || surface == null || plan?.format == null) return@guarded false
+            val current = plan
+            if (closed || surface == null || current?.current() == null) return@guarded false
             if (rebuildOnKeyframe && !frame.isKeyframe) return@guarded false
+            if (frame.payloadSize > current.maxInputSize) {
+                if (!frame.isKeyframe || current.enlarged || frame.payloadSize > ENLARGED_MAX_INPUT_SIZE) {
+                    // A refused frame breaks the reference chain: what follows waits for a keyframe.
+                    queue.waitForKeyframe()
+                    return@guarded false
+                }
+                log("keyframe of ${frame.payloadSize} bytes over the ${current.maxInputSize}-byte input size; rebuilding with $ENLARGED_MAX_INPUT_SIZE")
+                current.enlarged = true
+                current.maxInputSize = ENLARGED_MAX_INPUT_SIZE
+                discardWanted()
+            }
             val before = queue.size
             val ok = queue.offer(frame)
             removeNewest(before + (if (ok) 1 else 0) - queue.size)
@@ -191,7 +245,6 @@ class HevcVideoOutput(
             carriedSince = null
         }
         decoderThread.post(reconcileTask)
-        Unit
     }
 
     override fun setKeyframeRequester(request: () -> Unit) {
@@ -206,21 +259,24 @@ class HevcVideoOutput(
         when (val choice = synchronized(lock) { plan?.choice }) {
             is DecoderChoice.Use -> choice.info.maxWidth to choice.info.maxHeight
             is DecoderChoice.TooLarge -> choice.maxWidth to choice.maxHeight
-            DecoderChoice.None, null -> null
+            DecoderChoice.None, DecoderChoice.UnsupportedSize, null -> null
         }
     }
 
     // ---- Surface and lifetime ----
 
-    /** The view's surface is ready: builds a decoder (when the config allows) and requests a keyframe. Waits for the decoder thread. */
+    /**
+     * The view's surface is ready: builds a decoder (when the config allows) on the decoder thread
+     * and requests a keyframe. Does not wait for the build. The surface already attached is a no-op.
+     */
     fun attachSurface(surface: Surface) = guarded("attachSurface") {
         synchronized(lock) {
-            if (closed) return@guarded
+            if (closed || this.surface === surface) return@guarded
             this.surface = surface
             discardWanted()
             rebuildOnKeyframe = false
         }
-        runOnDecoderAndWait("attachSurface") { reconcile() }
+        decoderThread.post(reconcileTask)
         keyframeRequester?.invoke()
     }
 
@@ -274,18 +330,12 @@ class HevcVideoOutput(
     }
 
     private fun makePlan(extradata: ByteArray, width: Int, height: Int): Plan {
-        if (!hasCompleteHevcParameterSets(extradata)) return Plan(extradata, width, height, false, null, null)
-        val choice = try {
-            chooseDecoder(catalog.decoders(), width, height)
-        } catch (e: RuntimeException) {
-            log("listing HEVC decoders failed: ${e.javaClass.simpleName}")
-            DecoderChoice.None
-        }
-        val format = (choice as? DecoderChoice.Use)?.let {
-            val maxInput = maxOf(width.toLong() * height, MIN_MAX_INPUT_SIZE).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-            CodecFormat(width, height, parameterSetsToCsd(extradata), it.info.supportsLowLatency, maxInput)
-        }
-        return Plan(extradata, width, height, true, choice, format)
+        val maxInput = maxOf(width.toLong() * height, MIN_MAX_INPUT_SIZE).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        if (!hasCompleteHevcParameterSets(extradata)) return Plan(extradata, width, height, false, null, emptyList(), null, maxInput)
+        val decoders = decoderList
+        val choice = chooseDecoder(decoders, width, height)
+        val candidates = if (choice is DecoderChoice.Use) decoderCandidates(decoders, width, height) else emptyList()
+        return Plan(extradata, width, height, true, choice, candidates, parameterSetsToCsd(extradata), maxInput)
     }
 
     // ---- Decoder thread ----
@@ -296,10 +346,10 @@ class HevcVideoOutput(
         var wantedEpoch = 0L
         synchronized(lock) {
             val current = plan
-            val choice = current?.choice
-            val format = current?.format
-            if (!closed && !rebuildOnKeyframe && surface != null && choice is DecoderChoice.Use && format != null) {
-                wanted = choice.info to format
+            val info = current?.current()
+            val csd = current?.csd
+            if (!closed && !rebuildOnKeyframe && surface != null && current != null && info != null && csd != null) {
+                wanted = info to CodecFormat(current.width, current.height, csd, info.supportsLowLatency, current.maxInputSize)
                 wantedSurface = surface
             }
             wantedEpoch = epoch
@@ -320,6 +370,7 @@ class HevcVideoOutput(
         }
         codec = handle
         codecEpoch = forEpoch
+        codecHasOutput = false
         freeInputs.clear()
         try {
             handle.setCallback(Events(handle))
@@ -337,7 +388,7 @@ class HevcVideoOutput(
         val handle = codec ?: return
         while (freeInputs.isNotEmpty()) {
             val frame = synchronized(lock) { if (codecEpoch == epoch) queue.poll() else null } ?: return
-            val index = freeInputs.removeFirst()
+            val index = freeInputs.first()
             try {
                 val buffer = handle.inputBuffer(index) ?: throw IllegalStateException("no input buffer $index")
                 buffer.clear()
@@ -346,7 +397,11 @@ class HevcVideoOutput(
                 }
                 frame.writeAnnexB(buffer)
                 handle.queueInput(index, frame.payloadSize, presentationTimeUs(frame))
+                freeInputs.removeFirst()
                 statsFlow.update { it.copy(framesIn = it.framesIn + 1) }
+            } catch (e: HevcFramingException) {
+                dropUnparseable(e)
+                return
             } catch (e: Exception) {
                 fail(handle, codecEpoch, e)
                 return
@@ -354,12 +409,30 @@ class HevcVideoOutput(
         }
     }
 
+    /**
+     * An access unit that does not parse: not the decoder's fault. The frame and everything queued
+     * behind it go (the clock carries), the input buffer stays free, and a keyframe is requested.
+     */
+    private fun dropUnparseable(error: HevcFramingException) {
+        log("dropped an access unit that does not parse: ${error.message}")
+        val request = synchronized(lock) {
+            if (codecEpoch != epoch) return
+            removeNewest(queue.size + 1)
+            queue.clear()
+            true
+        }
+        if (request) keyframeRequester?.invoke()
+    }
+
     private fun onOutput(handle: CodecHandle, index: Int, presentationTimeUs: Long) {
         handle.releaseOutput(index, true)
         val now = nowMillis()
+        val first = !codecHasOutput
+        codecHasOutput = true
         var latency: Long? = null
         synchronized(lock) {
             if (codecEpoch != epoch) return
+            if (first) plan?.failures = 0
             var popped: Accepted? = null
             while (accepted.isNotEmpty() && accepted.first().presentationTimeUs <= presentationTimeUs) {
                 popped = accepted.removeFirst()
@@ -372,8 +445,9 @@ class HevcVideoOutput(
 
     /**
      * A codec call or callback failed (or [handle] could not be created, when null). When it was
-     * the wanted codec: drop its frames and the queue (the clock carries), wait for a keyframe to
-     * rebuild, release it and ask for a keyframe.
+     * the wanted codec: drop its frames and the queue (the clock carries), count the failure
+     * against the decoder (moving to the next candidate when due), wait for a keyframe to rebuild,
+     * release it and ask for a keyframe (unless no candidate is left).
      */
     private fun fail(handle: CodecHandle?, forEpoch: Long, error: Exception) {
         if (handle != null && handle !== codec) {
@@ -385,7 +459,17 @@ class HevcVideoOutput(
             if (forEpoch == epoch && !closed) {
                 discardWanted()
                 rebuildOnKeyframe = true
-                true
+                val current = plan
+                if (current != null) {
+                    current.failures++
+                    if (current.failures >= FAILURES_BEFORE_FALLBACK || error is InsufficientResourceException) {
+                        val from = current.current()?.name
+                        current.candidate++
+                        current.failures = 0
+                        log("decoder $from failed; falling back to ${current.current()?.name ?: "none"}")
+                    }
+                }
+                current?.current() != null
             } else {
                 false
             }

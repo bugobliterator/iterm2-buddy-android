@@ -93,8 +93,9 @@ class HevcVideoOutputTest {
         video.configure(streamConfig())
         assertEquals(0, factory.made.size)
         video.attachSurface(fakeSurface())
-        assertEquals(1, factory.made.size)
         assertEquals(1, requests.get())
+        thread.drain()
+        assertEquals(1, factory.made.size)
         assertEquals(VideoReadiness.Ready, video.readiness())
     }
 
@@ -103,12 +104,13 @@ class HevcVideoOutputTest {
         val video = output()
         video.attachSurface(fakeSurface())
         requests.set(0)
-        assertEquals(VideoReadiness.NoDecoder, video.configure(streamConfig(extradata = incompleteExtradata())))
+        assertEquals(VideoReadiness.WaitingForConfig, video.configure(streamConfig(extradata = incompleteExtradata())))
         thread.drain()
         assertEquals(0, factory.made.size)
-        assertEquals(1, requests.get())
+        assertEquals("the controller asks for the keyframe", 0, requests.get())
+        assertEquals(VideoReadiness.WaitingForConfig, video.readiness())
         assertFalse(video.submit(frame(1, keyframe = true)))
-        assertEquals(VideoReadiness.NoDecoder, video.configure(streamConfig(extradata = byteArrayOf(0, 1, 0))))
+        assertEquals(VideoReadiness.WaitingForConfig, video.configure(streamConfig(extradata = byteArrayOf(0, 1, 0))))
         // A complete config afterwards builds one.
         assertEquals(VideoReadiness.Ready, video.configure(streamConfig()))
         thread.drain()
@@ -305,7 +307,7 @@ class HevcVideoOutputTest {
 
     @Test
     fun frameLargerThanTheInputBufferIsACodecFailure() {
-        factory = FakeCodecFactory(thread)
+        factory = FakeCodecFactory(thread) { bufferCapacity = 1 shl 20 }
         val video = ready()
         clock.set(3_000)
         // The fake's input buffers hold 1 MiB; the queue's budget is 16 MiB.
@@ -327,6 +329,7 @@ class HevcVideoOutputTest {
 
     @Test
     fun codecExceptionsReleaseAndRequestKeyframe() {
+        catalog = FixedCatalog(listOf(decoder("hw.hevc"), decoder("sw.hevc", hardware = false)))
         // From configure.
         factory = FakeCodecFactory(thread) { index ->
             throwOnConfigure = index == 0
@@ -349,10 +352,11 @@ class HevcVideoOutputTest {
         assertEquals(0, video.pendingInputCount())
         assertEquals(3, requests.get())
 
-        // From a callback.
+        // From a callback. Two failures of the hardware decoder with no output: the next is software.
         assertTrue(video.submit(frame(20, keyframe = true)))
         thread.drain()
         assertEquals(3, factory.made.size)
+        assertEquals(listOf("hw.hevc", "hw.hevc", "sw.hevc"), factory.requested.map { it.name })
         assertTrue(video.submit(frame(21, keyframe = false)))
         factory.made[2].error()
         thread.drain()
@@ -376,6 +380,7 @@ class HevcVideoOutputTest {
         val video = output()
         video.configure(streamConfig())
         video.attachSurface(fakeSurface())
+        thread.drain()
         assertEquals(2, requests.get())
         factory.throwOnCreate = false
         assertTrue(video.submit(frame(1, keyframe = true)))
@@ -434,6 +439,7 @@ class HevcVideoOutputTest {
         video.attachSurface(fakeSurface())
         assertEquals(1, requests.get())
         assertEquals(VideoReadiness.Ready, video.readiness())
+        thread.drain()
         assertNotSame(first, factory.last)
         assertFalse(video.submit(frame(2, keyframe = false)))
         assertTrue(video.submit(frame(10, keyframe = true)))
@@ -489,7 +495,8 @@ class HevcVideoOutputTest {
         video.attachSurface(fakeSurface())
         video.detachSurface()
         video.close()
-        assertEquals(3, logs.count { it.contains("did not finish") })
+        // attachSurface never waits; detach and close each wait once and give up.
+        assertEquals(2, logs.count { it.contains("did not finish") })
     }
 
     @Test
@@ -502,5 +509,199 @@ class HevcVideoOutputTest {
         assertEquals(VideoReadiness.WaitingForSurface, video.readiness())
         video.close()
         assertTrue(thread.isShutdown)
+    }
+
+    // ---- Decoder fallback ----
+
+    private fun twoDecoders() = FixedCatalog(listOf(decoder("sw.hevc", hardware = false), decoder("hw.hevc")))
+
+    @Test
+    fun fallsBackToSoftwareAfterRepeatedHardwareFailures() {
+        catalog = twoDecoders()
+        factory = FakeCodecFactory(thread) { throwOnConfigure = name == "hw.hevc" }
+        val video = output()
+        video.configure(streamConfig())
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        assertEquals(VideoReadiness.Ready, video.readiness())
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        thread.drain()
+        // Two hardware failures, then software.
+        assertTrue(video.submit(frame(2, keyframe = true)))
+        thread.drain()
+        assertEquals(listOf("hw.hevc", "hw.hevc", "sw.hevc"), factory.requested.map { it.name })
+        assertEquals(listOf(us(2)), factory.last.queued)
+        assertEquals("sw.hevc", video.stats.value.decoderName)
+        assertEquals(VideoReadiness.Ready, video.readiness())
+    }
+
+    @Test
+    fun insufficientResourceFallsBackAtOnce() {
+        catalog = twoDecoders()
+        factory = FakeCodecFactory(thread) {
+            if (name == "hw.hevc") configureError = InsufficientResourceException(IllegalStateException("busy"))
+        }
+        val video = output()
+        video.configure(streamConfig())
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        thread.drain()
+        assertEquals(listOf("hw.hevc", "sw.hevc"), factory.requested.map { it.name })
+        assertEquals(listOf(us(1)), factory.last.queued)
+    }
+
+    @Test
+    fun outputClearsTheFailureCount() {
+        catalog = twoDecoders()
+        factory = FakeCodecFactory(thread) { index -> throwOnConfigure = index == 0 }
+        val video = output()
+        video.configure(streamConfig())
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        // One failure; the rebuilt hardware decoder outputs a frame, which clears the count.
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        thread.drain()
+        factory.last.output(us(1))
+        thread.drain()
+        // One more failure: still the hardware decoder.
+        factory.last.error()
+        thread.drain()
+        assertTrue(video.submit(frame(2, keyframe = true)))
+        thread.drain()
+        assertEquals(listOf("hw.hevc", "hw.hevc", "hw.hevc"), factory.requested.map { it.name })
+        assertFalse(factory.last.released)
+    }
+
+    @Test
+    fun everyCandidateFailingIsNoDecoder() {
+        factory = FakeCodecFactory(thread) { throwOnConfigure = true }
+        val video = output()
+        video.configure(streamConfig())
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        thread.drain()
+        assertEquals(2, factory.made.size)
+        assertEquals(VideoReadiness.NoDecoder, video.readiness())
+        assertFalse(video.submit(frame(2, keyframe = true)))
+        assertEquals("no request once nothing is left", 2, requests.get())
+        // A new config starts over.
+        assertEquals(VideoReadiness.Ready, video.configure(streamConfig(extradata = completeExtradata(tag = 3))))
+    }
+
+    @Test
+    fun unparseableAccessUnitIsDroppedWithoutFailingTheDecoder() {
+        val video = ready()
+        clock.set(4_000)
+        // A NAL length running past the end of the payload.
+        val bad = dev.bugobliterator.itermbuddy.core.stream.MediaFrame(
+            version = 2, flags = 1, streamID = 1, sequence = 1, ptsMilliseconds = 5, generationId = 1, liveTop = 0,
+            payload = byteArrayOf(0, 0, 0, 9, 1),
+        )
+        assertTrue(video.submit(bad))
+        thread.drain()
+        assertFalse(factory.last.released)
+        assertEquals(1, requests.get())
+        assertEquals(4_000L, video.outputOverdueSinceMillis())
+        assertTrue(video.submit(frame(6, keyframe = true)))
+        thread.drain()
+        assertEquals(listOf(us(6)), factory.last.queued)
+        assertEquals(1, factory.made.size)
+    }
+
+    // ---- Input size ----
+
+    @Test
+    fun keyframeOverTheInputSizeRebuildsOnceWithSixteenMebibytes() {
+        val video = ready()
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        // A P-frame over 4 MiB is refused and does not rebuild; what follows waits for a keyframe.
+        assertFalse(video.submit(frame(2, keyframe = false, nalBytes = 5 shl 20)))
+        assertFalse(video.submit(frame(3, keyframe = false)))
+        thread.drain()
+        assertEquals(1, factory.made.size)
+        // A keyframe over 4 MiB rebuilds with 16 MiB and is decoded.
+        assertTrue(video.submit(frame(4, keyframe = true, nalBytes = 5 shl 20)))
+        thread.drain()
+        assertEquals(2, factory.made.size)
+        assertTrue(factory.made[0].released)
+        assertEquals(16 shl 20, factory.last.configuredFormat?.maxInputSize)
+        assertEquals(listOf(us(4)), factory.last.queued)
+        assertEquals(0, requests.get())
+        // Once only: a keyframe over 16 MiB is refused, no rebuild.
+        assertFalse(video.submit(frame(5, keyframe = true, nalBytes = 16 shl 20)))
+        assertTrue(video.submit(frame(6, keyframe = true, nalBytes = 6 shl 20)))
+        thread.drain()
+        assertEquals(2, factory.made.size)
+    }
+
+    // ---- Surfaces and the decoder list ----
+
+    @Test
+    fun attachingTheSameSurfaceAgainIsANoOp() {
+        val video = output()
+        val surface = fakeSurface()
+        video.configure(streamConfig())
+        video.attachSurface(surface)
+        thread.drain()
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        video.attachSurface(surface)
+        thread.drain()
+        assertEquals(1, factory.made.size)
+        assertEquals(1, requests.get())
+        assertEquals(listOf(us(1)), factory.last.queued)
+    }
+
+    @Test
+    fun attachDoesNotWaitForTheDecoderThread() {
+        val wedged = WedgedDecoderThread()
+        val video = HevcVideoOutput(
+            catalog = catalog, codecFactory = factory::create, nowMillis = clock::get, decoderThread = wedged,
+            surfaceCallTimeoutMillis = 60_000, log = { logs += it },
+        )
+        video.setKeyframeRequester { requests.incrementAndGet() }
+        video.configure(streamConfig())
+        video.attachSurface(fakeSurface())
+        assertEquals(1, requests.get())
+        assertEquals(VideoReadiness.Ready, video.readiness())
+    }
+
+    @Test
+    fun decoderListIsReadOnceOnTheDecoderThread() {
+        val counting = FixedCatalog(listOf(decoder("hw.hevc")))
+        catalog = counting
+        val video = output()
+        thread.drain()
+        video.configure(streamConfig())
+        video.configure(streamConfig(width = 1440))
+        video.configure(streamConfig(extradata = completeExtradata(tag = 4)))
+        assertEquals(1, counting.calls.get())
+        assertEquals(listOf("TestDecoderThread"), counting.callThreads)
+    }
+
+    @Test
+    fun shapeNoDecoderSupportsIsNoDecoderNotTooLarge() {
+        catalog = FixedCatalog(listOf(decoder("hw.hevc", supports = { w, h -> w <= 4096 && h <= 2304 && w % 2 == 0 && h % 2 == 0 })))
+        val video = output()
+        video.attachSurface(fakeSurface())
+        assertEquals(VideoReadiness.NoDecoder, video.configure(streamConfig(width = 1281, height = 800)))
+        assertEquals(VideoReadiness.NoDecoder, video.configure(streamConfig(width = 0, height = 0)))
+        assertEquals(VideoReadiness.TooLarge(5120, 2880, 4096, 2304), video.configure(streamConfig(width = 5120, height = 2880)))
+    }
+
+    @Test
+    fun incompleteThenCompleteConfigBuildsTheDecoder() {
+        val video = output()
+        video.attachSurface(fakeSurface())
+        assertEquals(VideoReadiness.WaitingForConfig, video.configure(streamConfig(extradata = incompleteExtradata())))
+        thread.drain()
+        assertEquals(0, factory.made.size)
+        assertEquals(VideoReadiness.Ready, video.configure(streamConfig()))
+        thread.drain()
+        assertEquals(1, factory.made.size)
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        thread.drain()
+        assertEquals(listOf(us(1)), factory.last.queued)
     }
 }

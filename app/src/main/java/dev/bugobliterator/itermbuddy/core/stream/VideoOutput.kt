@@ -8,7 +8,14 @@ sealed interface VideoReadiness {
     /** No surface is attached (the view is detached, say mid-rotation); frames cannot be shown now. */
     data object WaitingForSurface : VideoReadiness
 
-    /** No decoder on this device can decode the stream. */
+    /**
+     * The config's parameter sets are incomplete (no VPS, SPS or PPS), so no decoder is built from
+     * it. Not a failure: the controller keeps asking for keyframes, which the Mac precedes with a
+     * fresh config, and shows the stream as starting.
+     */
+    data object WaitingForConfig : VideoReadiness
+
+    /** No decoder on this device can decode the stream (none, none takes its shape, or every candidate failed). */
     data object NoDecoder : VideoReadiness
 
     /** The stream's [width] x [height] is over the chosen decoder's [maxWidth] x [maxHeight]. */

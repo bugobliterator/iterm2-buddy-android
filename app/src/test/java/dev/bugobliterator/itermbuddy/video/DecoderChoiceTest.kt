@@ -46,8 +46,27 @@ class DecoderChoiceTest {
     }
 
     @Test
-    fun zeroSizeIsNeverSupported() {
+    fun zeroSizeIsUnsupportedNotTooLarge() {
         val hardware = decoder("hw")
-        assertEquals(DecoderChoice.TooLarge(4096, 2304), chooseDecoder(listOf(hardware), 0, 0))
+        assertEquals(DecoderChoice.UnsupportedSize, chooseDecoder(listOf(hardware), 0, 0))
+    }
+
+    @Test
+    fun shapeWithinLimitsThatNoDecoderTakesIsUnsupported() {
+        val hardware = decoder("hw", maxWidth = 4096, maxHeight = 2304, supports = { w, _ -> w % 16 == 0 })
+        assertEquals(DecoderChoice.UnsupportedSize, chooseDecoder(listOf(hardware), 1281, 800))
+        assertEquals(DecoderChoice.Use(hardware), chooseDecoder(listOf(hardware), 1280, 800))
+    }
+
+    @Test
+    fun candidatesAreEverySupportingDecoderInPreferenceOrder() {
+        val software = decoder("sw", hardware = false)
+        val hardwarePlain = decoder("hw.plain", lowLatency = false)
+        val hardwareSmall = decoder("hw.small", maxWidth = 1024, maxHeight = 768)
+        val hardware = decoder("hw")
+        assertEquals(
+            listOf(hardware, hardwarePlain, software),
+            decoderCandidates(listOf(software, hardwarePlain, hardwareSmall, hardware), 1280, 800),
+        )
     }
 }

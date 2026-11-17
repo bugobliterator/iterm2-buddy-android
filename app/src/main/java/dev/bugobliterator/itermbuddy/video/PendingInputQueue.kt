@@ -76,6 +76,9 @@ class PendingInputQueue(private val maxBytes: Long = DEFAULT_MAX_PENDING_INPUT_B
         frame
     }
 
+    /** Keeps what is pending but refuses non-keyframes until the next keyframe (a frame was refused elsewhere). */
+    fun waitForKeyframe() = synchronized(lock) { waiting = true }
+
     /** Drops everything pending; the queue then waits for a keyframe. */
     fun clear() = synchronized(lock) {
         frames.clear()
