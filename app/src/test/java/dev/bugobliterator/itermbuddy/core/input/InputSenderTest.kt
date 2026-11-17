@@ -74,11 +74,13 @@ class InputSenderTest {
         @Volatile var current: InputTarget? = null
     }
 
-    private fun TestScope.harness(current: InputTarget? = first): Harness {
+    private fun TestScope.harness(current: InputTarget? = first, typeChunkBytes: Int = InputSender.TYPE_CHUNK_BYTES): Harness {
         val link = RecordingLink(this)
         val log = Collections.synchronizedList(mutableListOf<String>())
         lateinit var harness: Harness
-        val sender = InputSender(link, backgroundScope, isCurrent = { it == harness.current }, log = { log += it })
+        val sender = InputSender(
+            link, backgroundScope, isCurrent = { it == harness.current }, log = { log += it }, typeChunkBytes = typeChunkBytes,
+        )
         harness = Harness(link, sender, log)
         harness.current = current
         return harness
@@ -123,15 +125,18 @@ class InputSenderTest {
         val sentinel = "SENTINEL-paste-9f3c"
         val h = harness()
         h.link.behaviour = { message ->
-            when ((message as? PhoneMessage.PasteText)?.text) {
+            val text = (message as? PhoneMessage.PasteText)?.text
+                ?: ((message as? PhoneMessage.SendKey)?.event?.key as? Key.Text)?.text
+            when (text) {
                 "$sentinel-fails" -> throw CompanionRequestException("could not send $sentinel-fails")
                 "$sentinel-hangs" -> awaitCancellation()
                 else -> Unit
             }
         }
         h.sender.paste(first, "$sentinel-ok")
-        h.sender.pasteThenReturn(first, "$sentinel-fails")
-        h.sender.pasteThenReturn(first, "$sentinel-hangs")
+        h.sender.paste(first, "$sentinel-fails")
+        h.sender.typeThenReturn(first, "$sentinel-fails")
+        h.sender.typeThenReturn(first, "$sentinel-hangs")
         h.sender.key(first, text(sentinel))
         settle()
         h.current = first.copy(watchEpoch = 2)
@@ -179,50 +184,106 @@ class InputSenderTest {
     }
 
     @Test
-    fun failedPasteCancelsItsReturn() = runTest {
+    fun failedTypeCancelsItsReturn() = runTest {
         val h = harness()
-        h.link.behaviour = { message -> if (message is PhoneMessage.PasteText) throw CompanionRequestException("not connected") }
-        h.sender.pasteThenReturn(first, "make test")
+        h.link.behaviour = { message -> if (message == sendKey("make test")) throw CompanionRequestException("not connected") }
+        h.sender.typeThenReturn(first, "make test")
         h.sender.key(first, text("x"))
         settle()
-        assertEquals(listOf(PhoneMessage.PasteText(guid, "make test"), sendKey("x")), h.link.attempted.map { it.message })
+        assertEquals(listOf(sendKey("make test"), sendKey("x")), h.link.attempted.map { it.message })
         assertFalse(h.link.attempted.any { it.message == sendKey("\n") })
     }
 
     @Test
-    fun pasteThatTimesOutCancelsItsReturn() = runTest {
+    fun typeThatTimesOutCancelsItsReturn() = runTest {
         val h = harness()
-        h.link.behaviour = { message -> if (message is PhoneMessage.PasteText) awaitCancellation() }
-        h.sender.pasteThenReturn(first, "make test")
+        h.link.behaviour = { message -> if (message == sendKey("make test")) awaitCancellation() }
+        h.sender.typeThenReturn(first, "make test")
         h.sender.key(first, text("x"))
         settle()
-        assertEquals(listOf(PhoneMessage.PasteText(guid, "make test"), sendKey("x")), h.link.attempted.map { it.message })
+        assertEquals(listOf(sendKey("make test"), sendKey("x")), h.link.attempted.map { it.message })
     }
 
     @Test
-    fun returnDroppedWhenTargetChangesDuringPaste() = runTest {
+    fun returnDroppedWhenTargetChangesDuringTyping() = runTest {
         val h = harness()
         val gate = CompletableDeferred<Unit>()
-        h.link.behaviour = { message -> if (message is PhoneMessage.PasteText) gate.await() }
-        h.sender.pasteThenReturn(first, "make test")
+        h.link.behaviour = { message -> if (message == sendKey("make test")) gate.await() }
+        h.sender.typeThenReturn(first, "make test")
         runCurrent()
         h.current = first.copy(watchEpoch = 2)
         gate.complete(Unit)
         settle()
-        assertEquals(listOf(PhoneMessage.PasteText(guid, "make test")), h.link.completed.map { it.message })
+        assertEquals(listOf(sendKey("make test")), h.link.completed.map { it.message })
         assertEquals(1, h.link.attempted.size)
     }
 
     @Test
-    fun pasteThenReturnSendsReturnAfterThePaste() = runTest {
+    fun typeThenReturnTypesTheDraftThenReturn() = runTest {
         val h = harness()
-        h.sender.pasteThenReturn(first, "make test")
+        h.sender.typeThenReturn(first, "make test")
         h.sender.key(first, text("y"))
         settle()
         assertEquals(
-            listOf(PhoneMessage.PasteText(guid, "make test") to 1L, sendKey("\n") to 1L, sendKey("y") to 1L),
+            listOf(sendKey("make test") to 1L, sendKey("\n") to 1L, sendKey("y") to 1L),
             h.link.completed.map { it.message to it.onLink },
         )
+        assertFalse("Paste ⏎ never uses pasteText", h.link.attempted.any { it.message is PhoneMessage.PasteText })
+    }
+
+    @Test
+    fun largeDraftIsTypedInOrderedChunks() = runTest {
+        val h = harness(typeChunkBytes = 8)
+        val draft = "abc👍🏽defgh\nij"
+        h.sender.typeThenReturn(first, draft)
+        settle()
+        val typed = h.link.completed.map { ((it.message as PhoneMessage.SendKey).event.key as Key.Text).text }
+        assertEquals(listOf("abc", "👍🏽", "defgh\nij", "\n"), typed)
+        assertEquals(draft, typed.dropLast(1).joinToString(""))
+        assertTrue(h.link.completed.all { (it.message as PhoneMessage.SendKey).event.modifiers == KeyModifiers() })
+    }
+
+    @Test
+    fun failedChunkStopsTheRestAndTheReturn() = runTest {
+        val h = harness(typeChunkBytes = 4)
+        h.link.behaviour = { message -> if (message == sendKey("efgh")) throw CompanionRequestException("not connected") }
+        h.sender.typeThenReturn(first, "abcdefghijkl")
+        settle()
+        assertEquals(listOf(sendKey("abcd"), sendKey("efgh")), h.link.attempted.map { it.message })
+    }
+
+    @Test
+    fun targetChangeBetweenChunksStopsTyping() = runTest {
+        val h = harness(typeChunkBytes = 4)
+        val gate = CompletableDeferred<Unit>()
+        h.link.behaviour = { message -> if (message == sendKey("abcd")) gate.await() }
+        h.sender.typeThenReturn(first, "abcdefgh")
+        runCurrent()
+        h.current = first.copy(linkId = 2)
+        gate.complete(Unit)
+        settle()
+        assertEquals(listOf(sendKey("abcd")), h.link.attempted.map { it.message })
+    }
+
+    @Test
+    fun typingChunksKeepGraphemesWholeAndUnderTheLimit() {
+        val family = "👨‍👩‍👧‍👦" // 25 UTF-8 bytes, one grapheme
+        val text = "x".repeat(10) + family + "é\r\n" + "y".repeat(30)
+        val chunks = splitForTyping(text, maxBytes = 16)
+        assertEquals(text, chunks.joinToString(""))
+        assertTrue("a grapheme over the limit is sent whole, alone", family in chunks)
+        assertTrue("\r\n stays together", chunks.none { it.endsWith("\r") })
+        for (chunk in chunks.filter { it != family }) assertTrue(chunk, chunk.toByteArray().size <= 16)
+        assertEquals("flags pair up", listOf("🇬🇧", "🇫🇷"), splitForTyping("🇬🇧🇫🇷", maxBytes = 8))
+        assertEquals("a combining mark stays on its letter", listOf("e\u0301", "e\u0301"), splitForTyping("e\u0301e\u0301", maxBytes = 3))
+        assertEquals(listOf("hello"), splitForTyping("hello"))
+        assertEquals(emptyList<String>(), splitForTyping(""))
+    }
+
+    @Test
+    fun defaultChunkKeepsEnvelopesWellUnderTheRelayFrame() {
+        // Worst case JSON escaping is 6 bytes per input byte (\u00XX): still under 256 KiB.
+        assertTrue(InputSender.TYPE_CHUNK_BYTES * 6 < 256 * 1024 / 2)
     }
 
     /** The whole path, key bar and IME through the sender, against the upstream samples. */
@@ -237,10 +298,12 @@ class InputSenderTest {
         ime.keyBar(KeyEvent(Key.Special(SpecialKey.TAB)))
         ime.sendKeyEvent(android.view.KeyEvent.KEYCODE_DEL, android.view.KeyEvent.ACTION_DOWN)
         h.sender.paste(first, "make test\ngit status --short\n")
+        // Paste ⏎ types the draft: the same shapes as typing "ls" then Return.
+        h.sender.typeThenReturn(first, "ls")
         settle()
         val expected = listOf(
             "send-key-control-c", "send-key-text", "send-key-return", "send-key-special-tab",
-            "send-key-special-backspace", "paste-text-multiline",
+            "send-key-special-backspace", "paste-text-multiline", "send-key-text", "send-key-return",
         ).map { Json.parseToJsonElement(Fixtures.read("messages/live-session/$it.json")).jsonObject.getValue("json") }
         val actual = h.link.completed.map { buildJsonObject { put("payload", it.message.payload()) } }
         assertEquals(expected, actual)

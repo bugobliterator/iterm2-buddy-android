@@ -72,7 +72,7 @@ class MainActivity : ComponentActivity() {
 
         override fun paste(target: InputTarget, text: String) = app.input.paste(target, text)
 
-        override fun pasteThenReturn(target: InputTarget, text: String) = app.input.pasteThenReturn(target, text)
+        override fun typeThenReturn(target: InputTarget, text: String) = app.input.typeThenReturn(target, text)
 
         override fun composerDraft(sessionGuid: String): String = app.drafts.get(sessionGuid)
 

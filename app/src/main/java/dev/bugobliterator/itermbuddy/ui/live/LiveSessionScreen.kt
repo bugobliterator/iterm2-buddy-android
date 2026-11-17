@@ -79,8 +79,11 @@ interface LiveSessionActions {
     /** The composer's Paste for [target]. */
     fun paste(target: InputTarget, text: String)
 
-    /** The composer's Paste ⏎ for [target]: the Return follows only a paste that was sent. */
-    fun pasteThenReturn(target: InputTarget, text: String)
+    /**
+     * The composer's Paste ⏎ for [target]: types [text] as keys, then Return, which follows only
+     * typing that was all sent (owner decision 2026-11-18; see `InputSender`).
+     */
+    fun typeThenReturn(target: InputTarget, text: String)
 
     /** The composer's draft for [sessionGuid], kept in memory per session (not in saved state). */
     fun composerDraft(sessionGuid: String): String
@@ -319,7 +322,7 @@ fun LiveSessionScreen(
             },
             onPasteThenReturn = {
                 currentTarget?.let {
-                    actions.pasteThenReturn(it, draft)
+                    actions.typeThenReturn(it, draft)
                     updateDraft("")
                     composerOpen = false
                 }
