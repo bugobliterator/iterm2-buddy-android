@@ -116,7 +116,7 @@ class CompanionApp : Application() {
         }
         scope.launch {
             try {
-                val grid = fitToPhone(client, stream, viewportWidthPx, viewportHeightPx, video.maxSize())
+                val grid = fitToPhone(client, stream, viewportWidthPx, viewportHeightPx, video.maxSize(), video::sizeSupported)
                 Log.i(STREAM_TAG, "fit to phone for $sessionGuid: ${grid?.let { "${it.columns}x${it.rows}" } ?: "no grid"}")
             } catch (e: CompanionRequestException) {
                 Log.w(STREAM_TAG, "fit to phone for $sessionGuid failed: ${e.message}")

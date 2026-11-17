@@ -91,6 +91,9 @@ class MainActivity : ComponentActivity() {
         // The live view reads the stream's session and config; liveTop moves with the output, so
         // it is dropped here rather than recompose the whole home on every scroll.
         val activeForView = sessions.controller.activeStream.map { it?.copy(liveTop = null) }.distinctUntilChanged()
+        // Read now, so a recreated activity's first frame has the stream (not null, which would
+        // drop the config and the Fit menu for a frame).
+        val activeNow = sessions.controller.activeStream.value?.copy(liveTop = null)
         setContent {
             val state by app.client.state.collectAsStateWithLifecycle()
             val paired by app.client.paired.collectAsStateWithLifecycle()
@@ -101,7 +104,7 @@ class MainActivity : ComponentActivity() {
             val tree by sessions.repository.state.collectAsStateWithLifecycle()
             val live by sessions.controller.state.collectAsStateWithLifecycle()
             val relayOrigin by app.client.relayOrigin.collectAsStateWithLifecycle()
-            val activeStream by activeForView.collectAsStateWithLifecycle(initialValue = null)
+            val activeStream by activeForView.collectAsStateWithLifecycle(initialValue = activeNow)
             val videoStatsShown by app.videoStatsShown.collectAsStateWithLifecycle()
             MaterialTheme {
                 AppRoot(

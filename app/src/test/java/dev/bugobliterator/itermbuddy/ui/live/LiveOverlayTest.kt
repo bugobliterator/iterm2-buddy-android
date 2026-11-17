@@ -45,36 +45,37 @@ class LiveOverlayTest {
             LiveViewState.Failed(session, LiveProblem.NoDecoder) to Overlay("This phone has no HEVC video decoder", null),
             tooLarge to Overlay("$tooLargeText $MAC_SIDE_ADVICE", null),
             LiveViewState.Failed(session, LiveProblem.StartFailed(retryable = true)) to Overlay("Can't show session", OverlayAction.RETRY),
-            LiveViewState.Failed(session, LiveProblem.StartFailed(retryable = false)) to Overlay("Can't show session", OverlayAction.RETRY),
+            // Retrying cannot help (a codec the phone cannot decode): Back, the lead's call.
+            LiveViewState.Failed(session, LiveProblem.StartFailed(retryable = false)) to Overlay("Can't show session", OverlayAction.BACK),
         )
         // Every end reason is listed.
         assertEquals(
             StreamEndReason.entries.toSet(),
             expected.mapNotNull { (it.first as? LiveViewState.Ended)?.reason }.toSet(),
         )
-        for ((state, overlay) in expected) assertEquals("$state", overlay, liveOverlay(state, canFit = false))
+        for ((state, overlay) in expected) assertEquals("$state", overlay, liveOverlay(state, canFit = false, session.guid))
     }
 
     @Test
     fun tooLargeOffersFitOnlyWhenResizable() {
-        assertEquals(Overlay(tooLargeText, OverlayAction.FIT), liveOverlay(tooLarge, canFit = true))
-        assertEquals(Overlay("$tooLargeText $MAC_SIDE_ADVICE", null), liveOverlay(tooLarge, canFit = false))
+        assertEquals(Overlay(tooLargeText, OverlayAction.FIT), liveOverlay(tooLarge, canFit = true, session.guid))
+        assertEquals(Overlay("$tooLargeText $MAC_SIDE_ADVICE", null), liveOverlay(tooLarge, canFit = false, session.guid))
         // canFit comes from fitGrid: a config that cannot resize, or does not say, gives none.
         for (canResize in listOf(false, null)) {
             val canFit = fitGrid(1080, 2000, config(canResize), 4096 to 2304) != null
             assertFalse(canFit)
-            assertEquals(Overlay("$tooLargeText $MAC_SIDE_ADVICE", null), liveOverlay(tooLarge, canFit))
+            assertEquals(Overlay("$tooLargeText $MAC_SIDE_ADVICE", null), liveOverlay(tooLarge, canFit, session.guid))
         }
         assertTrue(fitGrid(1080, 2000, config(true), 4096 to 2304) != null)
         // Fit is offered only for TooLarge: other states ignore canFit.
-        assertNull(liveOverlay(LiveViewState.Live(session, config()), canFit = true))
-        assertEquals(Overlay("This phone has no HEVC video decoder", null), liveOverlay(LiveViewState.Failed(session, LiveProblem.NoDecoder), true))
+        assertNull(liveOverlay(LiveViewState.Live(session, config()), canFit = true, session.guid))
+        assertEquals(Overlay("This phone has no HEVC video decoder", null), liveOverlay(LiveViewState.Failed(session, LiveProblem.NoDecoder), true, session.guid))
     }
 
     @Test
     fun stalledLiveShowsRetry() {
-        assertEquals(OverlayAction.RETRY, liveOverlay(LiveViewState.Live(session, config(), stalled = true), canFit = true)?.action)
-        assertNull(liveOverlay(LiveViewState.Live(session, config(), stalled = false), canFit = true))
+        assertEquals(OverlayAction.RETRY, liveOverlay(LiveViewState.Live(session, config(), stalled = true), canFit = true, session.guid)?.action)
+        assertNull(liveOverlay(LiveViewState.Live(session, config(), stalled = false), canFit = true, session.guid))
     }
 
     @Test
@@ -89,13 +90,13 @@ class LiveOverlayTest {
             tooLarge,
         )
         for (state in states) {
-            assertFalse("$state", showsVideo(state, framesOutSinceReset = 0))
-            assertFalse("$state", showsVideo(state, framesOutSinceReset = 5))
+            assertFalse("$state", showsVideo(state, framesOutSinceReset = 0, sessionGuid = session.guid))
+            assertFalse("$state", showsVideo(state, framesOutSinceReset = 5, sessionGuid = session.guid))
         }
-        assertFalse(showsVideo(LiveViewState.Live(session, config()), framesOutSinceReset = 0))
-        assertTrue(showsVideo(LiveViewState.Live(session, config()), framesOutSinceReset = 1))
+        assertFalse(showsVideo(LiveViewState.Live(session, config()), framesOutSinceReset = 0, sessionGuid = session.guid))
+        assertTrue(showsVideo(LiveViewState.Live(session, config()), framesOutSinceReset = 1, sessionGuid = session.guid))
         // A stalled picture is the watched session's own last frame, shown under its label.
-        assertTrue(showsVideo(LiveViewState.Live(session, config(), stalled = true), framesOutSinceReset = 1))
+        assertTrue(showsVideo(LiveViewState.Live(session, config(), stalled = true), framesOutSinceReset = 1, sessionGuid = session.guid))
     }
 
     @Test
@@ -121,5 +122,23 @@ class LiveOverlayTest {
         // Never another session's.
         assertNull(shownConfig(session, LiveViewState.Starting(session), ActiveStream(1, 1, other.guid, 1, kept, 0)))
         assertNull(shownConfig(session, LiveViewState.Live(other, live), null))
+    }
+
+    @Test
+    fun anotherSessionsStateShowsNoVideoAndReadsAsStarting() {
+        val other = SessionSummary("guid-bravo", "bravo", "", isBrowser = false)
+        val othersLive = LiveViewState.Live(other, config())
+        assertFalse(showsVideo(othersLive, framesOutSinceReset = 3, sessionGuid = session.guid))
+        assertTrue(showsVideo(othersLive, framesOutSinceReset = 3, sessionGuid = other.guid))
+        val others = listOf(
+            othersLive,
+            LiveViewState.Live(other, config(), stalled = true),
+            LiveViewState.Ended(other, StreamEndReason.SESSION_CLOSED),
+            LiveViewState.Failed(other, LiveProblem.TooLarge(5120, 2880, 4096, 2304)),
+            LiveViewState.Failed(other, LiveProblem.StartFailed(retryable = true)),
+            LiveViewState.Reconnecting(other),
+        )
+        for (state in others) assertEquals("$state", Overlay("Starting…", null), liveOverlay(state, canFit = true, sessionGuid = session.guid))
+        assertNull(liveOverlay(LiveViewState.Closed, canFit = true, sessionGuid = session.guid))
     }
 }

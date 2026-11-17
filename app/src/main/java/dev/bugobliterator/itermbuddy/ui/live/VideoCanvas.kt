@@ -42,11 +42,12 @@ import kotlin.math.roundToInt
  * controller's [state].
  */
 class LiveVideoSource(val output: HevcVideoOutput, val state: StateFlow<LiveViewState>) {
-    /** [videoVisible] now. */
-    fun visible(): Boolean = videoVisible(state, output.stats)
+    /** [videoVisible] now, for the view of [sessionGuid]. */
+    fun visible(sessionGuid: String): Boolean = videoVisible(state, output.stats, sessionGuid)
 
-    /** [videoVisible] on every change of either flow, re-read in [videoVisible]'s order. */
-    val visibility: Flow<Boolean> = combine(state, output.stats) { _, _ -> visible() }.distinctUntilChanged()
+    /** [videoVisible] for [sessionGuid] on every change of either flow, re-read in [videoVisible]'s order. */
+    fun visibility(sessionGuid: String): Flow<Boolean> =
+        combine(state, output.stats) { _, _ -> visible(sessionGuid) }.distinctUntilChanged()
 
     /** Settings' Decoder row now ([decoderRowText]), the initial value before its flow is collected. */
     fun decoderRowNow(): String = decoderRowText(output.stats.value)
@@ -59,6 +60,10 @@ class LiveVideoSource(val output: HevcVideoOutput, val state: StateFlow<LiveView
  * no image size yet ([imageWidth] or [imageHeight] 0) the surface fills the canvas, so a surface
  * exists before the first config and the decoder can start at once.
  *
+ * **Zoom.** Keyed by [nextZoomKey]: the session and the last non-empty image size. A reconnect,
+ * retry or lock (no config for a while: 0×0) keeps the zoom and the fit; a real size change or
+ * another session resets it to fit. A canvas size change keeps it, clamped ([clampZoom]).
+ *
  * **Surface lifecycle.** The surface is attached to [LiveVideoSource.output] when it is created,
  * never on a size change, and detached when it is destroyed or this leaves composition. Nothing
  * here opens or closes the stream: a rotation destroys the surface (the decoder is released, the
@@ -69,8 +74,7 @@ class LiveVideoSource(val output: HevcVideoOutput, val state: StateFlow<LiveView
  * frame) but is invisible unless [LiveVideoSource.visibility] says otherwise; a black scrim
  * covers it too.
  *
- * @param zoomKey the zoom resets to fit when this changes (the session), and when the fit does
- *   (a new image size or canvas size).
+ * @param sessionGuid the session shown: the zoom's key and the stale-frame rule's owner.
  * @param onCanvasSize the canvas size in px, on every change.
  */
 @Composable
@@ -78,18 +82,24 @@ fun VideoCanvas(
     source: LiveVideoSource,
     imageWidth: Int,
     imageHeight: Int,
-    zoomKey: Any,
+    sessionGuid: String,
     onCanvasSize: (IntSize) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var canvas by remember { mutableStateOf(IntSize.Zero) }
     val viewW = canvas.width.toFloat()
     val viewH = canvas.height.toFloat()
-    val fit = fitRect(imageWidth, imageHeight, viewW, viewH)
+    // Not snapshot state: the key is a pure function of its inputs and the previous key.
+    val keyHolder = remember { arrayOfNulls<ZoomKey>(1) }
+    val zoomKey = nextZoomKey(keyHolder[0], sessionGuid, imageWidth, imageHeight).also { keyHolder[0] = it }
+    val image = zoomKey.image
+    val fit = if (image == null) FitRect.EMPTY else fitRect(image.width, image.height, viewW, viewH)
     val surfaceRect = if (fit.isEmpty) FitRect(0f, 0f, viewW, viewH) else fit
-    val max = maxScale(imageWidth, fit)
-    var zoom by remember(zoomKey, fit) { mutableStateOf(ZoomState.FIT) }
-    val visible by remember(source) { source.visibility }.collectAsStateWithLifecycle(initialValue = source.visible())
+    val max = maxScale(image?.width ?: 0, fit)
+    var kept by remember(zoomKey) { mutableStateOf(ZoomState.FIT) }
+    val zoom = clampZoom(kept, fit, viewW, viewH)
+    val visible by remember(source, sessionGuid) { source.visibility(sessionGuid) }
+        .collectAsStateWithLifecycle(initialValue = source.visible(sessionGuid))
     val density = LocalDensity.current
     Box(
         modifier = modifier
@@ -102,11 +112,11 @@ fun VideoCanvas(
             }
             .pointerInput(zoomKey, fit, max, canvas) {
                 detectTransformGestures { centroid, pan, gestureZoom, _ ->
-                    zoom = applyGesture(zoom, centroid.x, centroid.y, gestureZoom, pan.x, pan.y, fit, viewW, viewH, max)
+                    kept = applyGesture(clampZoom(kept, fit, viewW, viewH), centroid.x, centroid.y, gestureZoom, pan.x, pan.y, fit, viewW, viewH, max)
                 }
             }
             .pointerInput(zoomKey, fit, max, canvas) {
-                detectTapGestures(onDoubleTap = { tap -> zoom = toggleZoom(zoom, tap.x, tap.y, fit, viewW, viewH, max) })
+                detectTapGestures(onDoubleTap = { tap -> kept = toggleZoom(clampZoom(kept, fit, viewW, viewH), tap.x, tap.y, fit, viewW, viewH, max) })
             },
     ) {
         Box(
@@ -135,7 +145,8 @@ fun VideoCanvas(
 /**
  * The TextureView surface for [output]: [HevcVideoOutput.attachSurface] on creation only (not on
  * size changes), [HevcVideoOutput.detachSurface] on destruction, or on leaving composition if the
- * destruction callback has not run by then. Never more than one detach per attach.
+ * destruction callback has not run by then. Never more than one detach per attach. On destruction
+ * the surface is released once the decoder has let go of it (detach waits for that).
  */
 @Composable
 private fun VideoSurface(output: HevcVideoOutput, modifier: Modifier) {
@@ -146,6 +157,7 @@ private fun VideoSurface(output: HevcVideoOutput, modifier: Modifier) {
             output.attachSurface(surface)
             surface.onDestroyed {
                 if (attached.compareAndSet(this, null)) output.detachSurface()
+                release()
             }
         }
     }

@@ -57,4 +57,10 @@ interface VideoOutput {
 
     /** The chosen decoder's size limit, width to height, or null when none is chosen. */
     fun maxSize(): Pair<Int, Int>?
+
+    /**
+     * Whether a decoder on this device would take a [width] x [height] stream (the one chosen for
+     * that size passes its own `isSizeSupported`): Fit to phone checks its grid's frame with it.
+     */
+    fun sizeSupported(width: Int, height: Int): Boolean
 }

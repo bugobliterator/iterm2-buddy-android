@@ -44,6 +44,34 @@ data class FitRect(val left: Float, val top: Float, val width: Float, val height
     }
 }
 
+/** An encoded image size; never 0 on either side. */
+data class ImageSize(val width: Int, val height: Int)
+
+/**
+ * What the live view's zoom is keyed on: the session and the last non-empty image size. The zoom
+ * resets to fit only when the key changes.
+ */
+data class ZoomKey(val sessionGuid: String, val image: ImageSize?)
+
+/**
+ * The next [ZoomKey] for an image of [width]×[height]: the size when it is non-empty; otherwise
+ * (no config: a reconnect, retry, lock or restart in progress) the [previous] key's size for the
+ * same session, so the transient 0×0 keeps the zoom and only a real size change resets it.
+ */
+fun nextZoomKey(previous: ZoomKey?, sessionGuid: String, width: Int, height: Int): ZoomKey {
+    if (width > 0 && height > 0) {
+        val image = ImageSize(width, height)
+        return if (previous?.sessionGuid == sessionGuid && previous.image == image) previous else ZoomKey(sessionGuid, image)
+    }
+    return if (previous?.sessionGuid == sessionGuid) previous else ZoomKey(sessionGuid, null)
+}
+
+/**
+ * [state] made valid for [fit] in a [viewW]×[viewH] view (content kept covering it, or centred),
+ * scale unchanged: a kept zoom after the canvas changes size.
+ */
+fun clampZoom(state: ZoomState, fit: FitRect, viewW: Float, viewH: Float): ZoomState = clamp(sane(state), fit, viewW, viewH)
+
 /** [imageW]×[imageH] aspect-fit into [viewW]×[viewH] and centred; [FitRect.EMPTY] when either is empty. */
 fun fitRect(imageW: Int, imageH: Int, viewW: Float, viewH: Float): FitRect {
     if (imageW <= 0 || imageH <= 0 || !(viewW > 0f) || !(viewH > 0f) || !viewW.isFinite() || !viewH.isFinite()) {

@@ -69,6 +69,14 @@ interface LiveSessionActions {
  * @param config the image geometry: the shown state's config, else the active stream's when it
  *   is this session's (a too-large window keeps its config for Fit).
  * @param macRevision the Mac's hello revision, for the browser note; null when not connected.
+ *
+ * TODO(Typing task): two known gaps in the keyboard-hidden measurement, left until the keyboard
+ * exists here. (1) The Fit viewport is the canvas size last seen with the IME inset at 0; a canvas
+ * change while the keyboard is up (rotation inside one activity, split screen, a resized window)
+ * leaves it stale until the keyboard hides again. Derive it instead from the current canvas plus
+ * the IME inset the layout consumed. (2) `WindowInsets.ime` is read in this composable, so every
+ * frame of the IME animation recomposes the whole screen; read it in a narrower scope (a
+ * `derivedStateOf` of "hidden" or a layout-phase read) once the key bar and composer arrive.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -95,7 +103,7 @@ fun LiveSessionScreen(
     }
     val viewport = if (fitViewport != IntSize.Zero) fitViewport else canvas
     val canFit = !session.isBrowser && config != null &&
-        fitGrid(viewport.width, viewport.height, config, source.output.maxSize()) != null
+        fitGrid(viewport.width, viewport.height, config, source.output.maxSize(), source.output::sizeSupported) != null
     val fit = { actions.fitToPhone(session.guid, viewport.width, viewport.height) }
     var menuOpen by remember { mutableStateOf(false) }
     Scaffold(
@@ -147,10 +155,10 @@ fun LiveSessionScreen(
                 source = source,
                 imageWidth = config?.pixelWidth ?: 0,
                 imageHeight = config?.pixelHeight ?: 0,
-                zoomKey = session.guid,
+                sessionGuid = session.guid,
                 onCanvasSize = { canvas = it },
             )
-            liveOverlay(live, canFit)?.let { overlay ->
+            liveOverlay(live, canFit, session.guid)?.let { overlay ->
                 OverlayCard(
                     overlay = overlay,
                     busy = live is LiveViewState.Starting || live is LiveViewState.Reconnecting,

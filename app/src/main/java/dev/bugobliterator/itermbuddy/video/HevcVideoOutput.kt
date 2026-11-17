@@ -281,6 +281,10 @@ class HevcVideoOutput(
         }
     }
 
+    override fun sizeSupported(width: Int, height: Int): Boolean = guarded("sizeSupported", false) {
+        chooseDecoder(decoderList, width, height) is DecoderChoice.Use
+    }
+
     // ---- Surface and lifetime ----
 
     /**
@@ -443,8 +447,20 @@ class HevcVideoOutput(
         if (request) keyframeRequester?.invoke()
     }
 
+    /**
+     * One output buffer. A buffer of a codec that is no longer wanted (a reset or rebuild is on its
+     * way) is released without rendering. A wanted one is rendered first and counted after, and
+     * only if the codec is still wanted then: `releaseOutputBuffer(index, true)` queues the buffer
+     * to the surface's BufferQueue before it returns (CCodec renders through the output surface's
+     * `queueBuffer`), and the TextureView's SurfaceTexture latches the newest queued buffer on its
+     * next draw, so once [VideoStats.framesOutSinceReset] says a frame is out, any draw shows that
+     * frame or a newer one, never the buffer left from before the reset. A reset between the two
+     * steps leaves the frame uncounted (it is retired with its codec).
+     */
     private fun onOutput(handle: CodecHandle, index: Int, presentationTimeUs: Long) {
-        handle.releaseOutput(index, true)
+        val wanted = synchronized(lock) { codecEpoch == epoch }
+        handle.releaseOutput(index, wanted)
+        if (!wanted) return
         val now = nowMillis()
         val first = !codecHasOutput
         codecHasOutput = true

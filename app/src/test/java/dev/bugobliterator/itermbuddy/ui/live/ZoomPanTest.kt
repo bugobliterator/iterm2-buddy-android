@@ -9,6 +9,7 @@ import dev.bugobliterator.itermbuddy.core.wire.decodeEnvelope
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -177,6 +178,38 @@ class ZoomPanTest {
             assertNull(viewToImage(0f, 0f, ZoomState(1f, 0f, 0f), rect, 0, 0))
         }
         assertNull(viewToImage(0f, 0f, ZoomState(0f, 0f, 0f), fit, config.pixelWidth, config.pixelHeight))
+    }
+
+    @Test
+    fun zoomKeyKeepsZoomThroughTheTransientEmptyImageAndResetsOnARealSizeChange() {
+        val first = nextZoomKey(null, "guid-alpha", 0, 0)
+        assertEquals(ZoomKey("guid-alpha", null), first)
+        val live = nextZoomKey(first, "guid-alpha", 1280, 800)
+        assertEquals(ZoomKey("guid-alpha", ImageSize(1280, 800)), live)
+        // A reconnect, retry or lock: no config (0×0) for a while, then the same size again.
+        val reconnecting = nextZoomKey(live, "guid-alpha", 0, 0)
+        assertEquals("the transient 0×0 keeps the key, so the zoom stays", live, reconnecting)
+        assertEquals(live, nextZoomKey(reconnecting, "guid-alpha", 1280, 800))
+        // A real size change resets it.
+        val resized = nextZoomKey(reconnecting, "guid-alpha", 1440, 900)
+        assertNotEquals(live, resized)
+        assertEquals(ImageSize(1440, 900), resized.image)
+        // So does another session, even at the same size.
+        assertNotEquals(resized, nextZoomKey(resized, "guid-bravo", 1440, 900))
+        assertEquals(ZoomKey("guid-bravo", null), nextZoomKey(resized, "guid-bravo", 0, 0))
+    }
+
+    @Test
+    fun clampZoomKeepsTheScaleAndRefitsThePan() {
+        val wide = fitRect(1280, 800, 1280f, 800f)
+        val zoomed = applyGesture(ZoomState.FIT, 1280f, 800f, 3f, 0f, 0f, wide, 1280f, 800f, maxScale(1280, wide))
+        // The canvas shrinks: the scale stays and the pan is clamped to the new fit.
+        val small = fitRect(1280, 800, 640f, 400f)
+        val clamped = clampZoom(zoomed, small, 640f, 400f)
+        assertEquals(3f, clamped.scale, eps)
+        assertEquals(640f - 3 * 640f, clamped.offsetX, eps)
+        assertEquals(400f - 3 * 400f, clamped.offsetY, eps)
+        assertEquals(ZoomState.FIT, clampZoom(ZoomState.FIT, small, 640f, 400f))
     }
 
     private fun terminalConfig(): StreamConfig {

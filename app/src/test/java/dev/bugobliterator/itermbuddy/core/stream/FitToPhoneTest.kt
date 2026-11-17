@@ -115,4 +115,21 @@ class FitToPhoneTest {
         assertNull(fitToPhone(link, ActiveStream(1, 1, "guid-alpha", 1, config(isBrowser = true), 0), 1080, 2000, null))
         assertTrue(link.sent.isEmpty())
     }
+
+    @Test
+    fun fitGridStepsRowsThenColumnsDownForAnAreaLimitedDecoder() {
+        // Grid(60, 55) at 16×32 is 960×1760 = 1,689,600 px; this decoder takes at most 1,000,000 px.
+        val areaLimited = { w: Int, h: Int -> w.toLong() * h <= 1_000_000 }
+        // Rows first: 960 × 32 × 32 = 983,040 fits, 33 rows do not.
+        assertEquals(Grid(60, 32), fitGrid(1080, 2000, config(), null, areaLimited))
+        // Columns only once rows are down to 1: 16 × c × 32 ≤ 10,000 gives c = 19.
+        assertEquals(Grid(19, 1), fitGrid(1080, 2000, config(), null, { w, h -> w.toLong() * h <= 10_000 }))
+        // Margins count, rounded up: 2 × 0.5 px on each axis.
+        val seen = mutableListOf<Pair<Int, Int>>()
+        fitGrid(1080, 2000, config(cell = CellGeometry(16.0, 32.0, 0.25, 0.25)), null) { w, h -> seen += w to h; true }
+        assertEquals(listOf(961 to 1761), seen)
+        // Nothing supported: no grid; a decoder that takes the first grid changes nothing.
+        assertNull(fitGrid(1080, 2000, config(), null) { _, _ -> false })
+        assertEquals(Grid(60, 55), fitGrid(1080, 2000, config(), 4096 to 2304) { _, _ -> true })
+    }
 }

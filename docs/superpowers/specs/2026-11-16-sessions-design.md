@@ -432,12 +432,12 @@ are hoisted; peer title `"<role>: <name>"` or `<role>` when the name is empty or
 ├──────────────────────────────────────────┤
 │              Android keyboard            │
 └──────────────────────────────────────────┘
- Overlays: "Starting…" (spinner), "Reconnecting…" (last frame dimmed),
+ Overlays: "Starting…" (spinner), "Reconnecting…" (video hidden: no stale frame),
  "Session closed on the Mac" [Back], "Stream ended: daily data limit reached" [Restart],
  "This phone has no HEVC video decoder", "The Mac window (5120×2880) is too large for
  this phone's decoder (max 4096×2304)." [Fit to phone] (only when the window can resize; else
  "Make the iTerm2 window smaller on the Mac (leave full screen) to watch it here."),
- "Picture stalled" [Try again], "Can't show session" [Try again].
+ "Picture stalled" [Try again], "Can't show session" [Try again] ([Back] when retrying cannot help).
  The screen stays on while this view shows.
  Browser session before revision 15: video only, note "Browser control comes later".
 ```
