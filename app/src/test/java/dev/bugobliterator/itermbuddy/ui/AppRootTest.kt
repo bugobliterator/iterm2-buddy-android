@@ -44,7 +44,15 @@ class AppRootTest {
     @Test
     fun coldStartShowsLoadingNotPairing() {
         assertEquals(AppScreen.LOADING, appScreenFor(ClientState.Connecting, paired = null))
-        assertEquals(AppScreen.LOADING, appScreenFor(ClientState.Unpaired, paired = null))
+    }
+
+    /** Only the first store read is blank: a store that stays unavailable, or a failure, shows the pairing screens. */
+    @Test
+    fun unknownPairingShowsPairingScreensExceptWhileConnecting() {
+        assertEquals(AppScreen.PAIRING, appScreenFor(ClientState.WaitingForMac(WaitReason.STORE_UNAVAILABLE), paired = null))
+        assertEquals(AppScreen.PAIRING, appScreenFor(ClientState.Failed("This phone couldn't save the pairing. Scan again.", rescanNeeded = true), paired = null))
+        assertEquals(AppScreen.PAIRING, appScreenFor(ClientState.Idle, paired = null))
+        assertEquals(AppScreen.PAIRING, appScreenFor(ClientState.Unpaired, paired = null))
     }
 
     @Test

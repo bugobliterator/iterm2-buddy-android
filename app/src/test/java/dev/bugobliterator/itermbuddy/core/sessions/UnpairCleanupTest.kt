@@ -41,9 +41,10 @@ class UnpairCleanupTest {
         runCurrent()
         val loaded = rig.repository.state.value as TreeState.Loaded
         val session = loaded.tree.windows.first().tabs.last().panes.single().session
-        rig.navigator.openSession(session)
+        rig.navigator.openSession(session, session.name)
         runCurrent()
-        assertEquals(HomeDestination.LiveSession(session), rig.navigator.destination.value)
+        assertEquals(HomeDestination.LiveSession(session, session.name), rig.navigator.destination.value)
+        assertEquals(SessionsRig.ORIGIN, rig.client.relayOrigin.value)
         assertTrue(rig.controller.state.value is LiveViewState.Live)
         assertNotNull(rig.controller.activeStream.value)
 
@@ -55,6 +56,7 @@ class UnpairCleanupTest {
         }
         runCurrent()
         assertEquals(false, rig.client.paired.value)
+        assertNull("nothing stored, so no relay to show", rig.client.relayOrigin.value)
         assertEquals(TreeState.Loading, rig.repository.state.value)
         assertEquals(HomeDestination.SessionList, rig.navigator.destination.value)
         assertEquals(LiveViewState.Closed, rig.controller.state.value)

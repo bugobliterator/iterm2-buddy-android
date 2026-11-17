@@ -22,6 +22,7 @@ import dev.bugobliterator.itermbuddy.store.PairingStage
 import dev.bugobliterator.itermbuddy.store.advancePairing
 import dev.bugobliterator.itermbuddy.store.beginFreshPairing
 import dev.bugobliterator.itermbuddy.wireSessions
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
@@ -44,6 +45,7 @@ import kotlin.time.Duration.Companion.minutes
  *
  * @param events where the repository reads pushes; null for the client's own `events`.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 internal class SessionsRig(
     private val test: TestScope,
     events: ((CompanionClient) -> Flow<MacMessage>)? = null,

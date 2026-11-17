@@ -20,6 +20,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.heading
@@ -30,6 +31,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.core.sessions.TreeState
+import java.util.Locale
 
 internal const val EMPTY_TREE = "No sessions are open in iTerm2."
 internal const val TREE_FAILED = "Couldn't load sessions."
@@ -37,13 +39,13 @@ internal const val TREE_FAILED = "Couldn't load sessions."
 /**
  * The Sessions list for [state]: a spinner while loading, "Couldn't load sessions." with Try
  * again on a failure, the empty text, or the rows of [sessionRows], all under pull to refresh.
- * A row tap is [onOpen] (the navigator's `openSession`).
+ * A row tap is [onOpen] with the row's title (the navigator's `openSession`).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SessionListScreen(
     state: TreeState,
-    onOpen: (SessionSummary) -> Unit,
+    onOpen: (SessionSummary, String) -> Unit,
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -59,7 +61,7 @@ fun SessionListScreen(
                 if (state.retryable) Button(onClick = onRefresh) { Text("Try again") }
             }
             is TreeState.Loaded -> {
-                val rows = sessionRows(state.tree)
+                val rows = remember(state.tree) { sessionRows(state.tree) }
                 if (rows.isEmpty()) {
                     Centered { Text(EMPTY_TREE, style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center) }
                 } else {
@@ -83,10 +85,10 @@ private fun Centered(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun RowFor(row: SessionRow, onOpen: (SessionSummary) -> Unit) {
+private fun RowFor(row: SessionRow, onOpen: (SessionSummary, String) -> Unit) {
     when (row) {
         is SessionRow.Window -> Text(
-            text = row.title.uppercase(),
+            text = row.title.uppercase(Locale.ROOT),
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.primary,
             maxLines = 1,
@@ -100,7 +102,7 @@ private fun RowFor(row: SessionRow, onOpen: (SessionSummary) -> Unit) {
             title = row.title,
             subtitle = rowSubtitle(row.summary),
             indent = if (row.nested) INDENT * 2 else INDENT,
-            onClick = { onOpen(row.summary) },
+            onClick = { onOpen(row.summary, row.title) },
         )
     }
 }

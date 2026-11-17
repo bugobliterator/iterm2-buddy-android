@@ -5,16 +5,21 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-/** Where the home is. [toString] of a session destination carries only the summary's redacted form. */
+/** Where the home is. A session destination's [toString] shows the summary's redacted form and the title's length only. */
 sealed interface HomeDestination {
     data object SessionList : HomeDestination
 
     data object Settings : HomeDestination
 
-    data class LiveSession(val session: SessionSummary) : HomeDestination
+    /** [title] is the row's title (a peer reads "Planner: claude", as on iOS). */
+    data class LiveSession(val session: SessionSummary, val title: String) : HomeDestination {
+        override fun toString(): String = "LiveSession(session=$session, title(len=${title.length}))"
+    }
 
     /** The browser view; until the Browser View task, browser rows open [LiveSession] instead. */
-    data class BrowserSession(val session: SessionSummary) : HomeDestination
+    data class BrowserSession(val session: SessionSummary, val title: String) : HomeDestination {
+        override fun toString(): String = "BrowserSession(session=$session, title(len=${title.length}))"
+    }
 }
 
 /**
@@ -34,11 +39,14 @@ class SessionNavigator(private val open: (SessionSummary) -> Unit, private val c
 
     val destination: StateFlow<HomeDestination> = destinationFlow.asStateFlow()
 
-    /** Opens [session]'s view and starts its stream. Browser sessions use the live view until Browser View. */
-    fun openSession(session: SessionSummary) {
+    /**
+     * Opens [session]'s view, titled [title] (the row's title), and starts its stream. Browser
+     * sessions use the live view until Browser View.
+     */
+    fun openSession(session: SessionSummary, title: String = session.name) {
         synchronized(lock) {
             open(session)
-            destinationFlow.value = HomeDestination.LiveSession(session)
+            destinationFlow.value = HomeDestination.LiveSession(session, title)
         }
     }
 
