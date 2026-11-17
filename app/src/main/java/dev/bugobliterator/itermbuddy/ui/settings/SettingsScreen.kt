@@ -40,8 +40,10 @@ internal fun macStatusText(state: ClientState): String = when (state) {
 }
 
 /**
- * Settings, reached from the home's overflow menu: the connection, Unpair (confirmed first) and
- * the app version. The pairing screen's Connected content (status and Unpair) lives here now.
+ * Settings, reached from the home's overflow menu: the connection, the relay origin, Unpair
+ * (confirmed first) and the app version. The pairing screen's Connected content (status and
+ * Unpair) lives here now. The Decoder row (the HEVC decoder's name) comes with the Live View
+ * task, which owns the decoder's stats.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -50,6 +52,7 @@ fun SettingsScreen(
     unpairing: Boolean,
     unpairFailed: Boolean,
     appVersion: String,
+    relayOrigin: String?,
     onBack: () -> Unit,
     onUnpair: () -> Unit,
     modifier: Modifier = Modifier,
@@ -73,6 +76,7 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Entry("Mac", macStatusText(state))
+            Entry("Relay", relayOrigin ?: "—")
             if (unpairing) {
                 Text("Unpairing…", style = MaterialTheme.typography.bodyLarge)
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())

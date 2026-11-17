@@ -46,7 +46,7 @@ import dev.bugobliterator.itermbuddy.ui.settings.SettingsScreen
 
 /** What the home can ask for. Session open and Back go to the app-scoped navigator, never composition. */
 interface HomeActions {
-    fun openSession(session: dev.bugobliterator.itermbuddy.core.sessions.SessionSummary)
+    fun openSession(session: dev.bugobliterator.itermbuddy.core.sessions.SessionSummary, title: String)
 
     fun openSettings()
 
@@ -68,6 +68,7 @@ data class HomeModel(
     val unpairing: Boolean,
     val unpairFailed: Boolean,
     val appVersion: String,
+    val relayOrigin: String?,
 )
 
 /**
@@ -94,12 +95,13 @@ fun HomeScaffold(model: HomeModel, actions: HomeActions, modifier: Modifier = Mo
             unpairing = model.unpairing,
             unpairFailed = model.unpairFailed,
             appVersion = model.appVersion,
+            relayOrigin = model.relayOrigin,
             onBack = actions::back,
             onUnpair = actions::unpair,
             modifier = modifier,
         )
-        is HomeDestination.LiveSession -> SessionPlaceholder(destination.session.name, model.live, actions, modifier)
-        is HomeDestination.BrowserSession -> SessionPlaceholder(destination.session.name, model.live, actions, modifier)
+        is HomeDestination.LiveSession -> SessionPlaceholder(destination.title, model.live, actions, modifier)
+        is HomeDestination.BrowserSession -> SessionPlaceholder(destination.title, model.live, actions, modifier)
     }
 }
 

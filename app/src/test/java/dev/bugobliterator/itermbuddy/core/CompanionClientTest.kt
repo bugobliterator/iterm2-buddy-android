@@ -23,8 +23,11 @@ import dev.bugobliterator.itermbuddy.store.PairingStore
 import dev.bugobliterator.itermbuddy.store.PairingStoreUnavailableException
 import dev.bugobliterator.itermbuddy.store.advancePairing
 import dev.bugobliterator.itermbuddy.store.beginFreshPairing
+import dev.bugobliterator.itermbuddy.ui.AppScreen
+import dev.bugobliterator.itermbuddy.ui.appScreenFor
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
@@ -604,6 +607,60 @@ class CompanionClientTest {
         advanceTimeBy(10.minutes)
         assertEquals(1, h.relay.phoneAdmissions.size)
         assertEquals(PairingStage.REGISTERED, h.stage())
+    }
+
+    /**
+     * Scan again from a stored pairing that failed: the home must never show, not even while the
+     * new record cannot be written. Records the root screen on every state and paired change.
+     */
+    @Test
+    fun rescanFromStoredFailureNeverShowsHome() = runTest {
+        val store = FlakyStore(InMemoryPairingStore())
+        val h = Harness(this, store = store)
+        // Confirmed but not registered: the relay room is not locked, so the rescan can admit unsigned.
+        h.stored(PairingStage.CONFIRMED)
+        h.relay.phoneAdmissionOverrides += AdmissionResult.Unreachable(UnreachableKind.TLS, "SSLHandshakeException")
+        val screens = CopyOnWriteArrayList<AppScreen>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            combine(h.client.state, h.client.paired) { state, paired -> appScreenFor(state, paired) }.collect { screens += it }
+        }
+        h.client.start()
+        h.await { it is ClientState.Failed }
+        assertEquals(true, h.client.paired.value)
+
+        store.failSavesAt = PairingStage.PENDING_CONFIRMATION
+        store.saveFailures = 5
+        h.mac.start()
+        assertEquals(AppScreen.PAIRING, screens.last())
+        screens.clear()
+        h.client.pair(code)
+        h.await { it is ClientState.WaitingForMac }
+        assertEquals(false, h.client.paired.value)
+        h.await { it is ClientState.ShowCode }
+        assertEquals(0, store.saveFailures)
+        assertFalse("$screens", AppScreen.HOME in screens)
+        assertTrue("$screens", screens.isNotEmpty())
+        assertEquals(AppScreen.PAIRING, screens.last())
+    }
+
+    /** The Mac unpairs: the state leaves Connected before paired turns false, so no hidden Connected screen flashes. */
+    @Test
+    fun macUnpairNeverShowsConnectedWhileUnpaired() = runTest {
+        val h = Harness(this)
+        val record = h.stored(PairingStage.REGISTERED)
+        h.macPinned(record)
+        val seen = CopyOnWriteArrayList<Pair<ClientState, Boolean?>>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            combine(h.client.state, h.client.paired) { state, paired -> state to paired }.collect { seen += it }
+        }
+        h.mac.start()
+        h.client.start()
+        h.awaitConnected()
+        h.mac.sendUnpaired()
+        h.await { it is ClientState.Failed }
+        runCurrent()
+        assertEquals(false, h.client.paired.value)
+        assertFalse("$seen", seen.any { (state, paired) -> state is ClientState.Connected && paired != true })
     }
 
     @Test

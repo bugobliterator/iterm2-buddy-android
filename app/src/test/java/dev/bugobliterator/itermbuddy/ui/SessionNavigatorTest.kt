@@ -23,7 +23,7 @@ class SessionNavigatorTest {
         navigator.openSession(TERMINAL)
         assertEquals(listOf(TERMINAL), opened)
         assertEquals(0, closes)
-        assertEquals(HomeDestination.LiveSession(TERMINAL), navigator.destination.value)
+        assertEquals(HomeDestination.LiveSession(TERMINAL, "zsh"), navigator.destination.value)
         navigator.back()
         assertEquals(1, closes)
         assertEquals(HomeDestination.SessionList, navigator.destination.value)
@@ -37,7 +37,7 @@ class SessionNavigatorTest {
     fun browserRowsOpenTheLiveView() {
         navigator.openSession(BROWSER)
         assertEquals(listOf(BROWSER), opened)
-        assertEquals(HomeDestination.LiveSession(BROWSER), navigator.destination.value)
+        assertEquals(HomeDestination.LiveSession(BROWSER, "Widget Docs"), navigator.destination.value)
     }
 
     @Test
@@ -50,8 +50,14 @@ class SessionNavigatorTest {
         assertTrue(opened.isEmpty())
     }
 
+    /**
+     * A contract test only: reading [SessionNavigator.destination] from a new collector (as a
+     * recreated Activity does) opens and closes nothing. It cannot drive real composition or a
+     * rotation; the owner's on-device rotation check is the proof that rotation neither stops
+     * nor restarts the stream.
+     */
     @Test
-    fun recreatingTheUiDoesNotRestart() = runTest {
+    fun newCollectorsOfDestinationNeitherOpenNorClose() = runTest {
         navigator.openSession(TERMINAL)
         val seen = CopyOnWriteArrayList<HomeDestination>()
         val first = backgroundScope.launch { navigator.destination.collect { seen += it } }
@@ -61,7 +67,7 @@ class SessionNavigatorTest {
         val second = backgroundScope.launch { navigator.destination.collect { seen += it } }
         runCurrent()
         second.cancel()
-        assertEquals(listOf<HomeDestination>(HomeDestination.LiveSession(TERMINAL), HomeDestination.LiveSession(TERMINAL)), seen.toList())
+        assertEquals(listOf<HomeDestination>(HomeDestination.LiveSession(TERMINAL, "zsh"), HomeDestination.LiveSession(TERMINAL, "zsh")), seen.toList())
         assertEquals(listOf(TERMINAL), opened)
         assertEquals(0, closes)
     }
@@ -79,21 +85,32 @@ class SessionNavigatorTest {
 
     @Test
     fun screenKeptOnOnlyInSessionViews() {
-        assertTrue(keepsScreenOn(HomeDestination.LiveSession(TERMINAL)))
-        assertTrue(keepsScreenOn(HomeDestination.BrowserSession(BROWSER)))
+        assertTrue(keepsScreenOn(HomeDestination.LiveSession(TERMINAL, "zsh")))
+        assertTrue(keepsScreenOn(HomeDestination.BrowserSession(BROWSER, "Widget Docs")))
         assertFalse(keepsScreenOn(HomeDestination.SessionList))
         assertFalse(keepsScreenOn(HomeDestination.Settings))
     }
 
     @Test
+    fun peerRowTitleIsTheViewTitle() {
+        navigator.openSession(PLANNER, "Planner: claude")
+        assertEquals(HomeDestination.LiveSession(PLANNER, "Planner: claude"), navigator.destination.value)
+        assertEquals(listOf(PLANNER), opened)
+    }
+
+    @Test
     fun destinationToStringHidesNames() {
-        val text = HomeDestination.LiveSession(SessionSummary("ptys_1", SENTINEL, SENTINEL, false)).toString()
-        assertFalse(text, text.contains(SENTINEL))
+        val summary = SessionSummary("ptys_1", SENTINEL, SENTINEL, false)
+        for (destination in listOf(HomeDestination.LiveSession(summary, SENTINEL), HomeDestination.BrowserSession(summary, SENTINEL))) {
+            val text = destination.toString()
+            assertFalse(text, text.contains(SENTINEL))
+        }
     }
 
     private companion object {
         const val SENTINEL = "SENTINEL-secret-name"
         val TERMINAL = SessionSummary("ptys_7K2M9Q4R8T1VH", "zsh", "~/src/widget", false)
+        val PLANNER = SessionSummary("ptys_1F5Y7R3MQ9KD4", "claude", "planning", false)
         val BROWSER = SessionSummary("ptys_4Q8S1D6KZ3MAC", "Widget Docs", "", true)
     }
 }

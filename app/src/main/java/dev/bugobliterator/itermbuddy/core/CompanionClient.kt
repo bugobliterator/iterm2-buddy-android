@@ -241,6 +241,14 @@ class CompanionClient internal constructor(
      */
     val paired: StateFlow<Boolean?> = pairedFlow.asStateFlow()
 
+    private val relayOriginFlow = MutableStateFlow<String?>(null)
+
+    /**
+     * The stored pairing's relay origin (not secret), for Settings: null until the store has
+     * been read and when nothing is stored.
+     */
+    val relayOrigin: StateFlow<String?> = relayOriginFlow.asStateFlow()
+
     private val jobLock = Any()
     private var job: Job? = null
 
@@ -392,8 +400,9 @@ class CompanionClient internal constructor(
         }
     }
 
-    /** Records what the store now holds for [paired]. */
+    /** Records what the store now holds for [paired] and [relayOrigin]. */
     private fun notePaired(record: PairingRecord?) {
+        relayOriginFlow.value = record?.code?.relayOrigin
         pairedFlow.value = record != null && (record.stage == PairingStage.CONFIRMED || record.stage == PairingStage.REGISTERED)
     }
 
@@ -505,6 +514,10 @@ class CompanionClient internal constructor(
 
     private suspend fun runFresh(code: PairingCode) {
         freshCode = code
+        // The stored pairing is being replaced: stop counting it as paired before anything else,
+        // so the home (and its tree and stream) go at once, even while the new record cannot be
+        // written yet.
+        pairedFlow.value = false
         setState(ClientState.Connecting)
         val deadline = timeSource.markNow() + timeouts.freshMacWait
         var attempt = 0
@@ -961,12 +974,13 @@ class CompanionClient internal constructor(
             if (active?.session === live) active = null
             live.close()
             freshCode = null
+            // Failed first, then paired goes false: never Connected with paired false in between.
+            setState(ClientState.Failed(UNPAIRED_MESSAGE, rescanNeeded = true))
             try {
                 clearStoreWithRetry()
             } catch (e: IOException) {
                 log("could not clear the store after the Mac unpaired: ${e.message}")
             }
-            setState(ClientState.Failed(UNPAIRED_MESSAGE, rescanNeeded = true))
             return End.Stop
         }
 

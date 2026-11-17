@@ -49,7 +49,7 @@ class MainActivity : ComponentActivity() {
      * and closes the stream, so this activity being recreated changes nothing.
      */
     private val homeActions = object : HomeActions {
-        override fun openSession(session: SessionSummary) = app.sessions.navigator.openSession(session)
+        override fun openSession(session: SessionSummary, title: String) = app.sessions.navigator.openSession(session, title)
 
         override fun openSettings() = app.sessions.navigator.openSettings()
 
@@ -84,10 +84,11 @@ class MainActivity : ComponentActivity() {
             val destination by sessions.navigator.destination.collectAsStateWithLifecycle()
             val tree by sessions.repository.state.collectAsStateWithLifecycle()
             val live by sessions.controller.state.collectAsStateWithLifecycle()
+            val relayOrigin by app.client.relayOrigin.collectAsStateWithLifecycle()
             MaterialTheme {
                 AppRoot(
                     paired = paired,
-                    home = HomeModel(state, destination, tree, live, unpairing, unpairFailed, version),
+                    home = HomeModel(state, destination, tree, live, unpairing, unpairFailed, version, relayOrigin),
                     homeActions = homeActions,
                     pairingActions = actions,
                     scanNotice = notice,

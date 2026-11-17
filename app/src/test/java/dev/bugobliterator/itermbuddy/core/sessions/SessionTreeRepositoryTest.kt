@@ -96,6 +96,23 @@ class SessionTreeRepositoryTest {
     }
 
     @Test
+    fun reconnectRefetchIsSilent() = runTest {
+        val rig = SessionsRig(this)
+        rig.answerFetches()
+        rig.connect()
+        runCurrent()
+        val ids = Channel<Long>(Channel.UNLIMITED)
+        rig.mac.onRequest("fetchSessionTree") { ids.trySend(it.getValue("requestID").jsonPrimitive.long); null }
+        rig.mac.dropSocket()
+        rig.awaitConnected(2)
+        val id = ids.receive()
+        assertEquals("no spinner for a fetch the user did not ask for", TreeState.Loaded(replyTree, refreshing = false), rig.repository.state.value)
+        rig.mac.sendSample(PUSH.replace("push", "reply"), id)
+        runCurrent()
+        assertEquals(TreeState.Loaded(replyTree, refreshing = false), rig.repository.state.value)
+    }
+
+    @Test
     fun refreshThatTimesOutKeepsTheTree() = runTest {
         val rig = SessionsRig(this)
         rig.answerFetches()

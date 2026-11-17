@@ -32,12 +32,15 @@ enum class HomeTab { SESSIONS }
 fun showsBottomBar(): Boolean = HomeTab.entries.size > 1
 
 /**
- * [AppScreen.LOADING] while [paired] is unknown; [AppScreen.HOME] for a confirmed pairing that is
+ * [AppScreen.LOADING] only while [paired] is unknown and the client is [ClientState.Connecting]
+ * (the first store read); any other state with [paired] unknown (the store unavailable, a
+ * failure, a cancel) is the pairing screen, as before the home existed, so nothing is blank for
+ * long. [AppScreen.HOME] for a confirmed pairing that is
  * connected, connecting, waiting for the Mac or idle (with a banner, so the 30 s screen-timeout
  * drop does not bounce to the pairing screens); else [AppScreen.PAIRING].
  */
 fun appScreenFor(state: ClientState, paired: Boolean?): AppScreen = when {
-    paired == null -> AppScreen.LOADING
+    paired == null -> if (state == ClientState.Connecting) AppScreen.LOADING else AppScreen.PAIRING
     paired && (
         state is ClientState.Connected || state == ClientState.Connecting ||
             state is ClientState.WaitingForMac || state == ClientState.Idle

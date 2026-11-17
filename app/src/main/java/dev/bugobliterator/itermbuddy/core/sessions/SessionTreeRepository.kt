@@ -23,7 +23,7 @@ sealed interface TreeState {
     /** No tree yet (or it was dropped by [SessionTreeRepository.clear]). */
     data object Loading : TreeState
 
-    /** [tree] is the newest tree received; [refreshing] while a fetch for a newer one is out. */
+    /** [tree] is the newest tree received; [refreshing] while a [SessionTreeRepository.refresh] the user asked for is out. */
     data class Loaded(val tree: SessionTree, val refreshing: Boolean) : TreeState
 
     /**
@@ -41,7 +41,8 @@ sealed interface TreeState {
  * It fetches (`fetchSessionTree`, bounded by [fetchTimeout], 15 s as iOS `AM:1384`) on the first
  * [ClientState.Connected], again on each later one (a reconnect), and on [refresh]; and it
  * replaces the tree with every unsolicited `sessionTree` from [events], with no refetch. A fetch
- * supersedes one still out. A failed fetch keeps a tree already shown.
+ * supersedes one still out. A failed fetch keeps a tree already shown. Only [refresh] shows
+ * [TreeState.Loaded.refreshing]; the fetch on a reconnect is silent.
  *
  * **Order.** A push (through [events]) and a fetch reply (through the request) reach this class
  * on different coroutines and can be applied in either order, while the Mac drops repeats of the
@@ -49,8 +50,9 @@ sealed interface TreeState {
  * carries its [MacMessage.SessionTreeMessage.arrival], stamped in wire order by the session's
  * receive loop; a tree no newer than the newest one applied is ignored.
  *
- * **Clear.** [clear] (on unpair) drops the tree, discards a fetch still out, and ignores every
- * tree received before it, so nothing of the old pairing shows again.
+ * **Clear.** [clear] (on unpair) drops the tree, stops waiting for a fetch still out, and
+ * ignores every tree received before it; the client closes the old link before `paired` turns
+ * false, so nothing of the old pairing shows again (see [clear]).
  *
  * Thread-safe: every state change is made under one lock.
  *
@@ -79,6 +81,9 @@ class SessionTreeRepository(
     private var fetchCount = 0L
     private var currentFetch: Long? = null
 
+    /** Whether [currentFetch] is a [refresh] the user asked for, which shows the spinner. */
+    private var currentFetchShown = false
+
     /** Fetches numbered up to this were out when [clear] ran: their replies are discarded. */
     private var clearedFetches = 0L
 
@@ -87,14 +92,25 @@ class SessionTreeRepository(
             events.collect { message -> if (message is MacMessage.SessionTreeMessage) apply(message, fetch = null) }
         }
         scope.launch {
-            client.state.map { it is ClientState.Connected }.distinctUntilChanged().collect { connected -> if (connected) fetch() }
+            client.state.map { it is ClientState.Connected }.distinctUntilChanged().collect { connected ->
+                if (connected) fetch(userAsked = false)
+            }
         }
     }
 
     /** Fetches the tree again (pull to refresh, Try again), keeping a tree already shown. */
-    fun refresh() = fetch()
+    fun refresh() = fetch(userAsked = true)
 
-    /** Back to [TreeState.Loading]: drops the tree and a fetch still out, and ignores every tree received so far. */
+    /**
+     * Back to [TreeState.Loading]: drops the tree, stops waiting for a fetch still out (it reports
+     * no failure), and ignores every tree received so far ([CompanionClient.newestArrival]).
+     *
+     * On unpair this is enough to keep the old pairing's trees out because of the order the client
+     * keeps: the old session is closed and its receive loop has stopped before `paired` turns false
+     * and this runs, so every tree it will ever deliver is already numbered at or below the floor.
+     * A tree that arrives later on a link still up (when this is called without an unpair) is the
+     * Mac's current tree and is applied as usual, even if it answers the abandoned fetch.
+     */
     fun clear() {
         synchronized(lock) {
             fetchJob?.cancel()
@@ -106,13 +122,14 @@ class SessionTreeRepository(
         }
     }
 
-    private fun fetch() {
+    private fun fetch(userAsked: Boolean) {
         synchronized(lock) {
             fetchJob?.cancel()
             val id = ++fetchCount
             currentFetch = id
+            currentFetchShown = userAsked
             stateFlow.value = when (val now = stateFlow.value) {
-                is TreeState.Loaded -> now.copy(refreshing = true)
+                is TreeState.Loaded -> now.copy(refreshing = userAsked)
                 else -> TreeState.Loading
             }
             fetchJob = scope.launch { runFetch(id) }
@@ -150,7 +167,7 @@ class SessionTreeRepository(
                 return
             }
             newestArrival = message.arrival
-            stateFlow.value = TreeState.Loaded(message.tree, refreshing = currentFetch != null)
+            stateFlow.value = TreeState.Loaded(message.tree, refreshing = currentFetch != null && currentFetchShown)
         }
     }
 
