@@ -343,8 +343,10 @@ class CompanionClient internal constructor(
 
     /**
      * Sends [message] to the Mac and returns its reply, bounded by [timeout] or else
-     * [ClientTimeouts.rpc]. Time the receive loop spends waiting on the stream sink does not
-     * count against the bound. [onSent] gets the request ID before the envelope is written.
+     * [ClientTimeouts.rpc], counted from when the envelope is handed to the socket. If the bound
+     * passes while the reply may be queued behind frames the stream sink is still taking, the
+     * request waits on for at most one more bound ([CompanionSession.request]); never more than
+     * twice the bound in all. [onSent] gets the request ID before the envelope is written.
      *
      * @throws CompanionRequestException when not connected, when [onLink] is not the current
      *   link id, on a timeout, or if the connection drops.
@@ -387,18 +389,21 @@ class CompanionClient internal constructor(
 
     /**
      * Sinks a link marker, waiting at most [ClientTimeouts.sinkStall]: a sink that takes longer
-     * misses it (logged), so the control chain never hangs on the sink. A failing sink is logged
-     * and never ends the flow.
+     * misses it (logged), so the control chain never hangs on the sink. Returns false for a miss;
+     * the caller ends the link on a missed LinkUp. A sink that throws is logged and counts as
+     * having taken the marker, as a throwing accept of a Media does.
      */
-    private suspend fun sinkLink(input: StreamInput) {
-        val target = streamSink ?: return
-        try {
-            withTimeoutOrNull(timeouts.sinkStall) { target.accept(input) }
-                ?: log("the stream sink missed $input: it did not take it within ${timeouts.sinkStall}")
+    private suspend fun sinkLink(input: StreamInput): Boolean {
+        val target = streamSink ?: return true
+        return try {
+            val taken = withTimeoutOrNull(timeouts.sinkStall) { target.accept(input) } != null
+            if (!taken) log("the stream sink missed $input: it did not take it within ${timeouts.sinkStall}")
+            taken
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             log("the stream sink failed on ${input.javaClass.simpleName}: ${e.javaClass.simpleName}")
+            true
         }
     }
 
@@ -924,10 +929,12 @@ class CompanionClient internal constructor(
             val revision = helloReply.revision.coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
             val id = nextLinkId.getAndIncrement()
             linkId = id
-            live.linkUp(id) {
+            val linkUpTaken = live.linkUp(id) {
                 active = ActiveLink(id, live)
                 sinkLink(StreamInput.LinkUp(id, revision))
             }
+            // A missed LinkUp has closed the session: nothing flows on a link the sink never saw.
+            if (!linkUpTaken) return End.Lost(null)
             setState(ClientState.Connected(revision))
             return select {
                 live.unpaired.onAwait { macUnpaired(live) }

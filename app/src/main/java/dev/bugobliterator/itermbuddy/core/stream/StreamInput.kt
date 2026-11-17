@@ -14,13 +14,14 @@ const val MEDIA_CHANNEL: Byte = 0x01
  * connection that reaches the connected step. No [Media] or [Control] reaches the sink before its
  * link's [LinkUp] or after its [LinkDown], so a controller can scope its state by link id.
  *
- * The markers are best effort, and a controller must tolerate a missed or late one:
- * - each marker waits at most `ClientTimeouts.sinkStall` for the sink; a sink that takes longer
- *   misses it (the client logs the miss and carries on), so cancel, unpair and reconnect never
- *   hang on the sink;
- * - a link cancelled while its [LinkUp] is being accepted still gets a [LinkDown], so a
- *   [LinkDown] can come for a link the controller never saw come up: ignore it.
- * A newer link id supersedes everything on older ones, whatever markers were missed.
+ * Guarantees and their limits:
+ * - [LinkUp] always precedes any [Media] or [Control] on its link. Each marker waits at most
+ *   `ClientTimeouts.sinkStall` for the sink; a [LinkUp] the sink misses ends that link as lost
+ *   (the client reconnects with a new id) before anything else is delivered on it.
+ * - A [LinkDown] can arrive for a link the controller never saw come up (its [LinkUp] was
+ *   missed or cancelled part way): ignore it. A [LinkDown] the sink misses is logged and
+ *   dropped, so cancel, unpair and reconnect never hang on the sink.
+ * - A newer link id supersedes everything on older ones, whatever markers were missed.
  */
 sealed interface StreamInput {
     /** The link is connected; [macRevision] is the Mac's revision from its `hello` reply. */
@@ -69,10 +70,12 @@ sealed interface StreamInput {
  * dropped while the link stays up.
  *
  * Bounds: one [accept] of a [StreamInput.Media] or [StreamInput.Control] that takes longer than
- * `ClientTimeouts.sinkStall` ends the link (it is cancelled, the frames already queued are read
- * for replies and `unpaired` with stream inputs dropped, and the client reconnects); a marker
- * that takes longer is missed. A request whose reply is queued behind frames the sink is still
- * taking gets up to one more of its own bound, never more.
+ * `ClientTimeouts.sinkStall`, or that throws a `CancellationException` of its own, ends the link:
+ * the frames already queued are read for replies and `unpaired`, stream inputs are dropped, a
+ * request waiting for a stream-scoped reply fails rather than report what the sink never saw,
+ * and the client reconnects. A missed [StreamInput.LinkUp] ends the link too; a missed
+ * [StreamInput.LinkDown] is dropped. A request whose reply is queued behind frames the sink is
+ * still taking gets up to one more of its own bound, never more.
  *
  * [accept] must be cancellable, and must never wait for a reply from the Mac, directly or through
  * a lock a requester holds: the receive loop that would deliver the reply is the one waiting on

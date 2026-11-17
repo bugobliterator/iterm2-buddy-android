@@ -25,6 +25,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.launch
@@ -138,10 +140,12 @@ internal enum class ConfirmationMode {
  * Stream inputs are dropped (logged by kind only) when there is no [sink] or before [linkUp].
  *
  * Sink bounds:
- * - One accept longer than [sinkStall] ends the session: the accept is cancelled, the frames
- *   already queued are read without waiting (replies and `unpaired` are honoured, stream inputs
- *   dropped), then the session ends with no relay close frame, so the client treats it as a
- *   lost link and reconnects.
+ * - One accept longer than [sinkStall], or one that throws a cancellation of its own while the
+ *   loop is active, ends the session: the frames already queued are read without waiting
+ *   (replies and `unpaired` are honoured; stream inputs are dropped and their waiters left to
+ *   fail), then the session ends as a lost link and the client reconnects. A relay close frame
+ *   queued behind is still reported in [ended].
+ * - A missed LinkUp ([linkUp]) ends the session the same way, before any input reaches the sink.
  * - A request with a bound that passes while frames are queued behind an accept the sink has not
  *   finished (the reply may be among them) keeps waiting, in slices of a tenth of its bound, for
  *   at most one more bound: never more than twice its bound in all. Waiting for the stream lock
@@ -206,9 +210,12 @@ internal class CompanionSession(
     /** Accepts begun so far, so a request can tell the loop worked through a slice. */
     private val acceptsBegun = AtomicLong()
 
-    /** Set when an accept outlasted [sinkStall]: the loop drains what is queued and ends. */
+    /**
+     * Set when the sink failed the link: an accept outlasted [sinkStall], the sink threw its own
+     * cancellation, or it missed the LinkUp. The loop drains what is queued and the session ends.
+     */
     @Volatile
-    private var sinkStalled = false
+    private var endingForSink = false
 
     /** Whether the session ended because the Mac sent a message over the Noise reassembly cap. */
     val messageTooLarge: Boolean get() = channel.messageTooLarge
@@ -283,11 +290,17 @@ internal class CompanionSession(
     /**
      * Makes this session link [id]: stream inputs from here on carry it. [announce] runs first,
      * before any stream input on the link reaches the sink, so it can deliver [StreamInput.LinkUp].
+     * When [announce] returns false (the sink missed the LinkUp) the session is closed before the
+     * stream lock is released, so nothing reaches the sink on a link it never saw come up; this
+     * then returns false.
      */
-    suspend fun linkUp(id: Long, announce: suspend () -> Unit) {
-        streamLock.withLock {
-            linkId = id
-            announce()
+    suspend fun linkUp(id: Long, announce: suspend () -> Boolean): Boolean = streamLock.withLock {
+        linkId = id
+        announce().also { taken ->
+            if (!taken) {
+                endingForSink = true
+                close()
+            }
         }
     }
 
@@ -338,9 +351,12 @@ internal class CompanionSession(
         var relayClose: RelayClose? = null
         try {
             while (true) {
-                val frame = if (sinkStalled) {
-                    // Draining after a stalled sink: only what is already queued.
-                    socket.incoming.tryReceive().getOrNull() ?: break
+                val frame = if (endingForSink) {
+                    // Draining after a sink failure: only what is already queued. A close the
+                    // relay sent behind it (say "displaced") is still attributed below.
+                    val queued = socket.incoming.tryReceive()
+                    queued.exceptionOrNull()?.let { throw it }
+                    queued.getOrNull() ?: break
                 } else {
                     val next = socket.incoming.receiveCatching()
                     next.exceptionOrNull()?.let { throw it }
@@ -350,7 +366,7 @@ internal class CompanionSession(
                 heardFromMac = true
                 handle(plaintext)
             }
-            if (sinkStalled) log("ending the link: the stream sink stalled")
+            if (endingForSink) log("ending the link: the stream sink failed or stalled")
         } catch (e: CancellationException) {
             throw e
         } catch (e: RelayClosedException) {
@@ -401,9 +417,11 @@ internal class CompanionSession(
             return
         }
         if (isStreamScoped(message)) {
-            // The sink first, so the controller has the stream before the request returns.
+            // The sink first, so the controller has the stream before the request returns. If the
+            // sink has failed or stalled it never saw this, so the waiter is left to fail when
+            // the session ends: a request never reports a stream the sink does not know.
             deliver(message.javaClass.simpleName) { StreamInput.Control(it, requestID, message) }
-            requestID?.let { pending.remove(it) }?.complete(message)
+            if (!endingForSink) requestID?.let { pending.remove(it) }?.complete(message)
             return
         }
         val waiter = requestID?.let { pending.remove(it) }
@@ -421,8 +439,8 @@ internal class CompanionSession(
      */
     private suspend fun deliver(kind: String, input: (linkId: Long) -> StreamInput) {
         val target = sink
-        if (target == null || sinkStalled) {
-            log("dropped a stream input ($kind): ${if (target == null) "no stream sink" else "the stream sink stalled"}")
+        if (target == null || endingForSink) {
+            log("dropped a stream input ($kind): ${if (target == null) "no stream sink" else "the stream sink failed or stalled"}")
             return
         }
         streamLock.withLock {
@@ -437,10 +455,14 @@ internal class CompanionSession(
                 val taken = withTimeoutOrNull(sinkStall) { target.accept(input(id)) }
                 if (taken == null) {
                     log("the stream sink did not take $kind within $sinkStall; ending the link")
-                    sinkStalled = true
+                    endingForSink = true
                 }
             } catch (e: CancellationException) {
-                throw e
+                // The receive loop itself is being cancelled: pass it on. Otherwise the sink threw
+                // a cancellation of its own (its scope died): a sink failure that ends the link.
+                if (!currentCoroutineContext().isActive) throw e
+                log("the stream sink failed on $kind: ${e.javaClass.simpleName}; ending the link")
+                endingForSink = true
             } catch (e: Exception) {
                 log("the stream sink failed on $kind: ${e.javaClass.simpleName}")
             } finally {
