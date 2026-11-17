@@ -68,6 +68,7 @@ import dev.bugobliterator.itermbuddy.core.stream.ActiveStream
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
 import dev.bugobliterator.itermbuddy.core.stream.fitGrid
+import dev.bugobliterator.itermbuddy.ui.LiveSessionTheme
 import dev.bugobliterator.itermbuddy.video.VideoStats
 
 /** What the live view can ask for; the navigator, the controller and the input sender do the work. */
@@ -107,11 +108,12 @@ interface LiveSessionActions {
 }
 
 /**
- * The live session view: the session's video ([VideoCanvas]) with zoom and pan, the state's
- * [liveOverlay] over it, ⌨ (show or hide the keyboard) while input is offered, and a ⋮ menu
- * with **Fit to phone** (only when [fitGrid] gives a grid: `canResize == true`, never for a
- * browser) and, in debug builds, Video stats. The screen never opens or closes a stream itself,
- * and Fit is sent only from a tap and never undone.
+ * The live session view, always dark ([LiveSessionTheme], with light system bar icons while it
+ * shows): the session's video ([VideoCanvas]) with zoom and pan, the state's [liveOverlay] over
+ * it, ⌨ (show or hide the keyboard) while input is offered, and a ⋮ menu with **Fit to phone**
+ * (only when [fitGrid] gives a grid: `canResize == true`, never for a browser) and, in debug
+ * builds, Video stats. The screen never opens or closes a stream itself, and Fit is sent only
+ * from a tap and never undone.
  *
  * **Typing.** Input is offered only while [inputTarget] gives a target: the state is `Live` for
  * this session, the session is a terminal, and the active stream is this session's (browser
@@ -157,6 +159,25 @@ fun LiveSessionScreen(
     videoStatsShown: Boolean,
     actions: LiveSessionActions,
     modifier: Modifier = Modifier,
+) {
+    LiveSessionTheme {
+        LiveSessionContent(title, session, live, activeStream, macRevision, source, debugBuild, videoStatsShown, actions, modifier)
+    }
+}
+
+/** [LiveSessionScreen] inside its dark theme. */
+@Composable
+private fun LiveSessionContent(
+    title: String,
+    session: SessionSummary,
+    live: LiveViewState,
+    activeStream: ActiveStream?,
+    macRevision: Int?,
+    source: LiveVideoSource,
+    debugBuild: Boolean,
+    videoStatsShown: Boolean,
+    actions: LiveSessionActions,
+    modifier: Modifier,
 ) {
     val config = shownConfig(session, live, activeStream)
     val target = inputTarget(session, live, activeStream)
@@ -290,7 +311,7 @@ fun LiveSessionScreen(
             browserNote(session, macRevision)?.let { note ->
                 Text(
                     text = note,
-                    color = Color.White,
+                    color = MaterialTheme.colorScheme.onSurface,
                     style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
                 )
@@ -533,10 +554,10 @@ internal fun actionLabel(action: OverlayAction): String = when (action) {
 @Composable
 private fun VideoStatsOverlay(source: LiveVideoSource, modifier: Modifier) {
     val stats by source.output.stats.collectAsStateWithLifecycle()
-    Surface(modifier = modifier, color = Color.Black.copy(alpha = 0.6f), shape = MaterialTheme.shapes.small) {
+    Surface(modifier = modifier, color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), shape = MaterialTheme.shapes.small) {
         Text(
             text = videoStatsText(stats),
-            color = Color.White,
+            color = MaterialTheme.colorScheme.onSurface,
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.padding(8.dp),
         )

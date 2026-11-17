@@ -7,7 +7,6 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.mlkit.common.MlKitException
@@ -18,6 +17,7 @@ import dev.bugobliterator.itermbuddy.core.input.InputTarget
 import dev.bugobliterator.itermbuddy.core.input.KeyEvent
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.ui.AppRoot
+import dev.bugobliterator.itermbuddy.ui.AppTheme
 import dev.bugobliterator.itermbuddy.ui.PairingActions
 import dev.bugobliterator.itermbuddy.ui.ScanOutcome
 import dev.bugobliterator.itermbuddy.ui.home.HomeActions
@@ -120,7 +120,7 @@ class MainActivity : ComponentActivity() {
             val relayOrigin by app.client.relayOrigin.collectAsStateWithLifecycle()
             val activeStream by activeForView.collectAsStateWithLifecycle(initialValue = activeNow)
             val videoStatsShown by app.videoStatsShown.collectAsStateWithLifecycle()
-            MaterialTheme {
+            AppTheme {
                 AppRoot(
                     paired = paired,
                     home = HomeModel(
