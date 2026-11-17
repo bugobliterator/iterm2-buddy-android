@@ -2,17 +2,20 @@ package dev.bugobliterator.itermbuddy.ui.home
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -23,19 +26,23 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.bugobliterator.itermbuddy.core.ClientState
-import dev.bugobliterator.itermbuddy.core.sessions.TreeState
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
+import dev.bugobliterator.itermbuddy.core.sessions.TreeState
 import dev.bugobliterator.itermbuddy.core.stream.ActiveStream
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.ui.HomeDestination
@@ -43,10 +50,10 @@ import dev.bugobliterator.itermbuddy.ui.bannerOffersReconnect
 import dev.bugobliterator.itermbuddy.ui.connectionBanner
 import dev.bugobliterator.itermbuddy.ui.connectionLabel
 import dev.bugobliterator.itermbuddy.ui.keepsScreenOn
-import dev.bugobliterator.itermbuddy.ui.sessions.SessionListScreen
 import dev.bugobliterator.itermbuddy.ui.live.LiveSessionActions
 import dev.bugobliterator.itermbuddy.ui.live.LiveSessionScreen
 import dev.bugobliterator.itermbuddy.ui.live.LiveVideoSource
+import dev.bugobliterator.itermbuddy.ui.sessions.SessionListScreen
 import dev.bugobliterator.itermbuddy.ui.settings.SettingsScreen
 import dev.bugobliterator.itermbuddy.ui.settings.decoderRowText
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -153,6 +160,15 @@ private fun LiveSession(session: SessionSummary, title: String, model: HomeModel
 @Composable
 private fun SessionsHome(model: HomeModel, actions: HomeActions, modifier: Modifier) {
     var menuOpen by remember { mutableStateOf(false) }
+    // The search: short, so saved across rotation; gone with this screen (unpair leaves it).
+    var query by rememberSaveable { mutableStateOf("") }
+    var searchFocused by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    // Back while searching clears the search first; the next Back does what it always did.
+    BackHandler(enabled = query.isNotEmpty() || searchFocused) {
+        query = ""
+        focusManager.clearFocus()
+    }
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
@@ -187,11 +203,18 @@ private fun SessionsHome(model: HomeModel, actions: HomeActions, modifier: Modif
             connectionBanner(model.state)?.let { text ->
                 ConnectionBannerRow(text, bannerOffersReconnect(model.state), actions::reconnect)
             }
+            SessionSearchField(
+                query = query,
+                onQueryChange = { query = it },
+                onFocusChange = { searchFocused = it },
+                onDone = { focusManager.clearFocus() },
+            )
             SessionListScreen(
                 state = model.tree,
                 onOpen = actions::openSession,
                 onRefresh = actions::refresh,
                 modifier = Modifier.fillMaxSize(),
+                query = query,
             )
         }
     }
@@ -214,3 +237,30 @@ private fun ConnectionBannerRow(text: String, reconnect: Boolean, onReconnect: (
         }
     }
 }
+
+/** The search field at the top of the session list, with ✕ to clear it. */
+@Composable
+private fun SessionSearchField(query: String, onQueryChange: (String) -> Unit, onFocusChange: (Boolean) -> Unit, onDone: () -> Unit) {
+    OutlinedTextField(
+        value = query,
+        onValueChange = onQueryChange,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .onFocusChanged { onFocusChange(it.isFocused) },
+        placeholder = { Text("Search sessions") },
+        singleLine = true,
+        trailingIcon = if (query.isEmpty()) {
+            null
+        } else {
+            {
+                IconButton(onClick = { onQueryChange("") }, modifier = Modifier.semantics { contentDescription = "Clear search" }) {
+                    Text("✕")
+                }
+            }
+        },
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = { onDone() }),
+    )
+}
+

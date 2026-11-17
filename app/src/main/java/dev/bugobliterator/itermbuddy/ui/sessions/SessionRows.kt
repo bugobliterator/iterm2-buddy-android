@@ -3,6 +3,7 @@ package dev.bugobliterator.itermbuddy.ui.sessions
 import dev.bugobliterator.itermbuddy.core.sessions.PeerEntry
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTree
+import java.util.Locale
 
 /**
  * One row of the home list. Titles are terminal content: every [toString] shows lengths only.
@@ -59,3 +60,56 @@ fun peerTitle(peer: PeerEntry): String {
 
 /** The second line of a session row: its subtitle, or null when it has none. */
 fun rowSubtitle(summary: SessionSummary): String? = summary.subtitle.ifEmpty { null }
+
+/**
+ * The rows of [tree] that match the search [query], keeping the tree's structure: each matching
+ * session under its window and tab headers, windows and tabs with no match left out, and a
+ * [SessionRow.SplitPane] only when one of its peers matches (nesting as in the full list).
+ *
+ * The query is split on whitespace and every term must appear (case-insensitive, `Locale.ROOT`)
+ * somewhere among the texts shown for the session: its window title, tab title, name, subtitle,
+ * peer role name and row title (`"Planner: claude"`). So a window or tab title that matches
+ * shows all of its sessions. A blank query gives [sessionRows]. Nothing here is logged.
+ */
+fun filterSessionRows(tree: SessionTree, query: String): List<SessionRow> {
+    val terms = query.lowercase(Locale.ROOT).split(WHITESPACE).filter { it.isNotEmpty() }
+    if (terms.isEmpty()) return sessionRows(tree)
+    fun matches(fields: List<String>): Boolean {
+        val folded = fields.map { it.lowercase(Locale.ROOT) }
+        return terms.all { term -> folded.any { term in it } }
+    }
+    return buildList {
+        for (window in tree.windows) {
+            val windowRows = mutableListOf<SessionRow>()
+            for (tab in window.tabs) {
+                val context = listOf(window.title, tab.title)
+                val tabRows = mutableListOf<SessionRow>()
+                for (pane in tab.panes) {
+                    if (pane.peers.isEmpty()) {
+                        if (matches(context + listOf(pane.session.name, pane.session.subtitle))) {
+                            tabRows += SessionRow.Session(pane.session, pane.session.name, nested = false)
+                        }
+                        continue
+                    }
+                    val nested = tab.panes.size > 1
+                    val peers = pane.peers.filter { peer ->
+                        matches(context + listOf(peer.roleName, peer.session.name, peer.session.subtitle, peerTitle(peer)))
+                    }
+                    if (peers.isEmpty()) continue
+                    if (nested) tabRows += SessionRow.SplitPane
+                    for (peer in peers) tabRows += SessionRow.Session(peer.session, peerTitle(peer), nested)
+                }
+                if (tabRows.isNotEmpty()) {
+                    windowRows += SessionRow.Tab(tab.title)
+                    windowRows += tabRows
+                }
+            }
+            if (windowRows.isNotEmpty()) {
+                add(SessionRow.Window(window.title))
+                addAll(windowRows)
+            }
+        }
+    }
+}
+
+private val WHITESPACE = Regex("\\s+")
