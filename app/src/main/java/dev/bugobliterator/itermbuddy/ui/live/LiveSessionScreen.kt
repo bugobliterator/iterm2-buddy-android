@@ -3,10 +3,15 @@ package dev.bugobliterator.itermbuddy.ui.live
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -23,13 +28,16 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
@@ -37,7 +45,13 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.bugobliterator.itermbuddy.core.input.ImeTranslator
+import dev.bugobliterator.itermbuddy.core.input.InputTarget
+import dev.bugobliterator.itermbuddy.core.input.KeyEvent
+import dev.bugobliterator.itermbuddy.core.input.ModifierKey
+import dev.bugobliterator.itermbuddy.core.input.StickyModifiers
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.core.stream.ActiveStream
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
@@ -45,7 +59,7 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
 import dev.bugobliterator.itermbuddy.core.stream.fitGrid
 import dev.bugobliterator.itermbuddy.video.VideoStats
 
-/** What the live view can ask for; the navigator and the controller do the work. */
+/** What the live view can ask for; the navigator, the controller and the input sender do the work. */
 interface LiveSessionActions {
     /** The navigator's Back: closes the stream. */
     fun back()
@@ -58,25 +72,42 @@ interface LiveSessionActions {
 
     /** The debug video stats overlay on or off (debug builds only). */
     fun setVideoStatsShown(shown: Boolean)
+
+    /** A key for [target], through the app's one ordered input sender. */
+    fun key(target: InputTarget, event: KeyEvent)
+
+    /** The composer's Paste for [target]. */
+    fun paste(target: InputTarget, text: String)
+
+    /** The composer's Paste ⏎ for [target]: the Return follows only a paste that was sent. */
+    fun pasteThenReturn(target: InputTarget, text: String)
 }
 
 /**
  * The live session view: the session's video ([VideoCanvas]) with zoom and pan, the state's
- * [liveOverlay] over it, and a ⋮ menu with **Fit to phone** (only when [fitGrid] gives a grid:
- * `canResize == true`, never for a browser) and, in debug builds, Video stats. The screen never
- * opens or closes a stream itself, and Fit is sent only from a tap and never undone.
+ * [liveOverlay] over it, ⌨ (show or hide the keyboard) while input is offered, and a ⋮ menu
+ * with **Fit to phone** (only when [fitGrid] gives a grid: `canResize == true`, never for a
+ * browser) and, in debug builds, Video stats. The screen never opens or closes a stream itself,
+ * and Fit is sent only from a tap and never undone.
+ *
+ * **Typing.** Input is offered only while [inputTarget] gives a target: the state is `Live` for
+ * this session, the session is a terminal, and the active stream is this session's (browser
+ * sessions get no keyboard yet). Then a tap on the picture or ⌨ raises the keyboard into a
+ * [TerminalInputView], with the [KeyBar] above it; the key bar's compose key opens the
+ * [Composer]. Leaving that state lowers the keyboard. Every key and paste carries the target it
+ * was made for, and the input sender discards it if the stream has moved on by the time it is
+ * sent. Sticky modifiers, the tray and the draft are per session.
+ *
+ * **Fit viewport.** The size Fit computes the grid for is the content area under the top bar,
+ * measured outside the IME padding: while the keyboard is hidden the canvas fills exactly that
+ * area (the key bar shows only with the keyboard), and the area does not change when the
+ * keyboard rises, so the viewport is always the keyboard-hidden canvas, follows rotation, split
+ * screen and window resizes at once, and the IME inset is never read in composition (only by
+ * `imePadding` in layout, and its visibility by the key bar slot alone).
  *
  * @param config the image geometry: the shown state's config, else the active stream's when it
  *   is this session's (a too-large window keeps its config for Fit).
  * @param macRevision the Mac's hello revision, for the browser note; null when not connected.
- *
- * TODO(Typing task): two known gaps in the keyboard-hidden measurement, left until the keyboard
- * exists here. (1) The Fit viewport is the canvas size last seen with the IME inset at 0; a canvas
- * change while the keyboard is up (rotation inside one activity, split screen, a resized window)
- * leaves it stale until the keyboard hides again. Derive it instead from the current canvas plus
- * the IME inset the layout consumed. (2) `WindowInsets.ime` is read in this composable, so every
- * frame of the IME animation recomposes the whole screen; read it in a narrower scope (a
- * `derivedStateOf` of "hidden" or a layout-phase read) once the key bar and composer arrive.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -93,19 +124,53 @@ fun LiveSessionScreen(
     modifier: Modifier = Modifier,
 ) {
     val config = shownConfig(session, live, activeStream)
-    val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
-    // The canvas measured with the keyboard hidden: the last size seen while it was down.
-    var canvas by remember { mutableStateOf(IntSize.Zero) }
-    var fitViewport by remember { mutableStateOf(IntSize.Zero) }
-    val keyboardHidden = imeBottom == 0
-    LaunchedEffect(keyboardHidden, canvas) {
-        if (keyboardHidden && canvas != IntSize.Zero) fitViewport = canvas
-    }
-    val viewport = if (fitViewport != IntSize.Zero) fitViewport else canvas
+    val target = inputTarget(session, live, activeStream)
+    // The keyboard-hidden canvas: the content area outside the IME padding (see the KDoc).
+    var viewport by remember { mutableStateOf(IntSize.Zero) }
     val canFit = !session.isBrowser && config != null &&
         fitGrid(viewport.width, viewport.height, config, source.output.maxSize(), source.output::sizeSupported) != null
     val fit = { actions.fitToPhone(session.guid, viewport.width, viewport.height) }
     var menuOpen by remember { mutableStateOf(false) }
+
+    val keyboard = remember { TerminalKeyboard() }
+    val currentTarget by rememberUpdatedState(target)
+    val currentActions by rememberUpdatedState(actions)
+    var modifierVersion by remember { mutableIntStateOf(0) }
+    val modifiers = remember(session.guid) { StickyModifiers(onChange = { modifierVersion++ }) }
+    val translator = remember(session.guid) {
+        ImeTranslator(
+            modifiers,
+            emit = { event -> currentTarget?.let { currentActions.key(it, event) } },
+            onComposingFlushed = keyboard::restartInput,
+        )
+    }
+    var expanded by remember(session.guid) { mutableStateOf(false) }
+    var composerOpen by rememberSaveable(session.guid) { mutableStateOf(false) }
+    var draft by rememberSaveable(session.guid) { mutableStateOf("") }
+    val offersInput = target != null
+    LaunchedEffect(offersInput) {
+        if (!offersInput) keyboard.hide()
+    }
+    val keyBarActions = remember(translator) {
+        object : KeyBarActions {
+            override fun key(event: KeyEvent) = translator.keyBar(event)
+
+            override fun modifier(key: ModifierKey) = modifiers.tapNow(key)
+
+            override fun compose() {
+                translator.flushComposing()
+                keyboard.hide()
+                composerOpen = true
+            }
+
+            override fun toggleExpanded() {
+                expanded = !expanded
+            }
+
+            override fun hideKeyboard() = keyboard.hide()
+        }
+    }
+
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
@@ -117,6 +182,12 @@ fun LiveSessionScreen(
                     }
                 },
                 actions = {
+                    if (offersInput) {
+                        IconButton(
+                            onClick = keyboard::toggle,
+                            modifier = Modifier.semantics { contentDescription = "Show or hide keyboard" },
+                        ) { Text("⌨", style = MaterialTheme.typography.titleLarge) }
+                    }
                     if (canFit || debugBuild) {
                         Box {
                             IconButton(
@@ -150,41 +221,148 @@ fun LiveSessionScreen(
             )
         },
     ) { padding ->
-        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-            VideoCanvas(
-                source = source,
-                imageWidth = config?.pixelWidth ?: 0,
-                imageHeight = config?.pixelHeight ?: 0,
-                sessionGuid = session.guid,
-                onCanvasSize = { canvas = it },
-            )
-            liveOverlay(live, canFit, session.guid)?.let { overlay ->
-                OverlayCard(
-                    overlay = overlay,
-                    busy = live is LiveViewState.Starting || live is LiveViewState.Reconnecting,
-                    onAction = { action ->
-                        when (action) {
-                            OverlayAction.BACK -> actions.back()
-                            OverlayAction.RETRY, OverlayAction.RESTART -> actions.retry()
-                            OverlayAction.FIT -> fit()
-                        }
-                    },
-                    modifier = Modifier.align(Alignment.Center),
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .consumeWindowInsets(padding)
+                .onSizeChanged { viewport = it },
+        ) {
+            Column(modifier = Modifier.fillMaxSize().imePadding()) {
+                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    TerminalInput(keyboard, translator.takeIf { offersInput }, Modifier.align(Alignment.TopStart))
+                    VideoCanvas(
+                        source = source,
+                        imageWidth = config?.pixelWidth ?: 0,
+                        imageHeight = config?.pixelHeight ?: 0,
+                        sessionGuid = session.guid,
+                        onCanvasSize = {},
+                        onTap = { if (currentTarget != null) keyboard.show() },
+                    )
+                    liveOverlay(live, canFit, session.guid)?.let { overlay ->
+                        OverlayCard(
+                            overlay = overlay,
+                            busy = live is LiveViewState.Starting || live is LiveViewState.Reconnecting,
+                            onAction = { action ->
+                                when (action) {
+                                    OverlayAction.BACK -> actions.back()
+                                    OverlayAction.RETRY, OverlayAction.RESTART -> actions.retry()
+                                    OverlayAction.FIT -> fit()
+                                }
+                            },
+                            modifier = Modifier.align(Alignment.Center),
+                        )
+                    }
+                    browserNote(session, macRevision)?.let { note ->
+                        Text(
+                            text = note,
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+                        )
+                    }
+                    if (debugBuild && videoStatsShown) {
+                        VideoStatsOverlay(source, Modifier.align(Alignment.TopStart).padding(8.dp))
+                    }
+                }
+                KeyBarSlot(
+                    shown = offersInput && !composerOpen,
+                    modifiers = modifiers,
+                    modifierVersion = modifierVersion,
+                    expanded = expanded,
+                    actions = keyBarActions,
                 )
-            }
-            browserNote(session, macRevision)?.let { note ->
-                Text(
-                    text = note,
-                    color = Color.White,
-                    style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
-                )
-            }
-            if (debugBuild && videoStatsShown) {
-                VideoStatsOverlay(source, Modifier.align(Alignment.TopStart).padding(8.dp))
             }
         }
     }
+    if (composerOpen) {
+        Composer(
+            title = title,
+            draft = draft,
+            onDraftChange = { draft = it },
+            canSend = offersInput,
+            onPaste = {
+                currentTarget?.let { actions.paste(it, draft) }
+                draft = ""
+                composerOpen = false
+            },
+            onPasteThenReturn = {
+                currentTarget?.let { actions.pasteThenReturn(it, draft) }
+                draft = ""
+                composerOpen = false
+            },
+            onDismiss = { composerOpen = false },
+        )
+    }
+}
+
+/**
+ * Where the live view's input goes: the active stream's link and watch for [session], only while
+ * [live] is `Live` for it and it is a terminal (neither the session nor its config a browser).
+ * Null means no keyboard is offered.
+ */
+internal fun inputTarget(session: SessionSummary, live: LiveViewState, activeStream: ActiveStream?): InputTarget? {
+    if (live !is LiveViewState.Live || live.session.guid != session.guid) return null
+    if (session.isBrowser || live.config.isBrowser) return null
+    val stream = activeStream?.takeIf { it.sessionGuid == session.guid } ?: return null
+    return InputTarget(stream.linkId, stream.watchEpoch, session.guid)
+}
+
+/** The [TerminalInputView] the live view types through, while it is composed. */
+internal class TerminalKeyboard {
+    var view: TerminalInputView? = null
+
+    fun show() {
+        view?.showKeyboard()
+    }
+
+    fun hide() {
+        view?.hideKeyboard()
+    }
+
+    fun toggle() {
+        val input = view ?: return
+        if (input.hasFocus() && input.keyboardVisible()) input.hideKeyboard() else input.showKeyboard()
+    }
+
+    fun restartInput() {
+        view?.restartInput()
+    }
+}
+
+/**
+ * The [TerminalInputView], 1 px (a view with no size cannot take focus), behind the picture.
+ * [translator] null drops IME calls (no input offered).
+ */
+@Composable
+private fun TerminalInput(keyboard: TerminalKeyboard, translator: ImeTranslator?, modifier: Modifier) {
+    AndroidView(
+        factory = { context -> TerminalInputView(context).also { keyboard.view = it } },
+        modifier = modifier.size(1.dp),
+        update = { view -> view.translator = translator },
+        onRelease = { view ->
+            view.translator = null
+            if (keyboard.view === view) keyboard.view = null
+        },
+    )
+}
+
+/**
+ * The key bar, while input is offered and the keyboard is up. The only reader of the IME's
+ * visibility (which changes at the start and end of its animation, not per frame), so nothing
+ * else recomposes with the keyboard.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun KeyBarSlot(
+    shown: Boolean,
+    modifiers: StickyModifiers,
+    modifierVersion: Int,
+    expanded: Boolean,
+    actions: KeyBarActions,
+) {
+    if (!shown || !WindowInsets.isImeVisible) return
+    KeyBar(modifiers, modifierVersion, expanded, actions)
 }
 
 /** The config whose image is shown: the Live state's, else the active stream's for this session. */

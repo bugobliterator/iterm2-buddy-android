@@ -14,6 +14,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -76,6 +77,7 @@ class LiveVideoSource(val output: HevcVideoOutput, val state: StateFlow<LiveView
  *
  * @param sessionGuid the session shown: the zoom's key and the stale-frame rule's owner.
  * @param onCanvasSize the canvas size in px, on every change.
+ * @param onTap a single tap anywhere on the canvas (after the double-tap timeout passes).
  */
 @Composable
 fun VideoCanvas(
@@ -85,6 +87,7 @@ fun VideoCanvas(
     sessionGuid: String,
     onCanvasSize: (IntSize) -> Unit,
     modifier: Modifier = Modifier,
+    onTap: () -> Unit = {},
 ) {
     var canvas by remember { mutableStateOf(IntSize.Zero) }
     val viewW = canvas.width.toFloat()
@@ -101,6 +104,7 @@ fun VideoCanvas(
     val visible by remember(source, sessionGuid) { source.visibility(sessionGuid) }
         .collectAsStateWithLifecycle(initialValue = source.visible(sessionGuid))
     val density = LocalDensity.current
+    val currentOnTap by rememberUpdatedState(onTap)
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -116,7 +120,10 @@ fun VideoCanvas(
                 }
             }
             .pointerInput(zoomKey, fit, max, canvas) {
-                detectTapGestures(onDoubleTap = { tap -> kept = toggleZoom(clampZoom(kept, fit, viewW, viewH), tap.x, tap.y, fit, viewW, viewH, max) })
+                detectTapGestures(
+                    onDoubleTap = { tap -> kept = toggleZoom(clampZoom(kept, fit, viewW, viewH), tap.x, tap.y, fit, viewW, viewH, max) },
+                    onTap = { currentOnTap() },
+                )
             },
     ) {
         Box(

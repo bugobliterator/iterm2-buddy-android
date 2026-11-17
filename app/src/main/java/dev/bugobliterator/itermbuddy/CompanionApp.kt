@@ -8,6 +8,8 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import dev.bugobliterator.itermbuddy.core.CompanionClient
 import dev.bugobliterator.itermbuddy.core.CompanionRequestException
+import dev.bugobliterator.itermbuddy.core.input.InputSender
+import dev.bugobliterator.itermbuddy.core.input.isInputTarget
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
 import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.core.stream.fitToPhone
@@ -46,6 +48,10 @@ import kotlin.time.Duration.Companion.seconds
  * home, app switch) pauses it and `ON_START` resumes it; it is debounced over configuration
  * changes, so rotation neither pauses nor resumes.
  *
+ * [input] is the one ordered path for keys and pastes: app-scoped, so a key typed just before the
+ * activity is recreated is still sent, and it sends only while its target is the controller's
+ * active stream (same link, watch epoch and session; [isInputTarget]).
+ *
  * [video] is never closed: it lives as long as the process. An Application has no reliable end
  * (`onTerminate` never runs on a device), and process death takes the codec and the decoder
  * thread with it; the decoder itself exists only while the live view attaches a surface.
@@ -72,6 +78,10 @@ class CompanionApp : Application() {
         private set
 
     val client: CompanionClient get() = sessions.client
+
+    /** Keys and pastes for the live session; see the class comment. */
+    lateinit var input: InputSender
+        private set
 
     private val started = AtomicBoolean(false)
 
@@ -135,6 +145,12 @@ class CompanionApp : Application() {
             },
             newRepository = { client -> SessionTreeRepository(client, scope) },
             log = { Log.w(TAG, it) },
+        )
+        input = InputSender(
+            link = sessions.client,
+            scope = scope,
+            isCurrent = { target -> isInputTarget(sessions.controller.activeStream.value, target) },
+            log = { Log.i(INPUT_TAG, it) },
         )
         // Application.onCreate runs on the main thread, as addObserver requires.
         ProcessLifecycleOwner.get().lifecycle.addObserver(
@@ -204,6 +220,7 @@ class CompanionApp : Application() {
     private companion object {
         const val TAG = "CompanionApp"
         const val STREAM_TAG = "StreamController"
+        const val INPUT_TAG = "InputSender"
         val UNPAIR_FAILED_SHOWN = 5.seconds
     }
 }
