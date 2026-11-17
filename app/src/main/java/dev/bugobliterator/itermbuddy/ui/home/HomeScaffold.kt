@@ -5,8 +5,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -26,7 +28,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,6 +54,7 @@ import dev.bugobliterator.itermbuddy.ui.keepsScreenOn
 import dev.bugobliterator.itermbuddy.ui.live.LiveSessionActions
 import dev.bugobliterator.itermbuddy.ui.live.LiveSessionScreen
 import dev.bugobliterator.itermbuddy.ui.live.LiveVideoSource
+import dev.bugobliterator.itermbuddy.ui.live.NoPersonalizedLearning
 import dev.bugobliterator.itermbuddy.ui.sessions.SessionListScreen
 import dev.bugobliterator.itermbuddy.ui.settings.SettingsScreen
 import dev.bugobliterator.itermbuddy.ui.settings.decoderRowText
@@ -73,6 +75,9 @@ interface HomeActions : LiveSessionActions {
     fun reconnect()
 
     fun unpair()
+
+    /** The session list's search; app-scoped, so opening a session and coming back keeps it. */
+    fun setSearchQuery(query: String)
 }
 
 /**
@@ -93,6 +98,7 @@ data class HomeModel(
     val video: LiveVideoSource,
     val debugBuild: Boolean,
     val videoStatsShown: Boolean,
+    val query: String = "",
 )
 
 /**
@@ -160,13 +166,13 @@ private fun LiveSession(session: SessionSummary, title: String, model: HomeModel
 @Composable
 private fun SessionsHome(model: HomeModel, actions: HomeActions, modifier: Modifier) {
     var menuOpen by remember { mutableStateOf(false) }
-    // The search: short, so saved across rotation; gone with this screen (unpair leaves it).
-    var query by rememberSaveable { mutableStateOf("") }
+    // The query is app-scoped (HomeModel.query); only the field's focus is local.
+    val query = model.query
     var searchFocused by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     // Back while searching clears the search first; the next Back does what it always did.
     BackHandler(enabled = query.isNotEmpty() || searchFocused) {
-        query = ""
+        actions.setSearchQuery("")
         focusManager.clearFocus()
     }
     Scaffold(
@@ -199,13 +205,14 @@ private fun SessionsHome(model: HomeModel, actions: HomeActions, modifier: Modif
             )
         },
     ) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+        // The IME padding keeps the list's last rows above the keyboard while searching.
+        Column(modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
             connectionBanner(model.state)?.let { text ->
                 ConnectionBannerRow(text, bannerOffersReconnect(model.state), actions::reconnect)
             }
             SessionSearchField(
                 query = query,
-                onQueryChange = { query = it },
+                onQueryChange = actions::setSearchQuery,
                 onFocusChange = { searchFocused = it },
                 onDone = { focusManager.clearFocus() },
             )
@@ -238,9 +245,9 @@ private fun ConnectionBannerRow(text: String, reconnect: Boolean, onReconnect: (
     }
 }
 
-/** The search field at the top of the session list, with ✕ to clear it. */
+/** The search field at the top of the session list, with ✕ to clear it; no autocorrect or learning. */
 @Composable
-private fun SessionSearchField(query: String, onQueryChange: (String) -> Unit, onFocusChange: (Boolean) -> Unit, onDone: () -> Unit) {
+private fun SessionSearchField(query: String, onQueryChange: (String) -> Unit, onFocusChange: (Boolean) -> Unit, onDone: () -> Unit) = NoPersonalizedLearning {
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
@@ -259,7 +266,7 @@ private fun SessionSearchField(query: String, onQueryChange: (String) -> Unit, o
                 }
             }
         },
-        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search, autoCorrectEnabled = false),
         keyboardActions = KeyboardActions(onSearch = { onDone() }),
     )
 }

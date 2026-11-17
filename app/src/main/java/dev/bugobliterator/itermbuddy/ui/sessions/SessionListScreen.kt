@@ -30,6 +30,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
+import dev.bugobliterator.itermbuddy.core.sessions.SessionTree
 import dev.bugobliterator.itermbuddy.core.sessions.TreeState
 import java.util.Locale
 
@@ -38,6 +39,10 @@ internal const val TREE_FAILED = "Couldn't load sessions."
 
 /** The list's text when [query] matches nothing. The query is shown, never logged. */
 internal fun noMatchText(query: String): String = "No sessions match \"${query.trim()}\"."
+
+/** The text for an empty list: [EMPTY_TREE] when the Mac has no sessions at all, whatever the query. */
+internal fun emptyListText(tree: SessionTree, query: String): String =
+    if (query.isBlank() || sessionRows(tree).none { it is SessionRow.Session }) EMPTY_TREE else noMatchText(query)
 
 /**
  * The Sessions list for [state]: a spinner while loading, "Couldn't load sessions." with Try
@@ -68,7 +73,7 @@ fun SessionListScreen(
             is TreeState.Loaded -> {
                 val rows = remember(state.tree, query) { filterSessionRows(state.tree, query) }
                 if (rows.isEmpty()) {
-                    val text = if (query.isBlank()) EMPTY_TREE else noMatchText(query)
+                    val text = emptyListText(state.tree, query)
                     Centered { Text(text, style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center) }
                 } else {
                     LazyColumn(modifier = Modifier.fillMaxSize()) {

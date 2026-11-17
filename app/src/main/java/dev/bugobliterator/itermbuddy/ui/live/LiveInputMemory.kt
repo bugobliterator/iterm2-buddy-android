@@ -1,6 +1,7 @@
 package dev.bugobliterator.itermbuddy.ui.live
 
 import dev.bugobliterator.itermbuddy.core.input.StickyModifiers
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * One session's keyboard state that must outlive the live view's composition (rotation recreates
@@ -19,9 +20,10 @@ class LiveInputMemory {
  * [ComposerDrafts] and for the same reason: app-scoped rather than saved state. Cleared on unpair.
  */
 class LiveInputMemories {
-    private val memories = mutableMapOf<String, LiveInputMemory>()
+    // Thread-safe map: the unpair cleanup clears it off the main thread.
+    private val memories = ConcurrentHashMap<String, LiveInputMemory>()
 
-    fun of(sessionGuid: String): LiveInputMemory = memories.getOrPut(sessionGuid) { LiveInputMemory() }
+    fun of(sessionGuid: String): LiveInputMemory = memories.computeIfAbsent(sessionGuid) { LiveInputMemory() }
 
     fun clear() = memories.clear()
 }

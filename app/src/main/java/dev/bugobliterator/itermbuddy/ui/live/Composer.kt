@@ -26,6 +26,7 @@ import androidx.compose.ui.platform.PlatformTextInputMethodRequest
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import java.util.concurrent.ConcurrentHashMap
 import dev.bugobliterator.itermbuddy.core.input.isMultiLineDraft
 
 /**
@@ -103,7 +104,7 @@ internal fun pasteReturnLabel(draft: String): String = if (isMultiLineDraft(draf
  * may hold anything the owner typed). Main thread only. Cleared on unpair.
  */
 class ComposerDrafts {
-    private val drafts = mutableMapOf<String, String>()
+    private val drafts = ConcurrentHashMap<String, String>()
 
     fun get(sessionGuid: String): String = drafts[sessionGuid].orEmpty()
 
@@ -112,6 +113,8 @@ class ComposerDrafts {
     }
 
     fun clear() = drafts.clear()
+
+    override fun toString(): String = "ComposerDrafts(sessions=${drafts.size})"
 }
 
 /**
@@ -120,7 +123,7 @@ class ComposerDrafts {
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun NoPersonalizedLearning(content: @Composable () -> Unit) {
+internal fun NoPersonalizedLearning(content: @Composable () -> Unit) {
     InterceptPlatformTextInput(
         interceptor = { request, nextHandler ->
             val modified = PlatformTextInputMethodRequest { outAttributes ->

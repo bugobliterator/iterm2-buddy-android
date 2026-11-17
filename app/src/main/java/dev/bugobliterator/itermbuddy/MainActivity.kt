@@ -80,6 +80,8 @@ class MainActivity : ComponentActivity() {
 
         override fun inputMemory(sessionGuid: String) = app.inputMemories.of(sessionGuid)
 
+        override fun setSearchQuery(query: String) = app.sessions.search.set(query)
+
         override fun refresh() = app.sessions.repository.refresh()
 
         override fun reconnect() {
@@ -120,12 +122,13 @@ class MainActivity : ComponentActivity() {
             val relayOrigin by app.client.relayOrigin.collectAsStateWithLifecycle()
             val activeStream by activeForView.collectAsStateWithLifecycle(initialValue = activeNow)
             val videoStatsShown by app.videoStatsShown.collectAsStateWithLifecycle()
+            val query by sessions.search.query.collectAsStateWithLifecycle()
             AppTheme {
                 AppRoot(
                     paired = paired,
                     home = HomeModel(
                         state, destination, tree, live, unpairing, unpairFailed, version, relayOrigin,
-                        activeStream, video, debugBuild, videoStatsShown,
+                        activeStream, video, debugBuild, videoStatsShown, query,
                     ),
                     homeActions = homeActions,
                     pairingActions = actions,
