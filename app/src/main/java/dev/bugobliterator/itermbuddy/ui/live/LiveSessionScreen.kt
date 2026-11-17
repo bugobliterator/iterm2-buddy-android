@@ -1,32 +1,39 @@
 package dev.bugobliterator.itermbuddy.ui.live
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -46,6 +53,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -116,14 +124,20 @@ interface LiveSessionActions {
  * composer seeded with them. Sticky modifiers, the tray and the draft are per session; the draft
  * is cleared only once its paste was handed to the sender.
  *
- * **Fit viewport.** The size Fit computes the grid for is the content area under the top bar,
- * which is the canvas: the canvas never shrinks for the keyboard (the picture lifts instead, see
- * [VideoCanvas]), so the viewport is always the keyboard-hidden canvas and follows rotation, split
- * screen and window resizes at once.
+ * **Edge to edge** (iOS `SessionView.swift:870-889, 1985-2005`). The canvas is the whole window
+ * on black; the compact [LiveTopBar] (status bar scrim and a 48 dp row) and the navigation bar
+ * sit over it, and their heights are the canvas's top and bottom insets. At fit the picture sits
+ * just below the bar, top-aligned in the area between the insets ([visibleFitRect]), with any
+ * height left over at the bottom; zoomed in, it pans until its edges meet the insets. Overlays
+ * are centred in that area.
  *
- * **Keyboard lift.** The key bar sits over the picture just above the keyboard. Their overlap with
- * the canvas (the IME inset beyond the navigation bar the Scaffold already leaves out, plus the
- * key bar) is the canvas's bottom inset, read only in its layer and gestures, never in
+ * **Fit viewport.** Fit to phone computes its grid for the area between the insets with the
+ * keyboard hidden ([fitViewport]), so a fitted grid fills it; the canvas never shrinks for the
+ * keyboard, so it follows rotation, split screen and window resizes at once.
+ *
+ * **Keyboard lift.** The key bar sits over the picture just above the keyboard. While it is up,
+ * the keyboard (its inset includes the navigation bar) plus the key bar is the canvas's bottom
+ * inset instead of the navigation bar, read only in the canvas's layer and gestures, never in
  * composition; the picture's bottom (the prompt) stays just above the key bar while the keyboard
  * animates, as iOS (`SessionView.swift:1551-1559, 1995-2005`).
  *
@@ -131,7 +145,6 @@ interface LiveSessionActions {
  *   is this session's (a too-large window keeps its config for Fit).
  * @param macRevision the Mac's hello revision, for the browser note; null when not connected.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LiveSessionScreen(
     title: String,
@@ -147,11 +160,15 @@ fun LiveSessionScreen(
 ) {
     val config = shownConfig(session, live, activeStream)
     val target = inputTarget(session, live, activeStream)
-    // The keyboard-hidden canvas: the content area outside the IME padding (see the KDoc).
-    var viewport by remember { mutableStateOf(IntSize.Zero) }
+    // The canvas is the whole window; the top bar and the navigation bar sit over it (see the KDoc).
+    val density = LocalDensity.current
+    var canvas by remember { mutableStateOf(IntSize.Zero) }
+    var topChrome by remember { mutableIntStateOf(0) }
+    val navigationBottom = WindowInsets.navigationBars.getBottom(density)
+    val (viewportWidth, viewportHeight) = fitViewport(canvas.width, canvas.height, topChrome, navigationBottom)
     val canFit = !session.isBrowser && config != null &&
-        fitGrid(viewport.width, viewport.height, config, source.output.maxSize(), source.output::sizeSupported) != null
-    val fit = { actions.fitToPhone(session.guid, viewport.width, viewport.height) }
+        fitGrid(viewportWidth, viewportHeight, config, source.output.maxSize(), source.output::sizeSupported) != null
+    val fit = { actions.fitToPhone(session.guid, viewportWidth, viewportHeight) }
     var menuOpen by remember { mutableStateOf(false) }
 
     val keyboard = remember { TerminalKeyboard() }
@@ -220,126 +237,124 @@ fun LiveSessionScreen(
         }
     }
 
-    // How far the keyboard and key bar overlap the canvas, in px: the IME inset beyond what the
-    // Scaffold already keeps outside the canvas (the navigation bar), plus the key bar. Read only
-    // by the canvas's layer and gestures, so the IME animation never recomposes this screen.
     val ime = WindowInsets.ime
-    val density = LocalDensity.current
     var keyBarHeight by remember { mutableIntStateOf(0) }
-    Scaffold(
-        modifier = modifier.fillMaxSize(),
-        topBar = {
-            TopAppBar(
-                title = { Text(title, maxLines = 1) },
-                navigationIcon = {
-                    IconButton(onClick = actions::back, modifier = Modifier.semantics { contentDescription = "Back" }) {
-                        Text("←", style = MaterialTheme.typography.titleLarge)
-                    }
-                },
-                actions = {
-                    if (offersInput) {
-                        IconButton(
-                            onClick = keyboard::toggle,
-                            modifier = Modifier.semantics { contentDescription = "Show or hide keyboard" },
-                        ) { Text("⌨", style = MaterialTheme.typography.titleLarge) }
-                    }
-                    if (canFit || debugBuild) {
-                        Box {
-                            IconButton(
-                                onClick = { menuOpen = true },
-                                modifier = Modifier.semantics { contentDescription = "More options" },
-                            ) { Text("⋮", style = MaterialTheme.typography.titleLarge) }
-                            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                                if (canFit) {
-                                    DropdownMenuItem(
-                                        text = { Text("Fit to phone") },
-                                        onClick = {
-                                            menuOpen = false
-                                            fit()
-                                        },
-                                    )
-                                }
-                                if (debugBuild) {
-                                    DropdownMenuItem(
-                                        text = { Text("Video stats") },
-                                        trailingIcon = { Checkbox(checked = videoStatsShown, onCheckedChange = null) },
-                                        onClick = {
-                                            menuOpen = false
-                                            actions.setVideoStatsShown(!videoStatsShown)
-                                        },
-                                    )
-                                }
-                            }
-                        }
-                    }
-                },
-            )
-        },
-    ) { padding ->
-        val outsideBottom by rememberUpdatedState(with(density) { padding.calculateBottomPadding().roundToPx() })
-        val keyboardOverlap: () -> Float = remember(ime, density) {
-            { (maxOf(0, ime.getBottom(density) - outsideBottom) + keyBarHeight).toFloat() }
-        }
+    val currentNavigationBottom by rememberUpdatedState(navigationBottom)
+    // What covers the canvas's bottom now, in px: the navigation bar, or the keyboard (whose inset
+    // includes it) plus the key bar. Read only by the canvas's layer and gestures, so the IME
+    // animation never recomposes this screen.
+    val bottomCover: () -> Float = remember(ime, density) {
+        { maxOf(currentNavigationBottom, ime.getBottom(density) + keyBarHeight).toFloat() }
+    }
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .onSizeChanged { canvas = it },
+    ) {
+        TerminalInput(keyboard, translator.takeIf { offersInput }, Modifier.align(Alignment.TopStart))
+        VideoCanvas(
+            source = source,
+            imageWidth = config?.pixelWidth ?: 0,
+            imageHeight = config?.pixelHeight ?: 0,
+            sessionGuid = session.guid,
+            onCanvasSize = {},
+            onTap = { if (currentTarget != null) keyboard.show() },
+            topInset = topChrome.toFloat(),
+            restBottomInset = navigationBottom.toFloat(),
+            bottomInset = bottomCover,
+        )
+        // The visible area between the bars, for what is drawn over the picture.
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .consumeWindowInsets(padding)
-                .onSizeChanged { viewport = it },
+                .padding(
+                    top = with(density) { topChrome.toDp() },
+                    bottom = with(density) { navigationBottom.toDp() },
+                ),
         ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                TerminalInput(keyboard, translator.takeIf { offersInput }, Modifier.align(Alignment.TopStart))
-                VideoCanvas(
-                    source = source,
-                    imageWidth = config?.pixelWidth ?: 0,
-                    imageHeight = config?.pixelHeight ?: 0,
-                    sessionGuid = session.guid,
-                    onCanvasSize = {},
-                    onTap = { if (currentTarget != null) keyboard.show() },
-                    bottomInset = keyboardOverlap,
-                )
-                liveOverlay(live, canFit, session.guid)?.let { overlay ->
-                    OverlayCard(
-                        overlay = overlay,
-                        busy = live is LiveViewState.Starting || live is LiveViewState.Reconnecting,
-                        onAction = { action ->
-                            when (action) {
-                                OverlayAction.BACK -> actions.back()
-                                OverlayAction.RETRY, OverlayAction.RESTART -> actions.retry()
-                                OverlayAction.FIT -> fit()
-                            }
-                        },
-                        modifier = Modifier.align(Alignment.Center),
-                    )
-                }
-                browserNote(session, macRevision)?.let { note ->
-                    Text(
-                        text = note,
-                        color = Color.White,
-                        style = MaterialTheme.typography.labelLarge,
-                        modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
-                    )
-                }
-                if (debugBuild && videoStatsShown) {
-                    VideoStatsOverlay(source, Modifier.align(Alignment.TopStart).padding(8.dp))
-                }
-            }
-            // Over the picture, just above the keyboard: the canvas keeps its size and lifts instead.
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .imePadding()
-                    .onSizeChanged { keyBarHeight = it.height },
-            ) {
-                KeyBarSlot(
-                    shown = offersInput && !composerOpen,
-                    modifiers = modifiers,
-                    modifierVersion = modifierVersion,
-                    expanded = expanded,
-                    actions = keyBarActions,
+            liveOverlay(live, canFit, session.guid)?.let { overlay ->
+                OverlayCard(
+                    overlay = overlay,
+                    busy = live is LiveViewState.Starting || live is LiveViewState.Reconnecting,
+                    onAction = { action ->
+                        when (action) {
+                            OverlayAction.BACK -> actions.back()
+                            OverlayAction.RETRY, OverlayAction.RESTART -> actions.retry()
+                            OverlayAction.FIT -> fit()
+                        }
+                    },
+                    modifier = Modifier.align(Alignment.Center),
                 )
             }
+            browserNote(session, macRevision)?.let { note ->
+                Text(
+                    text = note,
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+                )
+            }
+            if (debugBuild && videoStatsShown) {
+                VideoStatsOverlay(source, Modifier.align(Alignment.TopStart).padding(8.dp))
+            }
+        }
+        LiveTopBar(
+            title = title,
+            onBack = actions::back,
+            modifier = Modifier.align(Alignment.TopCenter).onSizeChanged { topChrome = it.height },
+        ) {
+            if (offersInput) {
+                IconButton(
+                    onClick = keyboard::toggle,
+                    modifier = Modifier.semantics { contentDescription = "Show or hide keyboard" },
+                ) { Text("⌨", style = MaterialTheme.typography.titleMedium) }
+            }
+            if (canFit || debugBuild) {
+                Box {
+                    IconButton(
+                        onClick = { menuOpen = true },
+                        modifier = Modifier.semantics { contentDescription = "More options" },
+                    ) { Text("⋮", style = MaterialTheme.typography.titleMedium) }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        if (canFit) {
+                            DropdownMenuItem(
+                                text = { Text("Fit to phone") },
+                                onClick = {
+                                    menuOpen = false
+                                    fit()
+                                },
+                            )
+                        }
+                        if (debugBuild) {
+                            DropdownMenuItem(
+                                text = { Text("Video stats") },
+                                trailingIcon = { Checkbox(checked = videoStatsShown, onCheckedChange = null) },
+                                onClick = {
+                                    menuOpen = false
+                                    actions.setVideoStatsShown(!videoStatsShown)
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        // Over the picture, just above the keyboard: the canvas keeps its size and lifts instead.
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .imePadding()
+                .onSizeChanged { keyBarHeight = it.height },
+        ) {
+            KeyBarSlot(
+                shown = offersInput && !composerOpen,
+                modifiers = modifiers,
+                modifierVersion = modifierVersion,
+                expanded = expanded,
+                actions = keyBarActions,
+            )
         }
     }
     if (composerOpen) {
@@ -366,6 +381,41 @@ fun LiveSessionScreen(
         )
     }
 }
+
+/**
+ * The compact bar drawn over the top of the picture (iOS keeps its bars over a full-screen canvas):
+ * a translucent scrim behind the status bar and a 48 dp row with ←, the title on one line
+ * (ellipsized) and [actions] (⌨, ⋮). Its measured height is the canvas's top inset.
+ */
+@Composable
+private fun LiveTopBar(title: String, onBack: () -> Unit, modifier: Modifier, actions: @Composable RowScope.() -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(colors.surfaceContainer.copy(alpha = TOP_BAR_ALPHA))
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+            .height(48.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CompositionLocalProvider(LocalContentColor provides colors.onSurface) {
+            IconButton(onClick = onBack, modifier = Modifier.semantics { contentDescription = "Back" }) {
+                Text("←", style = MaterialTheme.typography.titleMedium)
+            }
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            actions()
+        }
+    }
+}
+
+/** The top bar's opacity over the picture. */
+private const val TOP_BAR_ALPHA = 0.8f
 
 /**
  * Where the live view's input goes: the active stream's link and watch for [session], only while
