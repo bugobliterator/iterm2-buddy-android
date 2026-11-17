@@ -19,6 +19,7 @@ import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
 import dev.bugobliterator.itermbuddy.core.relay.UnreachableKind
 import dev.bugobliterator.itermbuddy.core.relay.forOrigin
 import dev.bugobliterator.itermbuddy.core.relay.isFatalHttp
+import dev.bugobliterator.itermbuddy.core.relay.isLongWait
 import dev.bugobliterator.itermbuddy.core.relay.nextDelayMillis
 import dev.bugobliterator.itermbuddy.core.relay.requiresRescan
 import dev.bugobliterator.itermbuddy.core.stream.StreamInput
@@ -294,6 +295,34 @@ class CompanionClient internal constructor(
     fun start() {
         setState(ClientState.Connecting)
         launchControl { runStored() }
+    }
+
+    /**
+     * Set while the connect loop waits out an ordinary backoff: completing it ends the wait now.
+     * Null during the relay's long waits ("displaced", daily quota) and whenever not backing off.
+     */
+    @Volatile
+    private var backoffWake: CompletableDeferred<Unit>? = null
+
+    /**
+     * The user is back (the app came to the foreground): reconnect now instead of waiting out the
+     * backoff, which can have grown to 30 s. [ClientState.Idle] resumes as [start] does; an
+     * ordinary backoff wait ends at once and the attempt count starts again. Connected,
+     * connecting, showing the code, unpaired and failed states are left alone, and so are the
+     * relay's long waits after "displaced" (60 s) or the daily quota (30 min).
+     *
+     * @return whether a reconnect was kicked.
+     */
+    fun reconnectNow(): Boolean {
+        if (stateFlow.value == ClientState.Idle) {
+            log("reconnecting now: resumed from idle")
+            start()
+            return true
+        }
+        val wake = backoffWake ?: return false
+        if (!wake.complete(Unit)) return false
+        log("reconnecting now: backoff cut short")
+        return true
     }
 
     /** Stops the current attempt. A fresh pairing is wiped; a stored one stays and goes [ClientState.Idle]. */
@@ -722,7 +751,17 @@ class CompanionClient internal constructor(
                 wait = minOf(wait, remaining)
             }
             log("retrying in $wait ms (attempt $attempt)")
-            delay(wait)
+            if (isLongWait(relayClose)) {
+                delay(wait)
+                return true
+            }
+            val wake = CompletableDeferred<Unit>()
+            backoffWake = wake
+            try {
+                if (withTimeoutOrNull(wait) { wake.await() } != null) attempt = 0
+            } finally {
+                backoffWake = null
+            }
             return true
         }
 

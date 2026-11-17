@@ -408,6 +408,25 @@ class HevcVideoOutputTest {
         assertNull(video.outputOverdueSinceMillis())
     }
 
+    /** Rotation with a frame in flight: detach forgets the clock, so the reattached picture is not overdue. */
+    @Test
+    fun detachWithAFrameInFlightClearsTheClock() {
+        val video = ready()
+        clock.set(7_000)
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        thread.drain()
+        assertEquals(7_000L, video.outputOverdueSinceMillis())
+        video.detachSurface()
+        assertNull(video.outputOverdueSinceMillis())
+        clock.set(8_500)
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        assertNull(video.outputOverdueSinceMillis())
+        assertTrue(video.submit(frame(2, keyframe = true)))
+        thread.drain()
+        assertEquals("the next frame starts its own clock", 8_500L, video.outputOverdueSinceMillis())
+    }
+
     @Test
     fun staleCallbacksFromAReleasedCodecAreIgnored() {
         val video = ready()

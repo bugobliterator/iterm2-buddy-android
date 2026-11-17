@@ -47,8 +47,9 @@ fun isInputTarget(active: ActiveStream?, target: InputTarget): Boolean =
  *   sent only after every piece was sent **and** the target is still current at that moment, so
  *   failed or overtaken typing never submits.
  *
- * Logs carry link ids, watch epochs, GUIDs, lengths and exception class names: never typed or
- * pasted text, and never an exception's message (it may quote what it failed to send).
+ * Logs carry the item's kind (key, paste, typed draft), counts, link ids, watch epochs, GUIDs and
+ * exception class names: never typed or pasted text, never which key (a special key's name is a
+ * keystroke pattern), and never an exception's message (it may quote what it failed to send).
  *
  * @param sendBound the bound on each send, 2 s by default.
  * @param typeChunkBytes the largest piece of a typed draft, in UTF-8 bytes ([TYPE_CHUNK_BYTES]).
@@ -67,15 +68,15 @@ class InputSender(
     }
 
     private class KeyItem(override val target: InputTarget, val event: KeyEvent) : Item {
-        override val label: String get() = "key $event"
+        override val label: String get() = "key"
     }
 
     private class PasteItem(override val target: InputTarget, val text: String) : Item {
-        override val label: String get() = "paste (len=${text.length})"
+        override val label: String get() = "paste"
     }
 
     private class TypeItem(override val target: InputTarget, val text: String) : Item {
-        override val label: String get() = "typed draft (len=${text.length}) then Return"
+        override val label: String get() = "typed draft then Return"
     }
 
     private val queue = Channel<Item>(Channel.UNLIMITED)
@@ -119,7 +120,7 @@ class InputSender(
         val pieces = splitForTyping(item.text, typeChunkBytes)
         for ((index, piece) in pieces.withIndex()) {
             // The first piece was checked at dequeue; the rest are checked again before each send.
-            val label = "typed piece ${index + 1}/${pieces.size} (len=${piece.length})"
+            val label = "typed piece ${index + 1}/${pieces.size}"
             val sent = (index == 0 || isCurrent(target)) &&
                 send(PhoneMessage.SendKey(target.sessionGuid, KeyEvent(Key.Text(piece))), target, label)
             if (!sent) {

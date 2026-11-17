@@ -19,9 +19,10 @@ enum class ModifierState { OFF, ONE_SHOT, LOCKED }
  *
  * Not thread-safe: the live view uses it from the main thread only.
  *
- * @param onChange called after every change of state, so the key bar can redraw.
+ * @param onChange called after every change of state, so the key bar can redraw. A view that
+ *   outlives its composition's modifiers (rotation) replaces it.
  */
-class StickyModifiers(private val onChange: () -> Unit = {}) {
+class StickyModifiers(var onChange: () -> Unit = {}) {
     private val states = mutableMapOf<ModifierKey, ModifierState>()
     private val lastTap = mutableMapOf<ModifierKey, Long>()
 

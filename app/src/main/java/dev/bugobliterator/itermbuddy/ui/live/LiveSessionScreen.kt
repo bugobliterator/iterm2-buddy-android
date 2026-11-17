@@ -26,6 +26,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -89,6 +90,9 @@ interface LiveSessionActions {
     fun composerDraft(sessionGuid: String): String
 
     fun setComposerDraft(sessionGuid: String, draft: String)
+
+    /** [sessionGuid]'s sticky modifiers, tray and keyboard-restore flag, app-scoped so rotation keeps them. */
+    fun inputMemory(sessionGuid: String): LiveInputMemory
 }
 
 /**
@@ -147,7 +151,13 @@ fun LiveSessionScreen(
     val currentTarget by rememberUpdatedState(target)
     val currentActions by rememberUpdatedState(actions)
     var modifierVersion by remember { mutableIntStateOf(0) }
-    val modifiers = remember(session.guid) { StickyModifiers(onChange = { modifierVersion++ }) }
+    // App-scoped per session (like the draft), so rotation keeps an armed ctrl, the tray and the restore flag.
+    val memory = remember(session.guid) { actions.inputMemory(session.guid) }
+    val modifiers = memory.modifiers
+    DisposableEffect(modifiers) {
+        modifiers.onChange = { modifierVersion++ }
+        onDispose { modifiers.onChange = {} }
+    }
     var composerOpen by rememberSaveable(session.guid) { mutableStateOf(false) }
     // The draft lives in the app's per-session holder, not in saved state (it can be large).
     var draft by remember(session.guid) { mutableStateOf(actions.composerDraft(session.guid)) }
@@ -168,16 +178,15 @@ fun LiveSessionScreen(
             },
         )
     }
-    var expanded by remember(session.guid) { mutableStateOf(false) }
+    var expanded by remember(session.guid) { mutableStateOf(memory.expanded) }
     val offersInput = target != null
     // Raise the keyboard again when input comes back (a reconnect) if it was up when it went.
-    var restoreKeyboard by remember(session.guid) { mutableStateOf(false) }
     LaunchedEffect(offersInput) {
         if (!offersInput) {
-            if (keyboard.visible()) restoreKeyboard = true
+            if (keyboard.visible()) memory.restoreKeyboard = true
             keyboard.hide()
-        } else if (restoreKeyboard) {
-            restoreKeyboard = false
+        } else if (memory.restoreKeyboard) {
+            memory.restoreKeyboard = false
             keyboard.show()
         }
     }
@@ -197,6 +206,7 @@ fun LiveSessionScreen(
 
             override fun toggleExpanded() {
                 expanded = !expanded
+                memory.expanded = expanded
             }
 
             override fun hideKeyboard() = keyboard.hide()
