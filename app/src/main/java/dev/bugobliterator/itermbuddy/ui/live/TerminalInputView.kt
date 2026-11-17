@@ -1,10 +1,13 @@
 package dev.bugobliterator.itermbuddy.ui.live
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.text.InputType
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.View
+import android.view.Window
 import android.view.WindowInsets
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.CompletionInfo
@@ -12,6 +15,8 @@ import android.view.inputmethod.CorrectionInfo
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import dev.bugobliterator.itermbuddy.core.input.ImeTranslator
 
 /**
@@ -22,7 +27,8 @@ import dev.bugobliterator.itermbuddy.core.input.ImeTranslator
  * The editor is a single-line visible-password field with no suggestions
  * (`TYPE_CLASS_TEXT | TYPE_TEXT_VARIATION_VISIBLE_PASSWORD | TYPE_TEXT_FLAG_NO_SUGGESTIONS`), no
  * fullscreen or extract UI and no action key (`IME_ACTION_NONE`): no autocorrect, prediction or
- * capitalisation, as iOS's key-input view. Hardware keys reach [onKeyDown] and go the same way.
+ * capitalisation, as iOS's key-input view, and no personalised learning (it may be a password).
+ * Hardware keys reach [onKeyDown] and go the same way, Ctrl and Alt included.
  *
  * **Held Backspace (device check).** With nothing before the cursor, Gboard sends
  * `KEYCODE_DEL` key events instead of `deleteSurroundingText`, and repeats them while the key is
@@ -51,16 +57,33 @@ class TerminalInputView(context: Context) : View(context) {
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
         outAttrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
             InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-        outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_FLAG_NO_EXTRACT_UI or EditorInfo.IME_ACTION_NONE
+        outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+            EditorInfo.IME_ACTION_NONE or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
         outAttrs.initialSelStart = 0
         outAttrs.initialSelEnd = 0
+        // A new connection sees an empty editor: what was typed before is no longer "before the cursor".
+        translator?.inputRestarted()
         return TerminalInputConnection(this)
     }
 
     /** Takes focus and raises the soft keyboard. */
     fun showKeyboard() {
         if (!hasFocus()) requestFocus()
-        imm.showSoftInput(this, 0)
+        val window = activityWindow()
+        if (window != null) {
+            WindowCompat.getInsetsController(window, this).show(WindowInsetsCompat.Type.ime())
+        } else {
+            imm.showSoftInput(this, 0)
+        }
+    }
+
+    private fun activityWindow(): Window? {
+        var current: Context? = context
+        while (current is ContextWrapper) {
+            if (current is Activity) return current.window
+            current = current.baseContext
+        }
+        return null
     }
 
     /** Lowers the soft keyboard. */
@@ -83,18 +106,19 @@ class TerminalInputView(context: Context) : View(context) {
         handleKey(event) || super.onKeyUp(keyCode, event)
 
     /**
-     * A key event from the IME or a hardware keyboard: mapped keys go to [ImeTranslator.sendKeyEvent];
-     * an unmapped key-down that types a character (some IMEs send digits as key events) is
-     * committed as text; a dead key (combining accent) is not. Anything else is left to the caller.
+     * A key event from the IME or a hardware keyboard, for [ImeTranslator.sendKeyEvent] with the
+     * character it types (some IMEs send digits as key events; a dead key types none). Anything else is left to the caller.
      */
     internal fun handleKey(event: KeyEvent): Boolean {
         val target = translator ?: return false
-        if (target.sendKeyEvent(event.keyCode, event.action)) return true
-        if (event.action != KeyEvent.ACTION_DOWN) return false
-        val char = event.unicodeChar
-        if (char == 0 || (char and KeyCharacterMap.COMBINING_ACCENT) != 0) return false
-        target.commitText(String(Character.toChars(char)))
-        return true
+        // The character without Ctrl, Alt or Meta (shift kept); the translator adds Ctrl and Alt itself.
+        val plain = event.getUnicodeChar(event.metaState and MODIFIER_META.inv())
+        val char = if (plain and KeyCharacterMap.COMBINING_ACCENT != 0) 0 else plain
+        return target.sendKeyEvent(event.keyCode, event.action, char, event.metaState)
+    }
+
+    private companion object {
+        const val MODIFIER_META = KeyEvent.META_CTRL_MASK or KeyEvent.META_ALT_MASK or KeyEvent.META_META_MASK
     }
 }
 
@@ -140,9 +164,10 @@ private class TerminalInputConnection(private val view: TerminalInputView) : Bas
         return true
     }
 
-    override fun setComposingRegion(start: Int, end: Int): Boolean = true
+    // The editor is always empty: there is no region or selection to set.
+    override fun setComposingRegion(start: Int, end: Int): Boolean = false
 
-    override fun setSelection(start: Int, end: Int): Boolean = true
+    override fun setSelection(start: Int, end: Int): Boolean = false
 
     override fun commitCompletion(text: CompletionInfo?): Boolean = true
 

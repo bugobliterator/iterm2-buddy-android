@@ -50,6 +50,12 @@ internal interface RelaySocket {
 
     val incoming: ReceiveChannel<ByteArray>
 
+    /**
+     * Queues [frame] for the Mac. Must never suspend once it has started handing the frame over
+     * (production queues on OkHttp and returns): [CompanionSession.sendEnvelope] relies on it, so
+     * that a caller cancelled mid-send (the input sender's 2 s `withTimeout`) can only be cancelled
+     * while waiting for the send lock, before any frame of its envelope was sent.
+     */
     suspend fun send(frame: ByteArray)
 
     fun close()
@@ -324,6 +330,12 @@ internal class CompanionSession(
         finish(null)
     }
 
+    /**
+     * Encrypts and sends one envelope under [sendLock]. The only suspension point is acquiring the
+     * lock: once held, nothing here suspends ([RelaySocket.send] must not), so cancellation (such
+     * as a caller's `withTimeout`) either prevents the send entirely or does not interrupt it, and
+     * never leaves part of an envelope sent with the Noise nonce advanced. Keep it that way.
+     */
     private suspend fun sendEnvelope(message: PhoneMessage, requestID: Long?) {
         sendLock.withLock {
             val frames = try {

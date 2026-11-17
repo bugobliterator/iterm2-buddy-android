@@ -14,6 +14,7 @@ import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
 import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.core.stream.fitToPhone
 import dev.bugobliterator.itermbuddy.store.KeystorePairingStore
+import dev.bugobliterator.itermbuddy.ui.live.ComposerDrafts
 import dev.bugobliterator.itermbuddy.video.HevcVideoOutput
 import dev.bugobliterator.itermbuddy.video.MediaCodecCatalog
 import dev.bugobliterator.itermbuddy.ui.ScanNotice
@@ -78,6 +79,9 @@ class CompanionApp : Application() {
         private set
 
     val client: CompanionClient get() = sessions.client
+
+    /** The composer's per-session drafts, in memory only. */
+    val drafts = ComposerDrafts()
 
     /** Keys and pastes for the live session; see the class comment. */
     lateinit var input: InputSender
@@ -192,6 +196,7 @@ class CompanionApp : Application() {
      */
     fun unpair() {
         unpairingFlow.value = true
+        drafts.clear()
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
                 client.unpair()

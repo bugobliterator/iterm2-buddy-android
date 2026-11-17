@@ -105,6 +105,7 @@ fun VideoCanvas(
         .collectAsStateWithLifecycle(initialValue = source.visible(sessionGuid))
     val density = LocalDensity.current
     val currentOnTap by rememberUpdatedState(onTap)
+    val geometry by rememberUpdatedState(GestureGeometry(fit, viewW, viewH, max))
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -114,14 +115,21 @@ fun VideoCanvas(
                 canvas = it
                 onCanvasSize(it)
             }
-            .pointerInput(zoomKey, fit, max, canvas) {
+            // Keyed on the zoom key only: the canvas changes every frame while the keyboard
+            // animates, and restarting the detectors then would drop a gesture in progress. The
+            // geometry is read at each event instead.
+            .pointerInput(zoomKey) {
                 detectTransformGestures { centroid, pan, gestureZoom, _ ->
-                    kept = applyGesture(clampZoom(kept, fit, viewW, viewH), centroid.x, centroid.y, gestureZoom, pan.x, pan.y, fit, viewW, viewH, max)
+                    val g = geometry
+                    kept = applyGesture(clampZoom(kept, g.fit, g.viewW, g.viewH), centroid.x, centroid.y, gestureZoom, pan.x, pan.y, g.fit, g.viewW, g.viewH, g.max)
                 }
             }
-            .pointerInput(zoomKey, fit, max, canvas) {
+            .pointerInput(zoomKey) {
                 detectTapGestures(
-                    onDoubleTap = { tap -> kept = toggleZoom(clampZoom(kept, fit, viewW, viewH), tap.x, tap.y, fit, viewW, viewH, max) },
+                    onDoubleTap = { tap ->
+                        val g = geometry
+                        kept = toggleZoom(clampZoom(kept, g.fit, g.viewW, g.viewH), tap.x, tap.y, g.fit, g.viewW, g.viewH, g.max)
+                    },
                     onTap = { currentOnTap() },
                 )
             },
@@ -174,3 +182,6 @@ private fun VideoSurface(output: HevcVideoOutput, modifier: Modifier) {
         }
     }
 }
+
+/** What the gesture detectors read at each event: the current fit, view size and maximum scale. */
+private class GestureGeometry(val fit: FitRect, val viewW: Float, val viewH: Float, val max: Float)
