@@ -67,7 +67,7 @@ func minimalPNG() -> Data {
     return Data(signature + chunk("IHDR", header) + chunk("IDAT", zlib) + chunk("IEND", []))
 }
 
-/// Every `CompanionSelectionMode` raw value (CompanionMessages.swift:262-268).
+/// Every `CompanionSelectionMode` raw value (CompanionMessages.swift:264-269).
 let selectionModeRawValues = ["character", "word", "line", "smart"]
 
 func historySelectionSamples() throws -> [SessionSample] {
@@ -104,10 +104,12 @@ func historySelectionSamples() throws -> [SessionSample] {
     // A long press on live row 10 at column 2, dragged to row 11 column 41.
     // iOS maps touches with CompanionTouchMapper (visual columns, absolute
     // lines) and sends through AppModel.swift:4765-4779 and
-    // CompanionClient.swift:305-311 (`send`). iOS itself only begins in
-    // character mode (SessionView.swift:2749-2837); the Mac also accepts word,
-    // line and smart (CompanionHostBridge.swift:822-847), and reads `mode` only
-    // on begin (CompanionMessages.swift:852-857).
+    // CompanionClient.swift:305-311 (`send`). iOS sends character mode on
+    // every phase (SessionView.swift:2749-2837); the Mac also accepts word,
+    // line and smart (CompanionHostBridge.swift:822-847). Despite upstream's
+    // doc comment (CompanionMessages.swift:852-857), the Mac picks the
+    // character or snapping path from `mode` on every phase
+    // (CompanionHostBridge.swift:818), so move and end carry the begin's mode.
     let anchor = CompanionSelectionPoint(absLine: LiveStream.liveTop + 10, column: 2)
     let live = CompanionSelectionPoint(absLine: LiveStream.liveTop + 11, column: 41)
     for raw in selectionModeRawValues {
@@ -175,6 +177,28 @@ func historySelectionSamples() throws -> [SessionSample] {
                                                    windowFirstAbsLine: trimmed.firstAbsLine,
                                                    windowLineCount: trimmed.lineCount,
                                                    pngData: Data())))))
+
+    // Partly evicted: a request for 50 lines at 3050 after the overflow
+    // reached 3080 is clamped to the 20 lines still there, so the reply starts
+    // at 3080, not where the phone asked (iOS treats that as a miss,
+    // AppModel.swift:4962-4970). Same request ID: an alternative reply.
+    let clampedRequestFirstAbsLine = LiveStream.scrollbackOverflow + 50
+    let partlyTrimmed = CompanionHistoryWindow(firstAbsLine: LiveStream.scrollbackOverflow + 80,
+                                               lineCount: LiveStream.totalLines)
+    guard let partial = partlyTrimmed.clamped(absLine: clampedRequestFirstAbsLine,
+                                              count: min(historyLinesPerTile, hostMaxTileLines)) else {
+        require(false, "the partly evicted request does not overlap")
+        return []
+    }
+    require(partial.absLine == partlyTrimmed.firstAbsLine && partial.count == 20, "the partial clamp differs")
+    samples.append(try hostSample("history-tile-clamped",
+                                  HostEnvelope(requestID: fetchHistoryTileRequestID,
+                                               payload: .historyTile(CompanionHistoryTile(
+                                                   streamID: streamID, generationId: generation,
+                                                   firstAbsLine: partial.absLine, lineCount: partial.count,
+                                                   windowFirstAbsLine: partlyTrimmed.firstAbsLine,
+                                                   windowLineCount: partlyTrimmed.lineCount,
+                                                   pngData: minimalPNG())))))
 
     // CompanionSessionStreamer.swift:330-340 fires on a firstAbsLine advance
     // or a totalLines drop; CompanionHostBridge.swift:1252-1257 sends it with

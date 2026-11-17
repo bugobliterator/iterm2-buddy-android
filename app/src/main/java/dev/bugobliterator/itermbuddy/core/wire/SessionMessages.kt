@@ -112,7 +112,8 @@ sealed interface PhoneMessage {
     /**
      * `fetchHistoryTile(streamID:firstAbsLine:lineCount:generationId:)`, a request: the Mac
      * replies with [MacMessage.HistoryTileMessage] or an error. [streamID] and [generationId]
-     * are upstream `UInt32`, [firstAbsLine] `Int64`. The Mac renders at most 200 lines.
+     * are upstream `UInt32`, [firstAbsLine] `Int64`. [lineCount] must be in 1..200
+     * ([MAX_HISTORY_TILE_LINES], the Mac's cap); the encoder refuses anything else.
      */
     data class FetchHistoryTile(val streamID: Long, val firstAbsLine: Long, val lineCount: Int, val generationId: Long) :
         PhoneMessage {
@@ -121,13 +122,18 @@ sealed interface PhoneMessage {
 
     /**
      * `reportScrollWheel(streamID:up:lines:)`, fire-and-forget: only while the config has both
-     * `altScreen` and `scrollWheelReporting`. [up] reveals older content; [lines] is the notch count.
+     * `altScreen` and `scrollWheelReporting`. [up] reveals older content; [lines] is the notch
+     * count and must be positive.
      */
     data class ReportScrollWheel(val streamID: Long, val up: Boolean, val lines: Int) : PhoneMessage {
         override fun payload(): JsonObject = encodeReportScrollWheel(this)
     }
 
-    /** `selectionGesture(streamID:phase:mode:point:)`, fire-and-forget; [mode] is read only on begin. */
+    /**
+     * `selectionGesture(streamID:phase:mode:point:)`, fire-and-forget. Send the begin's [mode] on
+     * move and end too: the Mac picks the character or snapping path from [mode] on every phase
+     * (`CompanionHostBridge.swift:818`).
+     */
     data class SelectionGesture(
         val streamID: Long,
         val phase: SelectionPhase,

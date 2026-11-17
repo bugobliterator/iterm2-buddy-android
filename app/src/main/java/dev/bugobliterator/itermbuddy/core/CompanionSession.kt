@@ -451,9 +451,15 @@ internal class CompanionSession(
             if (!endingForSink) requestID?.let { pending.remove(it) }?.complete(message)
             return
         }
-        val waiter = requestID?.let { pending.remove(it) }
-        if (waiter != null) {
-            waiter.complete(message)
+        if (requestID != null) {
+            val waiter = pending.remove(requestID)
+            if (waiter != null) {
+                waiter.complete(message)
+            } else {
+                // An orphan reply: its request timed out or was cancelled. It is never an event
+                // (a reply can carry terminal content), so only its kind is logged.
+                log("dropped an orphan reply (${message.javaClass.simpleName}) to request $requestID")
+            }
             return
         }
         if (message == MacMessage.Unpaired) unpaired.complete(Unit)

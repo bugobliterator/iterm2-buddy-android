@@ -21,7 +21,9 @@ enum class SelectionPhase(val raw: String) {
 
 /**
  * Upstream `CompanionSelectionMode`: `character` is exact cells; `word`, `line` and `smart`
- * snap like the Mac's double, triple and smart click. The Mac reads it only on [SelectionPhase.BEGIN].
+ * snap like the Mac's double, triple and smart click. Send the begin's mode on move and end
+ * too: the Mac picks the character or snapping path from `mode` on every phase
+ * (`CompanionHostBridge.swift:818`), whatever upstream's doc comment says.
  */
 enum class SelectionMode(val raw: String) {
     CHARACTER("character"),
@@ -65,6 +67,12 @@ class HistoryTile(
     /** The PNG's size in bytes, for byte budgets, without a copy. */
     val pngSize: Int get() = png.size
 
+    /**
+     * Runs [block] on the tile's own PNG bytes, `(bytes, offset, length)`, without a copy: for a
+     * decoder such as `BitmapFactory.decodeByteArray`. [block] must not modify or keep the array.
+     */
+    fun <T> withPng(block: (bytes: ByteArray, offset: Int, length: Int) -> T): T = block(png, 0, png.size)
+
     private fun fields(): List<Any> =
         listOf(streamID, generationId, firstAbsLine, lineCount, windowFirstAbsLine, windowLineCount)
 
@@ -85,8 +93,12 @@ private fun requireU32(name: String, value: Long) {
 
 private fun obj(vararg entries: Pair<String, JsonElement>) = JsonObject(linkedMapOf(*entries))
 
+/** The Mac renders at most this many lines per tile (`CompanionHostBridge.swift:2044`). */
+const val MAX_HISTORY_TILE_LINES = 200
+
 internal fun encodeFetchHistoryTile(message: PhoneMessage.FetchHistoryTile): JsonObject {
     requireU32("streamID", message.streamID)
+    require(message.lineCount in 1..MAX_HISTORY_TILE_LINES) { "lineCount must be in 1..$MAX_HISTORY_TILE_LINES" }
     requireU32("generationId", message.generationId)
     return case(
         "fetchHistoryTile",
@@ -101,6 +113,8 @@ internal fun encodeFetchHistoryTile(message: PhoneMessage.FetchHistoryTile): Jso
 
 internal fun encodeReportScrollWheel(message: PhoneMessage.ReportScrollWheel): JsonObject {
     requireU32("streamID", message.streamID)
+    // iOS never sends a zero notch count (AppModel.swift:4658).
+    require(message.lines > 0) { "lines must be positive" }
     return case(
         "reportScrollWheel",
         obj(
