@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -15,6 +16,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -23,13 +25,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.ui.UNPAIR_FAILED
 import dev.bugobliterator.itermbuddy.ui.connectionBanner
+import dev.bugobliterator.itermbuddy.video.VideoStats
 
 internal const val UNPAIR_CONFIRM = "Unpair this phone? You'll need to scan a new code on the Mac."
 
@@ -40,10 +45,16 @@ internal fun macStatusText(state: ClientState): String = when (state) {
 }
 
 /**
+ * The Decoder row: the HEVC decoder in use, else the last one used, from the live view's
+ * [VideoStats]. A codec name only, never content.
+ */
+internal fun decoderRowText(stats: VideoStats): String = stats.decoderName ?: stats.lastDecoderName ?: "Not used yet"
+
+/**
  * Settings, reached from the home's overflow menu: the connection, the relay origin, Unpair
- * (confirmed first) and the app version. The pairing screen's Connected content (status and
- * Unpair) lives here now. The Decoder row (the HEVC decoder's name) comes with the Live View
- * task, which owns the decoder's stats.
+ * (confirmed first), the app version and the HEVC decoder ([decoder], [decoderRowText]). The
+ * pairing screen's Connected content (status and Unpair) lives here now. Debug builds
+ * ([debugBuild]) also get the "Video stats" toggle for the live view's stats overlay.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -53,6 +64,10 @@ fun SettingsScreen(
     unpairFailed: Boolean,
     appVersion: String,
     relayOrigin: String?,
+    decoder: String,
+    debugBuild: Boolean,
+    videoStatsShown: Boolean,
+    onVideoStatsShownChange: (Boolean) -> Unit,
     onBack: () -> Unit,
     onUnpair: () -> Unit,
     modifier: Modifier = Modifier,
@@ -85,6 +100,21 @@ fun SettingsScreen(
                 OutlinedButton(onClick = { confirming = true }) { Text("Unpair this phone") }
             }
             Entry("App version", appVersion)
+            Entry("Decoder", decoder)
+            if (debugBuild) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().toggleable(
+                        value = videoStatsShown,
+                        role = Role.Switch,
+                        onValueChange = onVideoStatsShownChange,
+                    ),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Video stats", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                    Switch(checked = videoStatsShown, onCheckedChange = null)
+                }
+            }
         }
     }
     if (confirming) {

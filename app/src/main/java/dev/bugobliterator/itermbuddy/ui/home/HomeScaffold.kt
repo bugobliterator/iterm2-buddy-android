@@ -31,10 +31,12 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.sessions.TreeState
+import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
+import dev.bugobliterator.itermbuddy.core.stream.ActiveStream
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.ui.HomeDestination
 import dev.bugobliterator.itermbuddy.ui.bannerOffersReconnect
@@ -42,15 +44,22 @@ import dev.bugobliterator.itermbuddy.ui.connectionBanner
 import dev.bugobliterator.itermbuddy.ui.connectionLabel
 import dev.bugobliterator.itermbuddy.ui.keepsScreenOn
 import dev.bugobliterator.itermbuddy.ui.sessions.SessionListScreen
+import dev.bugobliterator.itermbuddy.ui.live.LiveSessionActions
+import dev.bugobliterator.itermbuddy.ui.live.LiveSessionScreen
+import dev.bugobliterator.itermbuddy.ui.live.LiveVideoSource
 import dev.bugobliterator.itermbuddy.ui.settings.SettingsScreen
+import dev.bugobliterator.itermbuddy.ui.settings.decoderRowText
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
-/** What the home can ask for. Session open and Back go to the app-scoped navigator, never composition. */
-interface HomeActions {
-    fun openSession(session: dev.bugobliterator.itermbuddy.core.sessions.SessionSummary, title: String)
+/**
+ * What the home can ask for. Session open and Back go to the app-scoped navigator, never
+ * composition; the live view's calls are [LiveSessionActions].
+ */
+interface HomeActions : LiveSessionActions {
+    fun openSession(session: SessionSummary, title: String)
 
     fun openSettings()
-
-    fun back()
 
     fun refresh()
 
@@ -59,7 +68,11 @@ interface HomeActions {
     fun unpair()
 }
 
-/** Everything the home shows, collected by the activity from app-scoped flows. */
+/**
+ * Everything the home shows, collected by the activity from app-scoped flows. [video] is read by
+ * the live view and Settings themselves (its stats change with every frame); [activeStream] is
+ * the controller's adopted stream (its config stays for Fit while a window is too large).
+ */
 data class HomeModel(
     val state: ClientState,
     val destination: HomeDestination,
@@ -69,14 +82,19 @@ data class HomeModel(
     val unpairFailed: Boolean,
     val appVersion: String,
     val relayOrigin: String?,
+    val activeStream: ActiveStream?,
+    val video: LiveVideoSource,
+    val debugBuild: Boolean,
+    val videoStatsShown: Boolean,
 )
 
 /**
  * The paired home: a [Scaffold] for [HomeTab][dev.bugobliterator.itermbuddy.ui.HomeTab]
  * `SESSIONS` (no bottom bar while it is the only tab), rendering [HomeModel.destination].
  * System back on any destination but the list calls [HomeActions.back]. The screen is kept on
- * only while a session view shows ([keepsScreenOn]); that flag is the only thing composition
- * changes, and it never touches the stream.
+ * only while a session view shows ([keepsScreenOn]), whatever the stream's state, and the flag is
+ * cleared on leaving it. Session destinations render [LiveSessionScreen], which attaches and
+ * detaches the decoder's surface; nothing in composition opens or closes a stream.
  */
 @Composable
 fun HomeScaffold(model: HomeModel, actions: HomeActions, modifier: Modifier = Modifier) {
@@ -90,19 +108,45 @@ fun HomeScaffold(model: HomeModel, actions: HomeActions, modifier: Modifier = Mo
     }
     when (destination) {
         HomeDestination.SessionList -> SessionsHome(model, actions, modifier)
-        HomeDestination.Settings -> SettingsScreen(
-            state = model.state,
-            unpairing = model.unpairing,
-            unpairFailed = model.unpairFailed,
-            appVersion = model.appVersion,
-            relayOrigin = model.relayOrigin,
-            onBack = actions::back,
-            onUnpair = actions::unpair,
-            modifier = modifier,
-        )
-        is HomeDestination.LiveSession -> SessionPlaceholder(destination.title, model.live, actions, modifier)
-        is HomeDestination.BrowserSession -> SessionPlaceholder(destination.title, model.live, actions, modifier)
+        HomeDestination.Settings -> {
+            val source = model.video
+            val decoder by remember(source) { source.output.stats.map(::decoderRowText).distinctUntilChanged() }
+                .collectAsStateWithLifecycle(initialValue = source.decoderRowNow())
+            SettingsScreen(
+                state = model.state,
+                unpairing = model.unpairing,
+                unpairFailed = model.unpairFailed,
+                appVersion = model.appVersion,
+                relayOrigin = model.relayOrigin,
+                decoder = decoder,
+                debugBuild = model.debugBuild,
+                videoStatsShown = model.videoStatsShown,
+                onVideoStatsShownChange = actions::setVideoStatsShown,
+                onBack = actions::back,
+                onUnpair = actions::unpair,
+                modifier = modifier,
+            )
+        }
+        is HomeDestination.LiveSession -> LiveSession(destination.session, destination.title, model, actions, modifier)
+        is HomeDestination.BrowserSession -> LiveSession(destination.session, destination.title, model, actions, modifier)
     }
+}
+
+/** The live view for [session]; a browser session shows its video with the browser note until Browser View. */
+@Composable
+private fun LiveSession(session: SessionSummary, title: String, model: HomeModel, actions: HomeActions, modifier: Modifier) {
+    LiveSessionScreen(
+        title = title,
+        session = session,
+        live = model.live,
+        activeStream = model.activeStream,
+        macRevision = (model.state as? ClientState.Connected)?.macRevision,
+        source = model.video,
+        debugBuild = model.debugBuild,
+        videoStatsShown = model.videoStatsShown,
+        actions = actions,
+        modifier = modifier,
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -169,51 +213,4 @@ private fun ConnectionBannerRow(text: String, reconnect: Boolean, onReconnect: (
             if (reconnect) TextButton(onClick = onReconnect) { Text("Reconnect") }
         }
     }
-}
-
-/**
- * Stands in for the live view until the Live View task: the session's name, the stream's state
- * and Back. Back is the navigator's [HomeActions.back], which closes the stream.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun SessionPlaceholder(title: String, live: LiveViewState, actions: HomeActions, modifier: Modifier) {
-    Scaffold(
-        modifier = modifier.fillMaxSize(),
-        topBar = {
-            TopAppBar(
-                title = { Text(title, maxLines = 1) },
-                navigationIcon = {
-                    IconButton(
-                        onClick = actions::back,
-                        modifier = Modifier.semantics { contentDescription = "Back" },
-                    ) { Text("←", style = MaterialTheme.typography.titleLarge) }
-                },
-            )
-        },
-    ) { padding ->
-        Column(
-            modifier = Modifier.fillMaxSize().padding(padding).padding(24.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                text = liveStatusText(live),
-                textAlign = TextAlign.Center,
-                style = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-            )
-        }
-    }
-}
-
-/** The placeholder's one line for the stream's state. */
-internal fun liveStatusText(live: LiveViewState): String = when (live) {
-    LiveViewState.Closed -> "Not watching."
-    is LiveViewState.Starting -> "Starting…"
-    is LiveViewState.Live -> if (live.stalled) "Picture stalled" else "Live (${live.config.columns}×${live.config.rows})"
-    is LiveViewState.Reconnecting -> "Reconnecting…"
-    is LiveViewState.Paused -> "Paused"
-    is LiveViewState.Ended -> "Stream ended."
-    is LiveViewState.Failed -> "Couldn't show this session."
 }

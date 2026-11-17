@@ -704,4 +704,57 @@ class HevcVideoOutputTest {
         thread.drain()
         assertEquals(listOf(us(1)), factory.last.queued)
     }
+
+    @Test
+    fun framesOutSinceResetCountsOnlyTheCurrentPicture() {
+        val video = ready()
+        assertEquals(0L, video.stats.value.framesOutSinceReset)
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        assertTrue(video.submit(frame(2, keyframe = false)))
+        thread.drain()
+        val first = factory.last
+        first.output(us(1))
+        thread.drain()
+        assertEquals(1L, video.stats.value.framesOutSinceReset)
+        // A reset zeroes it at once, and a late output of the released codec does not count.
+        video.reset()
+        assertEquals(0L, video.stats.value.framesOutSinceReset)
+        first.output(us(2))
+        thread.drain()
+        assertEquals(0L, video.stats.value.framesOutSinceReset)
+        // A new config that rebuilds the decoder starts a new picture too.
+        video.configure(streamConfig())
+        thread.drain()
+        assertTrue(video.submit(frame(3, keyframe = true)))
+        thread.drain()
+        factory.last.output(us(3))
+        thread.drain()
+        assertEquals(1L, video.stats.value.framesOutSinceReset)
+        video.configure(streamConfig(width = 1440, height = 900))
+        assertEquals(0L, video.stats.value.framesOutSinceReset)
+        // The same config again keeps the decoder and the count.
+        assertTrue(video.submit(frame(4, keyframe = true)))
+        thread.drain()
+        factory.last.output(us(4))
+        thread.drain()
+        video.configure(streamConfig(width = 1440, height = 900))
+        assertEquals(1L, video.stats.value.framesOutSinceReset)
+        // Losing and regaining the surface keeps it: the new surface is blank, never stale.
+        video.detachSurface()
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        assertEquals(1L, video.stats.value.framesOutSinceReset)
+        assertEquals("framesOut is cumulative", 3L, video.stats.value.framesOut)
+    }
+
+    @Test
+    fun lastDecoderNameOutlivesTheDecoder() {
+        val video = ready()
+        assertEquals("hw.hevc", video.stats.value.decoderName)
+        assertEquals("hw.hevc", video.stats.value.lastDecoderName)
+        video.reset()
+        thread.drain()
+        assertNull(video.stats.value.decoderName)
+        assertEquals("hw.hevc", video.stats.value.lastDecoderName)
+    }
 }
