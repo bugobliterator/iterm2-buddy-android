@@ -72,8 +72,10 @@ enum SyntheticChats {
     static let workgroupName = "Widget Review"
     /// A workgroup that has been torn down.
     static let missingWorkgroupID = "wg-E1F2A3B4-C5D6-4E7F-8091-A2B3C4D5E6F7"
-    /// Legacy PTYSession guids (UUID strings): the Mac-made session chat's
-    /// binding, and the notes session's guid before its shell reload.
+    /// PTYSession guids (UUID strings), the form older chats and mentions
+    /// carry: the Mac-made session chat's binding, and the notes session's
+    /// current guid (a shell reload rotates it; its stable ID stays), which a
+    /// `session:<uuid>` mention names.
     static let legacySessionGuid = "C3D4E5F6-0718-4293-A4B5-C6D7E8F90A1B"
     static let notesLegacyGuid = "1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E"
     /// A session guid no session has any more.
@@ -614,9 +616,12 @@ func agentChatSamples() throws -> [SessionSample] {
     // model pinned), flipped to orchestration for that mode, then
     // entry(forChatID:) (2220-2227). Its only message so far is the hidden
     // setPermissions, so no snippet.
-    let createdAt = C.at(600)
+    // create() publishes setPermissions right after adding the chat
+    // (ChatBroker.swift:120-131), and appending it bumps lastModifiedDate
+    // (ChatListModel.swift:313-314, 122-127): a few ms after creationDate.
     let createdOrchestrator = Chat(id: C.createdOrchestratorChatID, title: "Orchestrator",
-                                   creationDate: createdAt, lastModifiedDate: createdAt,
+                                   creationDate: C.at(600),
+                                   lastModifiedDate: wholeMillisecondDate(C.conversationStart + 600_000 + 3),
                                    orchestrationEnabled: true, terminalSessionGuid: nil, browserSessionGuid: nil,
                                    permissions: "", vectorStore: nil, modelName: C.modelName, modelVendor: nil,
                                    blobProtocol: nil, claimedScopes: [], watchers: [], icon: nil)
@@ -626,7 +631,8 @@ func agentChatSamples() throws -> [SessionSample] {
                                                    chat: createdOrchestrator, snippet: nil, muted: false)))))
     // A session mode files the guid as the terminal binding (1375-1381).
     let createdSession = Chat(id: C.createdSessionChatID, title: "New Chat",
-                              creationDate: C.at(610), lastModifiedDate: C.at(610),
+                              creationDate: C.at(610),
+                              lastModifiedDate: wholeMillisecondDate(C.conversationStart + 610_000 + 2),
                               orchestrationEnabled: false, terminalSessionGuid: SyntheticMac.shell.guid,
                               browserSessionGuid: nil, permissions: "", vectorStore: nil, modelName: C.modelName,
                               modelVendor: nil, blobProtocol: nil, claimedScopes: [], watchers: [], icon: nil)
@@ -809,11 +815,42 @@ func agentChatSamples() throws -> [SessionSample] {
     samples.append(try hostSample("turn-lifecycle-ended",
                                   HostEnvelope(requestID: nil,
                                                payload: .turnLifecycle(event: .ended, chatID: C.orchestratorChatID))))
-    // CompanionHostBridge.swift:1850-1858: the echo of delete-messages.
+    // CompanionHostBridge.swift:1850-1858: the echo of delete-messages. The
+    // Mac truncates its store from the earliest requested row to the end,
+    // taking hidden rows the phone never saw with it, keeping chat-state rows
+    // (ChatListModel.swift:246-263, 283-290), and reports every removed row in
+    // store order, then any requested ID it did not store (ChatBroker.swift:188-196).
+    // The store here is the history plus two hidden rows between its last two
+    // messages: the remote command's response (removed) and a setPermissions
+    // (chat state, kept).
+    let hiddenResponse = C.message(C.orchestratorChatID, .user,
+                                   .remoteCommandResponse(.success("2 passed, 1 failed"),
+                                                          fixedUUID("11111111-2222-4333-8444-000000000070"),
+                                                          "execute_command", nil),
+                                   sentDate: C.at(350), "11111111-2222-4333-8444-000000000350")
+    let keptPermissions = C.message(C.orchestratorChatID, .user, .setPermissions([]), sentDate: C.at(360),
+                                    "11111111-2222-4333-8444-000000000360")
+    require(hiddenResponse.hiddenFromClient && keptPermissions.hiddenFromClient, "a store-only row is visible")
+    let stored = Array(history.dropLast()) + [hiddenResponse, keptPermissions] + [history[history.count - 1]]
+    let requested = Set(removedIDs)
+    guard let truncateStart = stored.firstIndex(where: { requested.contains($0.uniqueID) }) else {
+        require(false, "messages-removed: no requested row is stored")
+        return samples
+    }
+    let truncated = stored[truncateStart...].filter { message in
+        switch message.content {
+        case .setPermissions, .vectorStoreCreated, .renameChat: return false  // isChatStateRow
+        default: return true
+        }
+    }.map(\.uniqueID)
+    let truncatedSet = Set(truncated)
+    let echoedIDs = truncated + removedIDs.filter { !truncatedSet.contains($0) }
+    require(echoedIDs.contains(hiddenResponse.uniqueID) && !echoedIDs.contains(keptPermissions.uniqueID)
+            && echoedIDs.count == removedIDs.count + 1, "messages-removed does not echo the truncated suffix")
     samples.append(try hostSample("messages-removed",
                                   HostEnvelope(requestID: nil,
                                                payload: .messagesRemoved(chatID: C.orchestratorChatID,
-                                                                         messageIDs: removedIDs))))
+                                                                         messageIDs: echoedIDs))))
     // CompanionHostBridge.swift:277-292: the whole list 0.5 s after a change;
     // here the session chat was deleted (delete-chat).
     samples.append(try hostSample("chat-list-changed",
@@ -912,9 +949,23 @@ func agentChatSamples() throws -> [SessionSample] {
         let text = String(decoding: sample.sortedWire, as: UTF8.self)
         require(text.matches(of: fractionalDates).isEmpty, "\(sample.name): a fractional date outside history")
     }
-    // Every delivered streaming delta names a message the phone holds.
-    require(samples.contains { $0.name == "delivery-append" } && samples.contains { $0.name == "delivery-append-attachment-code" },
-            "a streaming delta sample is missing")
+    // Every streaming delta names delivery-agent-opening's message.
+    let deltaNames = ["delivery-append", "delivery-append-attachment-code", "delivery-append-attachment-status"]
+    for name in deltaNames {
+        guard let sample = samples.first(where: { $0.name == name }),
+              let tree = try jsonObject(sample.sortedWire),
+              let delivery = (tree["payload"] as? [String: Any])?["delivery"] as? [String: Any],
+              let content = (delivery["message"] as? [String: Any])?["content"] as? [String: Any],
+              let kind = discriminator(content),
+              let body = content[kind] as? [String: Any] else {
+            require(false, "\(name): the streaming delta sample is missing or malformed")
+            continue
+        }
+        require(["append", "appendAttachment"].contains(kind), "\(name): not a streaming delta")
+        require(body["uuid"] as? String == reply.uniqueID.uuidString,
+                "\(name): the delta does not name delivery-agent-opening's message")
+        require(delivery["partial"] as? Bool == true, "\(name): a delta must be partial")
+    }
     return samples
 }
 

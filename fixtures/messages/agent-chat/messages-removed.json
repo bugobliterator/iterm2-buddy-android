@@ -1,5 +1,5 @@
 {
   "direction" : "macToPhone",
-  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.messagesRemoved(chatID: \"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E\", messageIDs: [11111111-2222-4333-8444-000000000300, 11111111-2222-4333-8444-000000000400]))",
-  "json" : {"payload":{"messagesRemoved":{"chatID":"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E","messageIDs":["11111111-2222-4333-8444-000000000300","11111111-2222-4333-8444-000000000400"]}}}
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.messagesRemoved(chatID: \"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E\", messageIDs: [11111111-2222-4333-8444-000000000300, 11111111-2222-4333-8444-000000000350, 11111111-2222-4333-8444-000000000400]))",
+  "json" : {"payload":{"messagesRemoved":{"chatID":"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E","messageIDs":["11111111-2222-4333-8444-000000000300","11111111-2222-4333-8444-000000000350","11111111-2222-4333-8444-000000000400"]}}}
 }

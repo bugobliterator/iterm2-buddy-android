@@ -199,10 +199,10 @@ func decodeToleranceVectors(samples: [SessionSample]) throws -> [DecodeTolerance
     return vectors
 }
 
-// MARK: - Streaming merge (AppModel.swift:5215-5275)
+// MARK: - Streaming merge (AppModel.swift:5215-5277)
 
 /// iOS AppModel `apply(_:into:chatID:)` and `applyStreamDelta`, ported line for
-/// line (AppModel.swift:5215-5275; mention bookkeeping left out). The text
+/// line (AppModel.swift:5215-5277: the rule is 5215-5275; mention bookkeeping left out). The text
 /// and attachment merges are upstream's compiled `Message.append`
 /// (Message.swift:627-691) and `Attachment.appending` (LLM.swift:158-191).
 func iosApply(_ message: Message, into transcript: inout [Message], chatID: String) {
@@ -478,9 +478,76 @@ struct MentionSplit: Encodable {
     }
 }
 
+/// One mention `MentionParser.protect` saw (it scans with atSignOptional
+/// true) and whether it swapped it for a placeholder.
+struct ProtectedMention: Encodable {
+    let location: Int
+    let length: Int
+    let identifier: String
+    let protected: Bool
+}
+
+struct ProtectCase: Encodable {
+    let name: String
+    let text: String
+    let indentedCodeBlocks: Bool
+    let mentions: [ProtectedMention]
+    /// protect's text with its random nonce replaced by "NONCE".
+    let protectedText: String
+}
+
+struct CanonicalCase: Encodable {
+    let name: String
+    let input: String
+    let canonical: String?
+
+    private enum CodingKeys: String, CodingKey { case name, input, canonical }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encode(input, forKey: .input)
+        try container.encode(canonical, forKey: .canonical)  // null when invalid
+    }
+}
+
 struct MentionParserVectors: Encodable {
     let cases: [MentionCase]
     let split: [MentionSplit]
+    let protect: [ProtectCase]
+    let canonical: [CanonicalCase]
+}
+
+/// `MentionParser.protect` (MentionParser.swift:157-182) on `text`. Its span
+/// regexes (unprotectedSpanRegex, indentedCodeLineRegex, MentionParser.swift:125-148)
+/// are private, so the vector records their effect: which of the mentions
+/// protect found it replaced. A placeholder is "iTermMention<32 hex>X<i>Z",
+/// so walking the mentions in order with a running offset tells which ones
+/// were replaced.
+func protectCase(_ name: String, _ text: String, indentedCodeBlocks: Bool = false) -> ProtectCase {
+    let found = MentionParser.mentions(in: text, atSignOptional: true)
+    let result = MentionParser.protect(text, indentedCodeBlocks: indentedCodeBlocks)
+    let protectedNS = result.text as NSString
+    var delta = 0
+    var mentions: [ProtectedMention] = []
+    for mention in found {
+        let location = mention.range.location + delta
+        let replaced = location + 12 <= protectedNS.length
+            && protectedNS.substring(with: NSRange(location: location, length: 12)) == "iTermMention"
+        if replaced {
+            let rest = protectedNS.substring(from: location) as NSString
+            let end = rest.range(of: "Z")
+            require(end.location != NSNotFound, "\(name): an unterminated placeholder")
+            delta += end.location + 1 - mention.range.length
+        }
+        mentions.append(ProtectedMention(location: mention.range.location, length: mention.range.length,
+                                         identifier: mention.identifier, protected: replaced))
+    }
+    require(mentions.filter(\.protected).count == result.substitutions.count,
+            "\(name): the protected mentions do not match protect's substitutions")
+    let normalized = result.text.replacing(try! Regex("iTermMention[0-9A-F]{32}X"), with: "iTermMentionNONCEX")
+    return ProtectCase(name: name, text: text, indentedCodeBlocks: indentedCodeBlocks, mentions: mentions,
+                       protectedText: normalized)
 }
 
 func mentionParserVectors() -> MentionParserVectors {
@@ -575,7 +642,58 @@ func mentionParserVectors() -> MentionParserVectors {
     require(cases.first { $0.name == "next-to-emoji" }?.mentions.first?.location == 2,
             "the emoji offset is not UTF-16")
     require(split.contains { $0.invalid == true } && split.contains { $0.invalid == nil }, "split has one verdict only")
-    return MentionParserVectors(cases: cases, split: split)
+    // MentionParser.protect: mentions in code spans, fenced blocks, link
+    // destinations, autolinks and bare URLs are left alone (MentionParser.swift:116-139).
+    let protect = [
+        protectCase("plain-paragraph-is-protected", "@\(shell) and @\(review) should pair up."),
+        protectCase("inline-code-span", "Run `@\(shell)` literally, then ask @\(review)."),
+        protectCase("double-backtick-code-span", "Run ``a `@\(shell)` b`` then @\(review)."),
+        protectCase("unclosed-backtick", "A stray ` before @\(shell) here."),
+        protectCase("code-span-does-not-cross-a-blank-line", "Open `quote\n\n@\(shell)` closed."),
+        protectCase("fenced-block", "Before @\(review)\n```\n@\(shell)\n```\nafter @\(notes)"),
+        protectCase("unterminated-fence-runs-to-the-end", "~~~\n@\(shell)\n@\(review)"),
+        protectCase("link-destination", "[the shell](@\(shell)) and [@\(review)](https://example.com)"),
+        protectCase("autolink", "See <https://example.com/@\(shell)> and @\(review)."),
+        protectCase("bare-url", "See https://example.com/@\(shell) and \(review)."),
+        protectCase("bare-stable-id-is-protected", "Ask \(shell) to run the tests."),
+        protectCase("indented-line-without-option", "    @\(shell)\n@\(review)"),
+        protectCase("indented-line-with-option", "    @\(shell)\n@\(review)", indentedCodeBlocks: true),
+        protectCase("tab-indented-code-with-option", "\t@\(shell) code", indentedCodeBlocks: true),
+        protectCase("tab-list-item-is-not-code", "\t- @\(shell) item", indentedCodeBlocks: true),
+        protectCase("no-mentions", "Nothing here.")
+    ]
+    require(protect.contains { $0.mentions.contains { !$0.protected } }
+            && protect.contains { $0.mentions.contains { $0.protected } }, "protect vectors have one verdict only")
+
+    // StableSessionID.canonical (StableSessionID.swift:85-133): the only fold
+    // of case and Crockford confusables; the mention regex is strict.
+    let canonicalInputs: [(String, String)] = [
+        ("canonical", shell),
+        ("lowercase", shell.lowercased()),
+        ("uppercase-prefix", "PTYS_" + shell.dropFirst(5)),
+        ("lowercase-l-for-one", shellConfusable),
+        ("uppercase-i-for-one", shell.replacingOccurrences(of: "1", with: "I")),
+        ("uppercase-l-for-one", shell.replacingOccurrences(of: "1", with: "L")),
+        ("lowercase-i-for-one", shell.replacingOccurrences(of: "1", with: "i")),
+        ("uppercase-o-for-zero", reviewConfusable),
+        ("lowercase-o-for-zero", review.replacingOccurrences(of: "0", with: "o")),
+        ("u-is-not-in-the-alphabet", String(shell.dropLast(2)) + "U" + String(shell.suffix(1))),
+        ("bad-check-character", badCheck),
+        ("too-short", String(shell.dropLast())),
+        ("too-long", shell + "0"),
+        ("wrong-prefix", "ptyx_" + shell.dropFirst(5)),
+        ("uuid", uuid),
+        ("empty", "")
+    ]
+    let canonical = canonicalInputs.map {
+        CanonicalCase(name: $0.0, input: $0.1, canonical: StableSessionID.canonical($0.1))
+    }
+    require(canonical.first { $0.name == "lowercase-l-for-one" }?.canonical == shell
+            && canonical.first { $0.name == "uppercase-o-for-zero" }?.canonical == review,
+            "canonical does not fold confusables")
+    require(canonical.contains { $0.canonical == nil }, "canonical vectors have no invalid input")
+    require(mentionCount("crockford-confusable-l-for-one") == 0, "the parser now matches a confusable")
+    return MentionParserVectors(cases: cases, split: split, protect: protect, canonical: canonical)
 }
 
 // MARK: - Status update display (LLM.swift:106-133, 516-551)
@@ -691,6 +809,7 @@ func writeChatVectors(samples: [SessionSample], to directory: URL) throws {
     require(!tolerance.isEmpty && !merge.isEmpty && !mentions.cases.isEmpty && !mentions.split.isEmpty
             && !statuses.isEmpty && !commands.isEmpty, "a chat vector list is empty")
     for names in [tolerance.map(\.name), merge.map(\.name), mentions.cases.map(\.name), mentions.split.map(\.name),
+                  mentions.protect.map(\.name), mentions.canonical.map(\.name),
                   statuses.map(\.name), commands.map(\.name)] {
         require(Set(names).count == names.count, "duplicate chat vector name")
     }
@@ -701,5 +820,6 @@ func writeChatVectors(samples: [SessionSample], to directory: URL) throws {
     try writeChatVector(commands, named: "remote-command-description.json", to: directory)
     print("wire-fixtures: wrote \(directory.path): decodeTolerance=\(tolerance.count) streamingMerge=\(merge.count) "
           + "mentionCases=\(mentions.cases.count) mentionSplits=\(mentions.split.count) "
+          + "mentionProtect=\(mentions.protect.count) canonical=\(mentions.canonical.count) "
           + "statusUpdates=\(statuses.count) remoteCommands=\(commands.count)")
 }
