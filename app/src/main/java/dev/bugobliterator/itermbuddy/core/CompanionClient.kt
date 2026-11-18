@@ -1,6 +1,8 @@
 package dev.bugobliterator.itermbuddy.core
 
 import android.util.Log
+import dev.bugobliterator.itermbuddy.core.chat.ChatInput
+import dev.bugobliterator.itermbuddy.core.chat.ChatSink
 import dev.bugobliterator.itermbuddy.core.noise.DEFAULT_MAX_MESSAGE_BYTES
 import dev.bugobliterator.itermbuddy.core.noise.NoiseChannel
 import dev.bugobliterator.itermbuddy.core.noise.NoiseException
@@ -29,6 +31,7 @@ import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.MacStatus
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.core.wire.ProtocolRevision
+import dev.bugobliterator.itermbuddy.core.wire.decodeEnvelope
 import dev.bugobliterator.itermbuddy.core.wire.hasUndecodableMacStatus
 import dev.bugobliterator.itermbuddy.core.wire.macStatus
 import dev.bugobliterator.itermbuddy.store.PairingRecord
@@ -90,10 +93,12 @@ import kotlin.time.TimeSource
  *   `messageTooLarge` and the client reconnects.
  * @property maxQueuedBytes (addition) bound on received relay frames not yet read; over it the
  *   relay connection is closed and the client reconnects. Never a dropped frame.
- * @property sinkStall (addition) the longest the stream sink may take over one input. Over it a
- *   media or control input ends the link as lost (the client reconnects), and a link marker
- *   is missed and logged, so the connect flow, [CompanionClient.cancel] and
- *   [CompanionClient.unpair] never wait longer than this on the sink.
+ * @property sinkStall (addition) the longest the stream sink or the chat sink may take over one
+ *   input. Over it a media, control or chat input ends the link as lost (the client reconnects),
+ *   and a link marker is missed and logged, so the connect flow, [CompanionClient.cancel] and
+ *   [CompanionClient.unpair] never wait longer than this on one marker. A link sinks two LinkUps
+ *   (stream, then chat), so the connect flow's worst case before Connected is twice this, and two
+ *   LinkDowns, so a teardown's is twice this too: accepted, since neither sink blocks in practice.
  */
 data class ClientTimeouts(
     val handshakeFresh: Duration = 15.seconds,
@@ -176,14 +181,21 @@ sealed interface ClientState {
  * @param log diagnostics; never given secrets or registration tokens.
  * @param streamSink where media and stream-scoped control go, in wire order, bracketed per link by
  *   [StreamInput.LinkUp] and [StreamInput.LinkDown]; with null they are dropped and logged by kind.
+ * @param chatSink where chat-scoped messages and unsolicited errors go, in wire order, bracketed
+ *   per link by [ChatInput.LinkUp] and [ChatInput.LinkDown] ([ChatInput]); with null they are
+ *   dropped and logged by kind. They never reach [events] (an unsolicited `error` reaches both).
+ * @param maxHistoryBytes the chat history cap: a longer `history` frame is never parsed and
+ *   reaches [chatSink] as [ChatInput.HistoryTooLarge].
  *
  * Links: each connection that reaches the connected step (7) is a link, numbered from 1. At step
  * 7 the link becomes current (so [send] and [request] with `onLink` reach it), then
- * [StreamInput.LinkUp] is sunk, then the state goes [ClientState.Connected]. When the session ends
- * it is closed first, its receive loop has stopped, and then [StreamInput.LinkDown] is sunk,
- * uncancellably, so [cancel], [unpair] and [pair] never lose it. Each marker waits at most
- * [ClientTimeouts.sinkStall] for the sink and is missed after that (see [StreamInput]); a link
- * cancelled during its LinkUp still gets its LinkDown.
+ * [StreamInput.LinkUp] and [ChatInput.LinkUp] are sunk, in that order, then the state goes
+ * [ClientState.Connected]. When the session ends it is closed first, its receive loop has
+ * stopped, and then [StreamInput.LinkDown] and [ChatInput.LinkDown] are sunk, in that order,
+ * uncancellably, so [cancel], [unpair] and [pair] never lose them. Each marker waits at most
+ * [ClientTimeouts.sinkStall] for its sink and is missed after that (see [StreamInput]); a missed
+ * LinkUp of either ends the link before anything reaches either sink on it, and a link cancelled
+ * during its LinkUps still gets both LinkDowns.
  */
 class CompanionClient internal constructor(
     private val store: PairingStore,
@@ -196,6 +208,9 @@ class CompanionClient internal constructor(
     private val storeContext: CoroutineContext,
     private val log: (String) -> Unit,
     private val streamSink: StreamSink? = null,
+    private val chatSink: ChatSink? = null,
+    private val maxHistoryBytes: Int = DEFAULT_MAX_HISTORY_BYTES,
+    private val envelopeDecoder: (ByteArray) -> Pair<Long?, MacMessage> = { decodeEnvelope(it) },
 ) : StreamLink {
     constructor(
         store: PairingStore,
@@ -206,6 +221,8 @@ class CompanionClient internal constructor(
         random: Random = Random.Default,
         log: (String) -> Unit = { Log.i(TAG, it) },
         streamSink: StreamSink? = null,
+        chatSink: ChatSink? = null,
+        maxHistoryBytes: Int = DEFAULT_MAX_HISTORY_BYTES,
     ) : this(
         store,
         OkHttpRelayTransport(
@@ -222,6 +239,8 @@ class CompanionClient internal constructor(
         Dispatchers.IO,
         log,
         streamSink,
+        chatSink,
+        maxHistoryBytes,
     )
 
     private val stateFlow = MutableStateFlow<ClientState>(ClientState.Unpaired)
@@ -232,8 +251,10 @@ class CompanionClient internal constructor(
     private val eventFlow = MutableSharedFlow<MacMessage>(extraBufferCapacity = EVENT_BUFFER)
 
     /**
-     * Unsolicited messages from the Mac: envelopes with no request ID or one nobody waits for.
-     * Media and stream-scoped messages never come here; they go to the stream sink.
+     * Unsolicited messages from the Mac: envelopes with no request ID. A reply nobody waits for is
+     * dropped, never sent here. Media and stream-scoped messages never come here (they go to the
+     * stream sink), nor do chat-scoped ones (the chat sink); an unsolicited `error` comes here and
+     * goes to the chat sink too.
      */
     val events: SharedFlow<MacMessage> = eventFlow.asSharedFlow()
 
@@ -470,16 +491,23 @@ class CompanionClient internal constructor(
      * the caller ends the link on a missed LinkUp. A sink that throws is logged and counts as
      * having taken the marker, as a throwing accept of a Media does.
      */
-    private suspend fun sinkLink(input: StreamInput): Boolean {
-        val target = streamSink ?: return true
+    private suspend fun sinkLink(input: StreamInput): Boolean =
+        sinkMarker("stream", input, streamSink?.let { target -> { target.accept(input) } })
+
+    /** [sinkLink] for the chat sink. */
+    private suspend fun sinkChatLink(input: ChatInput): Boolean =
+        sinkMarker("chat", input, chatSink?.let { target -> { target.accept(input) } })
+
+    private suspend fun sinkMarker(name: String, input: Any, accept: (suspend () -> Unit)?): Boolean {
+        if (accept == null) return true
         return try {
-            val taken = withTimeoutOrNull(timeouts.sinkStall) { target.accept(input) } != null
-            if (!taken) log("the stream sink missed $input: it did not take it within ${timeouts.sinkStall}")
+            val taken = withTimeoutOrNull(timeouts.sinkStall) { accept() } != null
+            if (!taken) log("the $name sink missed $input: it did not take it within ${timeouts.sinkStall}")
             taken
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            log("the stream sink failed on ${input.javaClass.simpleName}: ${e.javaClass.simpleName}")
+            log("the $name sink failed on ${input.javaClass.simpleName}: ${e.javaClass.simpleName}")
             true
         }
     }
@@ -839,6 +867,9 @@ class CompanionClient internal constructor(
                         sink = streamSink,
                         sinkStall = timeouts.sinkStall,
                         arrivals = treeArrivals,
+                        chatSink = chatSink,
+                        maxHistoryBytes = maxHistoryBytes,
+                        decode = envelopeDecoder,
                     )
                     self = live
                     ownMacStatus(live)
@@ -857,13 +888,14 @@ class CompanionClient internal constructor(
             }
         }
 
-        /** The link id of this attempt's session once it reached step 7, until its [StreamInput.LinkDown]. */
+        /** The link id of this attempt's session once it reached step 7, until its LinkDowns. */
         private var linkId: Long? = null
 
         /**
          * Ends [live]: it stops being current and is closed, its receive loop stops, and then, if it
-         * was a link, [StreamInput.LinkDown] is sunk. Uncancellable from the close on, so a
-         * cancelled flow ([cancel], [unpair], [pair]) still delivers it. Idempotent.
+         * was a link, [StreamInput.LinkDown] and then [ChatInput.LinkDown] are sunk. Uncancellable
+         * from the close on, so a cancelled flow ([cancel], [unpair], [pair]) still delivers them.
+         * Idempotent.
          */
         private suspend fun endLink(live: CompanionSession) {
             if (active?.session === live) active = null
@@ -874,6 +906,7 @@ class CompanionClient internal constructor(
             withContext(NonCancellable) {
                 live.awaitStopped()
                 sinkLink(StreamInput.LinkDown(ended, live.messageTooLarge))
+                sinkChatLink(ChatInput.LinkDown(ended, live.messageTooLarge))
             }
         }
 
@@ -1030,9 +1063,11 @@ class CompanionClient internal constructor(
             linkId = id
             val linkUpTaken = live.linkUp(id) {
                 active = ActiveLink(id, live)
-                sinkLink(StreamInput.LinkUp(id, revision))
+                // A missed stream LinkUp ends the link at once: the chat sink's would be wasted.
+                sinkLink(StreamInput.LinkUp(id, revision)) &&
+                    sinkChatLink(ChatInput.LinkUp(id, revision, helloReply.aiAvailable))
             }
-            // A missed LinkUp has closed the session: nothing flows on a link the sink never saw.
+            // A missed LinkUp has closed the session: nothing flows on a link a sink never saw.
             if (!linkUpTaken) return End.Lost(null)
             setState(ClientState.Connected(revision))
             return select {

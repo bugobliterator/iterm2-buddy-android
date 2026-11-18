@@ -1,5 +1,8 @@
 package dev.bugobliterator.itermbuddy.core
 
+import dev.bugobliterator.itermbuddy.core.chat.ChatInput
+import dev.bugobliterator.itermbuddy.core.chat.ChatSink
+import dev.bugobliterator.itermbuddy.core.chat.isChatScoped
 import dev.bugobliterator.itermbuddy.core.input.InputTrace
 import dev.bugobliterator.itermbuddy.core.input.isTracedInput
 import dev.bugobliterator.itermbuddy.core.input.traceEnvelope
@@ -20,10 +23,12 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamSink
 import dev.bugobliterator.itermbuddy.core.stream.isStreamScoped
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
+import dev.bugobliterator.itermbuddy.core.wire.RAW_CHAT_CASES
 import dev.bugobliterator.itermbuddy.core.wire.WireDecodeException
 import dev.bugobliterator.itermbuddy.core.wire.decodeEnvelope
 import dev.bugobliterator.itermbuddy.core.wire.decodePairingConfirmation
 import dev.bugobliterator.itermbuddy.core.wire.encodeEnvelope
+import dev.bugobliterator.itermbuddy.core.wire.peekEnvelope
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -140,15 +145,32 @@ internal enum class ConfirmationMode {
  *
  * Routing, after the first-frame confirmation check: a frame whose first byte is `0x01` is media
  * and goes to [sink] as [StreamInput.Media] (the frame as decrypted; the marker is skipped by
- * offset, never copied off). A stream-scoped message
- * ([isStreamScoped]) goes to [sink] as [StreamInput.Control], whether or not a request waits for
- * it; a waiting request is completed only after [StreamSink.accept] returns. Neither ever reaches
- * [onEvent]. Everything else goes to its waiting request or to [onEvent], as before.
+ * offset, never copied off). Every other frame is first peeked ([peekEnvelope]: its request ID
+ * and payload case, by one allocation-free scan; a frame the peek rejects is dropped as one that
+ * does not decode). Then:
+ * - A chat case whose body can be big ([RAW_CHAT_CASES]: `history`, `chatsAndSessions`,
+ *   `chatListChanged`) is never parsed here: it goes to [chatSink] as [ChatInput.Payload], the
+ *   frame's own bytes; a `history` longer than [maxHistoryBytes] goes as
+ *   [ChatInput.HistoryTooLarge] instead, judged by its length alone, its bytes dropped. Its
+ *   waiting request, if any, then completes with [MacMessage.ChatPayloadTaken]. The peek can
+ *   accept a frame [decodeEnvelope] would reject; the consumer finds that out when it decodes
+ *   ([ChatInput.Payload.decode]) and reports it as the request's outcome.
+ * - Any other frame is decoded ([decode]). A stream-scoped message ([isStreamScoped]) goes to
+ *   [sink] as [StreamInput.Control]; a chat-scoped one ([isChatScoped]) goes to [chatSink] as
+ *   [ChatInput.Message]; either way whether or not a request waits for it, and a waiting request
+ *   is completed only after the sink took it. Neither ever reaches [onEvent]. An unsolicited
+ *   `error` goes to [chatSink] and then to [onEvent] (a refused `deleteChat` comes back so).
+ *   Everything else goes to its waiting request or to [onEvent], as before.
  *
- * The loop awaits [StreamSink.accept] before it reads the next frame: back-pressure, never a drop.
- * Stream inputs are dropped (logged by kind only) when there is no [sink] or before [linkUp].
+ * The loop awaits each accept before it reads the next frame: back-pressure, never a drop. Both
+ * sinks are fed under one lock, the same one [linkUp] holds while it announces the link, so stream
+ * and chat inputs keep one wire order between them and each sink sees its LinkUp first. Inputs are
+ * dropped (logged by kind or case only) when their sink is null or before [linkUp]. A chat reply
+ * the chat sink did not take (none, dropped, stalled or threw) is never handed to its waiter,
+ * which then fails at its bound or when the session ends: a request never reports a reply the
+ * chat feature did not see.
  *
- * Sink bounds:
+ * Sink bounds (the same for either sink, which share them):
  * - One accept longer than [sinkStall], or one that throws a cancellation of its own while the
  *   loop is active, ends the session: the frames already queued are read without waiting
  *   (replies and `unpaired` are honoured; stream inputs are dropped and their waiters left to
@@ -167,6 +189,9 @@ internal enum class ConfirmationMode {
  * @param sink where stream inputs go once the link is up; null drops them.
  * @param sinkStall the longest one accept may take before the session ends.
  * @param arrivals the session-tree arrival counter; the client shares one across all its links.
+ * @param chatSink where chat inputs go once the link is up; null drops them.
+ * @param maxHistoryBytes the chat history cap: a longer `history` frame is never parsed.
+ * @param decode the envelope decoder for every frame that is not raw chat; tests count its calls.
  */
 internal class CompanionSession(
     private val socket: RelaySocket,
@@ -177,6 +202,9 @@ internal class CompanionSession(
     private val sink: StreamSink? = null,
     private val sinkStall: Duration = DEFAULT_SINK_STALL,
     private val arrivals: AtomicLong = AtomicLong(),
+    private val chatSink: ChatSink? = null,
+    private val maxHistoryBytes: Int = DEFAULT_MAX_HISTORY_BYTES,
+    private val decode: (ByteArray) -> Pair<Long?, MacMessage> = { decodeEnvelope(it) },
 ) {
     private val sendLock = Mutex()
     private val nextRequestID = AtomicLong(1)
@@ -211,10 +239,13 @@ internal class CompanionSession(
 
     private var receiveJob: Job? = null
 
-    /** Held while the link is announced and while each stream input is accepted, so [StreamInput.LinkUp] comes first. */
+    /**
+     * Held while the link is announced and while each stream or chat input is accepted, so each
+     * sink's LinkUp comes first and the two sinks share one wire order.
+     */
     private val streamLock = Mutex()
 
-    /** The link id once [linkUp] has run; stream inputs before it are dropped. */
+    /** The link id once [linkUp] has run; stream and chat inputs before it are dropped. */
     @Volatile
     private var linkId: Long? = null
 
@@ -303,11 +334,11 @@ internal class CompanionSession(
     }
 
     /**
-     * Makes this session link [id]: stream inputs from here on carry it. [announce] runs first,
-     * before any stream input on the link reaches the sink, so it can deliver [StreamInput.LinkUp].
-     * When [announce] returns false (the sink missed the LinkUp) the session is closed before the
-     * stream lock is released, so nothing reaches the sink on a link it never saw come up; this
-     * then returns false.
+     * Makes this session link [id]: stream and chat inputs from here on carry it. [announce] runs
+     * first, before any input on the link reaches either sink, so it can deliver
+     * [StreamInput.LinkUp] and [ChatInput.LinkUp]. When [announce] returns false (a sink missed its
+     * LinkUp) the session is closed before the lock is released, so nothing reaches a sink on a
+     * link it never saw come up; this then returns false.
      */
     suspend fun linkUp(id: Long, announce: suspend () -> Boolean): Boolean = streamLock.withLock {
         linkId = id
@@ -391,7 +422,7 @@ internal class CompanionSession(
                 heardFromMac = true
                 handle(plaintext)
             }
-            if (endingForSink) log("ending the link: the stream sink failed or stalled")
+            if (endingForSink) log("ending the link: the stream or chat sink failed or stalled")
         } catch (e: CancellationException) {
             throw e
         } catch (e: RelayClosedException) {
@@ -435,8 +466,19 @@ internal class CompanionSession(
             deliver("Media") { StreamInput.Media(it, plaintext) }
             return
         }
+        val peek = try {
+            peekEnvelope(plaintext)
+        } catch (e: WireDecodeException) {
+            // The peek's messages name keys and positions only, as the decoder's do.
+            log("dropped a frame that does not decode: ${e.message}")
+            return
+        }
+        if (peek.case in RAW_CHAT_CASES) {
+            deliverRawChat(peek.case, peek.requestID, plaintext)
+            return
+        }
         val (requestID, decoded) = try {
-            decodeEnvelope(plaintext)
+            decode(plaintext)
         } catch (e: WireDecodeException) {
             log("dropped a frame that does not decode: ${e.message}")
             return
@@ -450,6 +492,17 @@ internal class CompanionSession(
             deliver(message.javaClass.simpleName) { StreamInput.Control(it, requestID, message) }
             if (!endingForSink) requestID?.let { pending.remove(it) }?.complete(message)
             return
+        }
+        if (isChatScoped(peek.case)) {
+            // As for stream messages: the sink first, then the waiter, and a reply nobody waits for
+            // any more still reaches the sink (it is news: a late chatCreated, say).
+            val taken = deliverChat(message.javaClass.simpleName) { ChatInput.Message(it, requestID, message) }
+            if (taken && !endingForSink) requestID?.let { pending.remove(it) }?.complete(message)
+            return
+        }
+        if (requestID == null && message is MacMessage.Error && chatSink != null) {
+            // An unsolicited error is chat news too (a refused deleteChat, HB:458-470) as well as an event.
+            deliverChat("Error") { ChatInput.Message(it, null, message) }
         }
         if (requestID != null) {
             val waiter = pending.remove(requestID)
@@ -467,37 +520,66 @@ internal class CompanionSession(
     }
 
     /**
-     * Hands one stream input to the sink and waits, at most [sinkStall], for it to be taken.
-     * [kind] is all that is logged: inputs carry terminal content.
+     * A [RAW_CHAT_CASES] frame: to the chat sink unparsed ([ChatInput.Payload]), or, for a `history`
+     * over [maxHistoryBytes], as [ChatInput.HistoryTooLarge] with its bytes dropped. Its waiter
+     * completes with [MacMessage.ChatPayloadTaken] only once the sink took it. [case] is all that is
+     * logged.
      */
+    private suspend fun deliverRawChat(case: String, requestID: Long?, plaintext: ByteArray) {
+        val size = plaintext.size
+        val tooLarge = case == HISTORY_CASE && size > maxHistoryBytes
+        if (tooLarge) log("a history of $size bytes is over the chat history cap of $maxHistoryBytes; not parsed")
+        val taken = deliverChat(case) { id ->
+            if (tooLarge) ChatInput.HistoryTooLarge(id, requestID, size) else ChatInput.Payload(id, requestID, case, plaintext)
+        }
+        if (taken && !endingForSink) requestID?.let { pending.remove(it) }?.complete(MacMessage.ChatPayloadTaken(case, size))
+    }
+
+    /** Hands one stream input to [sink]; see [deliverTo]. */
     private suspend fun deliver(kind: String, input: (linkId: Long) -> StreamInput) {
-        val target = sink
-        if (target == null || endingForSink) {
-            log("dropped a stream input ($kind): ${if (target == null) "no stream sink" else "the stream sink failed or stalled"}")
-            return
+        deliverTo("stream", sink?.let { target -> { linkId: Long -> target.accept(input(linkId)) } }, kind)
+    }
+
+    /** Hands one chat input to [chatSink]; see [deliverTo]. Returns whether the sink took it. */
+    private suspend fun deliverChat(kind: String, input: (linkId: Long) -> ChatInput): Boolean =
+        deliverTo("chat", chatSink?.let { target -> { linkId: Long -> target.accept(input(linkId)) } }, kind)
+
+    /**
+     * Runs [accept] for one input of the [name]d sink under the ordering lock with the link id, and
+     * waits, at most [sinkStall], for it to return. Returns whether it did (false when dropped, the
+     * sink stalled or threw). [kind] is all that is logged: inputs carry terminal and chat content.
+     */
+    private suspend fun deliverTo(name: String, accept: (suspend (linkId: Long) -> Unit)?, kind: String): Boolean {
+        if (accept == null || endingForSink) {
+            log("dropped a $name input ($kind): ${if (accept == null) "no $name sink" else "the $name sink failed or stalled"}")
+            return false
         }
         streamLock.withLock {
             val id = linkId
             if (id == null) {
-                log("dropped a stream input ($kind): the link is not up yet")
-                return
+                log("dropped a $name input ($kind): the link is not up yet")
+                return false
             }
             acceptsBegun.incrementAndGet()
             accepting = true
             try {
-                val taken = withTimeoutOrNull(sinkStall) { target.accept(input(id)) }
+                val taken = withTimeoutOrNull(sinkStall) { accept(id) }
                 if (taken == null) {
-                    log("the stream sink did not take $kind within $sinkStall; ending the link")
+                    log("the $name sink did not take $kind within $sinkStall; ending the link")
                     endingForSink = true
+                    return false
                 }
+                return true
             } catch (e: CancellationException) {
                 // The receive loop itself is being cancelled: pass it on. Otherwise the sink threw
                 // a cancellation of its own (its scope died): a sink failure that ends the link.
                 if (!currentCoroutineContext().isActive) throw e
-                log("the stream sink failed on $kind: ${e.javaClass.simpleName}; ending the link")
+                log("the $name sink failed on $kind: ${e.javaClass.simpleName}; ending the link")
                 endingForSink = true
+                return false
             } catch (e: Exception) {
-                log("the stream sink failed on $kind: ${e.javaClass.simpleName}")
+                log("the $name sink failed on $kind: ${e.javaClass.simpleName}")
+                return false
             } finally {
                 accepting = false
             }
@@ -519,11 +601,20 @@ internal class CompanionSession(
 
         /** Slices of a request's bound it may wait on behind a busy sink: one more bound in all. */
         const val EXTENSION_SLICES = 10
+
+        const val HISTORY_CASE = "history"
     }
 }
 
 /** Default for [ClientTimeouts.sinkStall]. */
 internal val DEFAULT_SINK_STALL: Duration = 30.seconds
+
+/**
+ * The chat history cap (the client's `maxHistoryBytes`): a `history` frame longer than this, 8 MiB,
+ * is never parsed and reaches the chat sink as [ChatInput.HistoryTooLarge]. Well under the 32 MiB
+ * Noise cap; the tree decode's peak at this size fits the Pixel's heap (`HistoryMemoryTest`).
+ */
+const val DEFAULT_MAX_HISTORY_BYTES: Int = 8 shl 20
 
 /** How a session ended: [relayClose] is the relay's close frame, null for anything else. */
 internal data class SessionEnd(val relayClose: RelayClose?)

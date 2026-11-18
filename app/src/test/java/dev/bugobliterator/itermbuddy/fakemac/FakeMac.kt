@@ -107,6 +107,9 @@ interface MacRelay {
  *   `requestKeyframe` is answered at once with the stream's config and a keyframe, which bypasses
  *   the limiter, as a requested keyframe does on the Mac; [delayReply] holds back the next reply
  *   to a case.
+ * - Chat: [onRequestScripted] answers a request with a scripted run of messages (a `history`
+ *   reply, then the subscribe snapshot), and [helloAiAvailable] sets the hello's `aiAvailable`;
+ *   [FakeChatMac] builds the chat side of the Mac on these.
  */
 class FakeMac(
     private val relay: MacRelay,
@@ -143,6 +146,12 @@ class FakeMac(
      */
     @Volatile var helloMacStatus: JsonObject? = null
 
+    /**
+     * The `aiAvailable` the hello reply carries (revision 13, `MSG:986-991`); `hello-mac.json` has
+     * true. Null omits the key, as a Mac that predates it does.
+     */
+    @Volatile var helloAiAvailable: Boolean? = true
+
     /** When false, requests are recorded but never answered (a stalled Mac whose relay link is fine). */
     @Volatile var answering = true
 
@@ -172,6 +181,9 @@ class FakeMac(
 
     /** Handlers that answer a request case instead of the built-in replies; see [onRequest]. */
     private val requestHandlers = ConcurrentHashMap<String, (JsonObject) -> JsonObject?>()
+
+    /** Scripts that answer a request case with any number of messages; see [onRequestScripted]. */
+    private val scriptedHandlers = ConcurrentHashMap<String, suspend (JsonObject) -> Unit>()
 
     val parks = AtomicInteger()
     val handshakes = AtomicInteger()
@@ -357,6 +369,16 @@ class FakeMac(
      */
     fun onRequest(case: String, answer: (JsonObject) -> JsonObject?) {
         requestHandlers[case] = answer
+    }
+
+    /**
+     * Answers requests whose payload case is [case] by running [script] with the phone's envelope,
+     * inside the serve loop, before the next frame from the phone is read: it sends whatever it
+     * likes with [sendMessage], [sendSample] or [sendRaw], in order (a `history` reply and then the
+     * subscribe snapshot, say). Takes precedence over [onRequest] and the built-in replies.
+     */
+    fun onRequestScripted(case: String, script: suspend (JsonObject) -> Unit) {
+        scriptedHandlers[case] = script
     }
 
     /** The next reply to a request whose case is [case] is sent [by] later; the serve loop is not held up. */
@@ -546,6 +568,11 @@ class FakeMac(
         val requestID = (envelope["requestID"] as? JsonPrimitive)?.long
         val payload = envelope.getValue("payload").jsonObject
         val case = payload.keys.single()
+        val script = scriptedHandlers[case]
+        if (script != null) {
+            script(envelope)
+            return
+        }
         val handler = requestHandlers[case]
         if (handler != null) {
             handler(envelope)?.let { send(current, envelope(it, requestID)) }
@@ -633,7 +660,9 @@ class FakeMac(
     private fun helloReply(requestID: Long?): ByteArray {
         val sample = fixtureJson("hello-mac.json")
         val hello = sample.getValue("payload").jsonObject.getValue("hello").jsonObject
-        val fields = hello + mapOf("revision" to JsonPrimitive(revision), "minimumPeer" to JsonPrimitive(minimumPeer))
+        val ai = helloAiAvailable
+        val withAi = if (ai == null) hello - "aiAvailable" else hello + ("aiAvailable" to JsonPrimitive(ai))
+        val fields = withAi + mapOf("revision" to JsonPrimitive(revision), "minimumPeer" to JsonPrimitive(minimumPeer))
         val body = JsonObject(helloMacStatus?.let { fields + ("macStatus" to it) } ?: fields)
         return envelope(JsonObject(mapOf("hello" to body)), requestID)
     }
