@@ -11,6 +11,7 @@ import dev.bugobliterator.itermbuddy.core.CompanionRequestException
 import dev.bugobliterator.itermbuddy.core.input.InputSender
 import dev.bugobliterator.itermbuddy.core.input.InputTrace
 import dev.bugobliterator.itermbuddy.core.input.isInputTarget
+import dev.bugobliterator.itermbuddy.core.stream.SelectionDriver
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
 import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.core.stream.fitToPhone
@@ -56,6 +57,9 @@ import kotlin.time.Duration.Companion.seconds
  * activity is recreated is still sent, and it sends only while its target is the controller's
  * active stream (same link, watch epoch and session; [isInputTarget]).
  *
+ * [selection] drives the live view's terminal selection and copy on the controller's active
+ * stream, app-scoped like [input] so a drag's end is still sent across activity recreation.
+ *
  * [video] is never closed: it lives as long as the process. An Application has no reliable end
  * (`onTerminate` never runs on a device), and process death takes the codec and the decoder
  * thread with it; the decoder itself exists only while the live view attaches a surface.
@@ -91,6 +95,10 @@ class CompanionApp : Application() {
 
     /** Keys and pastes for the live session; see the class comment. */
     lateinit var input: InputSender
+        private set
+
+    /** Selection gestures, Select All, Clear and Copy for the live session; see the class comment. */
+    lateinit var selection: SelectionDriver
         private set
 
     private val started = AtomicBoolean(false)
@@ -168,6 +176,13 @@ class CompanionApp : Application() {
             isCurrent = { target -> isInputTarget(sessions.controller.activeStream.value, target) },
             log = { Log.i(INPUT_TAG, it) },
         )
+        selection = SelectionDriver(
+            link = sessions.client,
+            active = sessions.controller.activeStream,
+            selection = sessions.controller.selection,
+            scope = scope,
+            log = { Log.i(SELECTION_TAG, it) },
+        )
         // Application.onCreate runs on the main thread, as addObserver requires.
         ProcessLifecycleOwner.get().lifecycle.addObserver(
             object : DefaultLifecycleObserver {
@@ -241,6 +256,7 @@ class CompanionApp : Application() {
         const val TAG = "CompanionApp"
         const val STREAM_TAG = "StreamController"
         const val INPUT_TAG = "InputSender"
+        const val SELECTION_TAG = "SelectionDriver"
         val UNPAIR_FAILED_SHOWN = 5.seconds
     }
 }

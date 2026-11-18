@@ -105,7 +105,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val version = appVersion()
         val sessions = app.sessions
-        val video = LiveVideoSource(app.video, sessions.controller.state, sessions.controller.historyTiles)
+        val video = LiveVideoSource(app.video, sessions.controller.state, sessions.controller.historyTiles, app.selection)
         val debugBuild = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         // The live view reads the stream's session and config; liveTop moves with the output, so
         // it is dropped here rather than recompose the whole home on every scroll.
