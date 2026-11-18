@@ -109,6 +109,9 @@ internal class ChatRig(
     /** When set, the Mac echoes each `publish` back as a `delivery` (`HB:1812-1823`). */
     @Volatile var echoPublishes = false
 
+    /** When set, a `publish` waits for it before going to the client, as behind the session's send lock. */
+    @Volatile var publishGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
     /** The link each `publish` was sent on (`onLink`), in order. */
     val publishLinks = CopyOnWriteArrayList<Long?>()
 
@@ -118,6 +121,7 @@ internal class ChatRig(
             if (message is PhoneMessage.Publish) {
                 publishLinks += onLink
                 if (failPublishes) throw RequestNotSentException("the frame could not be sent")
+                publishGate?.await()
             }
             client.send(message, onLink)
         }

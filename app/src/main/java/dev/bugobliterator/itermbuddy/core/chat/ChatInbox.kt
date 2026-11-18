@@ -70,7 +70,7 @@ class ChatInbox(
     private class Incoming(val input: ChatInput, val bytes: Long) : Item
 
     /** Work posted by the chat feature itself (a request's outcome): no slot, in order with the inputs. */
-    private class Posted(val block: suspend () -> Unit) : Item
+    private class Posted(val block: suspend () -> Unit, val onDropped: () -> Unit) : Item
 
     private data class Usage(val items: Int, val bytes: Long, val stopped: Boolean = false)
 
@@ -109,7 +109,16 @@ class ChatInbox(
                 }
             }
         }
-        consumer.invokeOnCompletion { usage.update { it.copy(stopped = true) } }
+        consumer.invokeOnCompletion {
+            usage.update { it.copy(stopped = true) }
+            // Nothing more will run: posted work still queued, or posted from now on, is dropped
+            // and told so.
+            items.close()
+            while (true) {
+                val item = items.tryReceive().getOrNull() ?: break
+                if (item is Posted) item.onDropped()
+            }
+        }
     }
 
     /** Whether the consumer has stopped (its scope was cancelled); [accept] then fails at once. */
@@ -139,10 +148,12 @@ class ChatInbox(
 
     /**
      * Runs [block] on the consumer after everything enqueued so far. It bypasses the item and byte
-     * bounds (it takes no slot) and never suspends the caller; dropped once the consumer has stopped.
+     * bounds (it takes no slot) and never suspends the caller; dropped once the consumer has stopped,
+     * when [onDropped] runs instead (on the caller's thread, or on the thread that stopped the
+     * consumer).
      */
-    fun post(block: suspend () -> Unit) {
-        items.trySend(Posted(block))
+    fun post(onDropped: () -> Unit = {}, block: suspend () -> Unit) {
+        if (items.trySend(Posted(block, onDropped)).isFailure) onDropped()
     }
 
     private suspend fun reserve(bytes: Long, input: ChatInput) {

@@ -368,7 +368,7 @@ class ChatRepositoryTest {
         settle()
         rig.sendSample("delivery-agent-opening.json", B)
         settle()
-        assertEquals(ConversationState.Loading, rig.repository.conversation(B).value)
+        assertEquals(ConversationState.Loading(), rig.repository.conversation(B).value)
         rig.repository.open(B)
         settle()
         assertNull("only the history, never a one-message transcript", rig.shown(B).textOf(OPENING_ID))
@@ -435,7 +435,7 @@ class ChatRepositoryTest {
         rig.repository.close(A)
         settle()
         assertEquals("readable only until the owner leaves it", 0, rig.repository.heldTranscripts)
-        assertEquals(ConversationState.Loading, rig.repository.conversation(A).value)
+        assertEquals(ConversationState.Loading(NotSendableReason.DELETED), rig.repository.conversation(A).value)
     }
 
     @Test
@@ -713,7 +713,7 @@ class ChatRepositoryTest {
             settle()
         }
         val first = rig.repository.conversation(ids[0])
-        assertEquals("evicted", ConversationState.Loading, first.value)
+        assertEquals("evicted", ConversationState.Loading(), first.value)
         ids.subList(1, 4).forEach { assertEquals(sampleHistory.size, rig.shown(it).messages.size) }
         assertEquals(3, rig.repository.heldTranscripts)
 
@@ -737,7 +737,7 @@ class ChatRepositoryTest {
         settle()
         assertEquals(listOf(A, B), rig.subscribes.toList())
         assertEquals(0, rig.repository.heldTranscripts)
-        assertEquals(ConversationState.Loading, rig.repository.conversation(A).value)
+        assertEquals(ConversationState.Loading(), rig.repository.conversation(A).value)
         assertEquals(AgentState.IDLE, rig.row(A).state)
     }
 
@@ -763,7 +763,7 @@ class ChatRepositoryTest {
         assertEquals("inputs from the cleared link are ignored", ChatListState.Loading, rig.repository.list.value)
         assertEquals(emptyList<ChatRow>(), rig.repository.rows.value)
         assertEquals(emptyMap<String, AgentState>(), rig.repository.activity.value)
-        assertEquals(ConversationState.Loading, rig.repository.conversation(A).value)
+        assertEquals(ConversationState.Loading(NotSendableReason.NOT_CONNECTED), rig.repository.conversation(A).value)
         assertEquals(0, rig.repository.heldTranscripts)
         assertNull(rig.seen.seen(A))
         assertNull(rig.seen.seen(B))
@@ -1147,7 +1147,7 @@ class ChatRepositoryTest {
         assertTrue("no Failed flash: $seenStates", seenStates.none { it is ConversationState.Failed })
         repository.sink.accept(ChatInput.LinkDown(1))
         runCurrent()
-        assertEquals(ConversationState.Loading, repository.conversation(A).value)
+        assertEquals(ConversationState.Loading(NotSendableReason.NOT_CONNECTED), repository.conversation(A).value)
     }
 
     @Test

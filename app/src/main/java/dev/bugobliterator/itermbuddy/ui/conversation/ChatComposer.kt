@@ -55,6 +55,8 @@ fun notSendableText(reason: NotSendableReason): String = when (reason) {
     NotSendableReason.AI_UNAVAILABLE -> "AI is turned off on your Mac."
     NotSendableReason.DELETED -> "This chat was deleted on your Mac."
     NotSendableReason.NOT_LOADED -> "Loading this chat…"
+    NotSendableReason.TOO_LARGE -> "This chat is too large to open on this phone."
+    NotSendableReason.LOAD_FAILED -> "This chat couldn't be loaded."
     NotSendableReason.SEND_FAILED -> "Couldn't send. Your message is kept."
     NotSendableReason.NOT_RETRYABLE -> "That message can't be sent again."
 }

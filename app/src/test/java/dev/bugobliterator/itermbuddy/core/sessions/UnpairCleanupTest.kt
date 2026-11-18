@@ -5,6 +5,7 @@ import dev.bugobliterator.itermbuddy.core.chat.AgentState
 import dev.bugobliterator.itermbuddy.core.chat.ChatListState
 import dev.bugobliterator.itermbuddy.core.chat.ChatRow
 import dev.bugobliterator.itermbuddy.core.chat.ConversationState
+import dev.bugobliterator.itermbuddy.core.chat.NotSendableReason
 import dev.bugobliterator.itermbuddy.core.noise.newStaticKeyPair
 import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
@@ -134,7 +135,7 @@ class UnpairCleanupTest {
         assertEquals(emptyList<ChatRow>(), rig.chats.rows.value)
         assertEquals(emptyMap<String, AgentState>(), rig.chats.activity.value)
         assertSame("the screen's flow is reset, not replaced", conversation, rig.chats.conversation(chatID))
-        assertEquals(ConversationState.Loading, conversation.value)
+        assertEquals(ConversationState.Loading(NotSendableReason.NOT_CONNECTED), conversation.value)
         assertNull(rig.chats.macRevision.value)
         assertNull("the seen marks belong to the old pairing", rig.chatSeen.seen(chatID))
         assertEquals("", rig.graph.chatSearch.query.value)

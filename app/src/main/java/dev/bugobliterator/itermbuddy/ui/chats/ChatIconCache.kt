@@ -172,8 +172,11 @@ class ChatIconCache<T : Any>(
     /** Drops every icon (unpair) and cancels the decodes still out: a caller waiting on one gets null. */
     fun clear() = synchronized(lock) {
         generation++
-        inFlight.values.forEach { it.cancel() }
+        // Copied and cleared first: a cancelled decode's completion handler, run at once under an
+        // immediate dispatcher, removes itself from inFlight.
+        val out = inFlight.values.toList()
         inFlight.clear()
+        out.forEach { it.cancel() }
         images.clear()
         unusable.clear()
         held = 0

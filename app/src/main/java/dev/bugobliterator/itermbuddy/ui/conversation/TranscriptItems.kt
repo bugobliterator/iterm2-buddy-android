@@ -1,11 +1,13 @@
 package dev.bugobliterator.itermbuddy.ui.conversation
 
 import dev.bugobliterator.itermbuddy.core.chat.AgentState
+import dev.bugobliterator.itermbuddy.core.chat.AttachmentKind
 import dev.bugobliterator.itermbuddy.core.chat.ChatMessage
 import dev.bugobliterator.itermbuddy.core.chat.EchoState
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolution
 import dev.bugobliterator.itermbuddy.core.chat.MessageBody
 import dev.bugobliterator.itermbuddy.core.chat.Participant
+import dev.bugobliterator.itermbuddy.core.chat.Subpart
 
 /** The typing indicator's key; never a message `uniqueID` (those are uppercase UUIDs). */
 const val TYPING_ITEM_KEY = "typing-indicator"
@@ -139,10 +141,43 @@ class TranscriptItemCache {
 }
 
 /**
+ * A cheap stand-in for a message's content, for telling a grown message from the same one
+ * rebuilt: the body's case, how many parts it has and how long its text is (attachment bytes are
+ * counted by size, never compared). Equal for a history that replaced the transcript with the
+ * same message and for a row rebuilt for a mention's resolution; different after a streamed delta.
+ */
+data class ContentSignature(val case: Class<*>, val parts: Int, val length: Long)
+
+/** [message]'s [ContentSignature]. */
+fun contentSignature(message: ChatMessage): ContentSignature {
+    val body = message.body
+    return when (body) {
+        is MessageBody.PlainText -> ContentSignature(body.javaClass, 1, body.text.length.toLong())
+        is MessageBody.Markdown -> ContentSignature(body.javaClass, 1, body.text.length.toLong())
+        is MessageBody.Multipart -> ContentSignature(body.javaClass, body.parts.size, body.parts.sumOf(::partLength))
+        else -> ContentSignature(body.javaClass, 0, 0)
+    }
+}
+
+private fun partLength(part: Subpart): Long = when (part) {
+    is Subpart.PlainText -> part.text.length.toLong()
+    is Subpart.Markdown -> part.text.length.toLong()
+    is Subpart.Context -> part.text.length.toLong()
+    is Subpart.AttachmentPart -> when (val kind = part.attachment.kind) {
+        is AttachmentKind.Code -> kind.text.length.toLong()
+        is AttachmentKind.StatusUpdate -> kind.update.exploded.size.toLong() + kind.display.length
+        is AttachmentKind.File -> kind.size.toLong()
+        is AttachmentKind.FileId -> 1
+    }
+}
+
+/**
  * The end of the transcript that scrolling follows: [newest] is the newest row other than the
- * typing dots, and whether the dots show.
+ * typing dots, [newestSignature] its message's [ContentSignature], and whether the dots show.
  */
 class TranscriptTail(val newest: TranscriptItem?, val typing: Boolean) {
+    val newestSignature: ContentSignature? = newest?.shownMessage?.let(::contentSignature)
+
     override fun toString(): String = "TranscriptTail(newest=${newest?.key}, typing=$typing)"
 }
 
@@ -173,22 +208,22 @@ private val TranscriptItem.shownMessage: ChatMessage?
 
 /**
  * How the transcript follows a change from [before] to [after], given whether it was at the
- * bottom before the change. The newest row changed when its key did or its message did (by
- * value: a history that replaced the transcript with the same messages, or a row rebuilt for a
+ * bottom before the change. The newest row changed when its key did or its [ContentSignature]
+ * did (a history that replaced the transcript with the same messages, or a row rebuilt for a
  * mention's resolution, is not news; a streamed delta is). At the bottom, any change at the end
  * (a new row, a streamed delta, the dots coming or going) keeps the newest row in view; a new
- * message sent from this phone (its echo) scrolls to it from anywhere, as sending does in a chat,
- * but the owner's words typed on the Mac do not; scrolled up, a new or grown newest row shows the
- * pill instead, and the dots alone do nothing. The first rows ([before] null) need nothing: the
- * list starts at the bottom.
+ * message being sent from this phone (its echo, [EchoState.SENDING]) scrolls to it from anywhere,
+ * as sending does in a chat, but the owner's words typed on the Mac, or an old send put back by
+ * a history, do not; scrolled up, a new or grown newest row shows the pill instead, and the dots
+ * alone do nothing. The first rows ([before] null) need nothing: the list starts at the bottom.
  */
 fun followAction(wasAtBottom: Boolean, before: TranscriptTail?, after: TranscriptTail): FollowAction {
     if (before == null) return FollowAction.NONE
     val newest = after.newest
     val newKey = before.newest?.key != newest?.key
-    val newestChanged = newKey || before.newest?.shownMessage != newest?.shownMessage
+    val newestChanged = newKey || before.newestSignature != after.newestSignature
     if (!newestChanged && before.typing == after.typing) return FollowAction.NONE
-    val ownNewMessage = newKey && newest is TranscriptItem.Bubble && newest.echo != null
+    val ownNewMessage = newKey && newest is TranscriptItem.Bubble && newest.echo == EchoState.SENDING
     return when {
         wasAtBottom || ownNewMessage -> FollowAction.PIN
         newestChanged -> FollowAction.PILL
