@@ -9,7 +9,6 @@ import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculateCentroidSize
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -33,6 +32,8 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerId
+import androidx.compose.ui.input.pointer.changedToDownIgnoreConsumed
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
@@ -137,11 +138,13 @@ class LiveVideoSource(
  * becomes notches, [onWheel] once per drag step that reaches one, with the notch count of that
  * step (iOS `accrueWheel`). A gesture that has had two fingers down only zooms and pans.
  *
- * **Selection** ([onSelect] non-null). One finger held still for [SELECTION_HOLD_MILLIS]
- * ([holdCancelled] otherwise: it moved, a second finger came down, or it lifted) begins a
- * selection; the same press then drags it and lifting ends it, each phase given with the screen
- * point and the zoom and fit as shown. From the hold on, every change is consumed in the initial
- * pass, so the pan, wheel and tap detectors see the gesture cancelled.
+ * **Taps and selection** ([detectPresses], one [PressArbiter] for both, so a deferred tap never
+ * lands inside a selection). A tap is [onTap] once the double-tap window passes; a double tap
+ * toggles the zoom. With [onSelect] non-null when the finger goes down, one finger held still for
+ * [selectionHoldMillis] begins a selection; the same press then drags it and lifting ends it,
+ * each phase given with the screen point and the zoom and fit as shown, all to the callback taken
+ * at the begin (so a config change mid-drag still ends it). While selecting, every change is
+ * consumed in the initial pass, so the pan and wheel detector sees the gesture cancelled.
  */
 @Composable
 fun VideoCanvas(
@@ -164,6 +167,7 @@ fun VideoCanvas(
     wheelStepPx: Float? = null,
     onWheel: (up: Boolean, lines: Int) -> Unit = { _, _ -> },
     onSelect: ((phase: SelectionPhase, x: Float, y: Float, shown: ZoomState, fit: FitRect) -> Unit)? = null,
+    selectionHoldMillis: Long = SELECTION_HOLD_MILLIS,
 ) {
     var canvas by remember { mutableStateOf(IntSize.Zero) }
     val viewW = canvas.width.toFloat()
@@ -190,7 +194,6 @@ fun VideoCanvas(
     val currentOnWheel by rememberUpdatedState(onWheel)
     val currentOnDocumentView by rememberUpdatedState(onDocumentView)
     val currentOnSelect by rememberUpdatedState(onSelect)
-    val selectable = onSelect != null
     LaunchedEffect(zoomKey) {
         snapshotFlow {
             val g = geometry
@@ -236,28 +239,34 @@ fun VideoCanvas(
                     if (step.notches.isNotEmpty()) currentOnWheel(step.notches.first(), step.notches.size)
                 }
             }
-            .pointerInput(zoomKey) {
-                detectTapGestures(
-                    onDoubleTap = { tap ->
-                        val g = geometry
-                        val inset = currentInset()
-                        val shown = shownZoom(kept, g, inset)
-                        // Zooming out over history keeps the line under the tap rather than jump to the live band.
-                        val next = if (g.history > 0f && shown.scale > 1f) {
-                            applyGesture(shown, tap.x, tap.y, 1f / shown.scale, 0f, 0f, g.docFit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right)
-                        } else {
-                            toggleZoom(shown, tap.x, tap.y, g.docFit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right)
-                        }
-                        kept = KeptZoom(next, inset, g.history)
-                    },
-                    onTap = { currentOnTap() },
-                )
-            }
-            .pointerInput(zoomKey, selectable) {
-                if (!selectable) return@pointerInput
-                detectSelectionHold { phase, position ->
+            .pointerInput(zoomKey, selectionHoldMillis) {
+                // The select callback of the gesture under way, taken at its begin.
+                var gestureSelect: ((SelectionPhase, Float, Float, ZoomState, FitRect) -> Unit)? = null
+                detectPresses(selectionHoldMillis, selectable = { currentOnSelect != null }) { action ->
                     val g = geometry
-                    currentOnSelect?.invoke(phase, position.x, position.y, shownZoom(kept, g, currentInset()), g.fit)
+                    val inset = currentInset()
+                    val shown = shownZoom(kept, g, inset)
+                    when (action) {
+                        is PressAction.Tap -> currentOnTap()
+                        is PressAction.DoubleTap -> {
+                            // Zooming out over history keeps the line under the tap rather than jump to the live band.
+                            val next = if (g.history > 0f && shown.scale > 1f) {
+                                applyGesture(shown, action.x, action.y, 1f / shown.scale, 0f, 0f, g.docFit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right)
+                            } else {
+                                toggleZoom(shown, action.x, action.y, g.docFit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right)
+                            }
+                            kept = KeptZoom(next, inset, g.history)
+                        }
+                        is PressAction.SelectBegin -> {
+                            gestureSelect = currentOnSelect
+                            gestureSelect?.invoke(SelectionPhase.BEGIN, action.x, action.y, shown, g.fit)
+                        }
+                        is PressAction.SelectMove -> gestureSelect?.invoke(SelectionPhase.MOVE, action.x, action.y, shown, g.fit)
+                        is PressAction.SelectEnd -> {
+                            gestureSelect?.invoke(SelectionPhase.END, action.x, action.y, shown, g.fit)
+                            gestureSelect = null
+                        }
+                    }
                 }
             },
     ) {
@@ -319,46 +328,58 @@ private fun VideoSurface(output: HevcVideoOutput, modifier: Modifier) {
 }
 
 /**
- * A selection press: one finger held still for [SELECTION_HOLD_MILLIS] ([holdCancelled] decides
- * when it is something else), then [onPhase] `BEGIN` where it is, `MOVE` on each move and `END`
- * where it lifts (or where it last was, if the gesture is cancelled). From the hold on, every
- * change is consumed in the initial pass, before the pan and tap detectors see it.
+ * Taps, double taps and selection holds of the primary finger, decided by a [PressArbiter] in
+ * event time (the double-tap window from [viewConfiguration], the hold [holdMillis], touch slop),
+ * each decision given to [onAction]. [selectable] is read as each press goes down. Events are
+ * read in the initial pass and consumed only while a selection owns the gesture. Cancelled (the
+ * detector restarts), a selection under way still ends where it was.
  */
-private suspend fun PointerInputScope.detectSelectionHold(onPhase: (SelectionPhase, Offset) -> Unit) {
-    awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false)
-        val slop = viewConfiguration.touchSlop
-        var cancelled = false
-        withTimeoutOrNull(SELECTION_HOLD_MILLIS) {
-            while (!cancelled) {
-                val event = awaitPointerEvent()
-                val finger = event.changes.firstOrNull { it.id == down.id }
-                val travel = finger?.let { (it.position - down.position).getDistance() } ?: Float.NaN
-                val released = finger == null || !finger.pressed
-                cancelled = holdCancelled(travel, event.changes.count { it.pressed }, released, slop)
-            }
-        }
-        if (cancelled) return@awaitEachGesture
-        var last = currentEvent.changes.firstOrNull { it.id == down.id }?.position ?: down.position
-        onPhase(SelectionPhase.BEGIN, last)
-        var ended = false
-        try {
-            while (!ended) {
-                val event = awaitPointerEvent(PointerEventPass.Initial)
-                event.changes.forEach { it.consume() }
-                val finger = event.changes.firstOrNull { it.id == down.id }
-                if (finger == null || !finger.pressed) {
-                    ended = true
-                    onPhase(SelectionPhase.END, finger?.position ?: last)
-                } else if (finger.position != last) {
-                    last = finger.position
-                    onPhase(SelectionPhase.MOVE, last)
+private suspend fun PointerInputScope.detectPresses(holdMillis: Long, selectable: () -> Boolean, onAction: (PressAction) -> Unit) {
+    val arbiter = PressArbiter(holdMillis, viewConfiguration.doubleTapTimeoutMillis, viewConfiguration.touchSlop)
+    try {
+        awaitPointerEventScope {
+            var tracked: PointerId? = null
+            var lastTime = 0L
+            while (true) {
+                val deadline = arbiter.deadline
+                val event = if (deadline == null) {
+                    awaitPointerEvent(PointerEventPass.Initial)
+                } else {
+                    withTimeoutOrNull(maxOf(0L, deadline - lastTime)) { awaitPointerEvent(PointerEventPass.Initial) }
                 }
+                if (event == null) {
+                    // Timed out: event time has reached the deadline.
+                    lastTime = maxOf(lastTime, deadline ?: lastTime)
+                    arbiter.tick(lastTime).forEach(onAction)
+                    continue
+                }
+                val time = event.changes.maxOfOrNull { it.uptimeMillis } ?: lastTime
+                lastTime = maxOf(lastTime, time)
+                val wasSelecting = arbiter.selecting
+                val primary = tracked?.let { id -> event.changes.firstOrNull { it.id == id } }
+                val actions = when {
+                    tracked == null -> {
+                        val down = event.changes.firstOrNull { it.changedToDownIgnoreConsumed() }
+                        if (down == null) {
+                            emptyList()
+                        } else {
+                            tracked = down.id
+                            arbiter.down(down.position.x, down.position.y, lastTime, selectable())
+                        }
+                    }
+                    primary == null || !primary.pressed -> {
+                        tracked = null
+                        val at = primary?.position ?: Offset.Zero
+                        if (primary == null) arbiter.cancel() else arbiter.up(at.x, at.y, lastTime)
+                    }
+                    else -> arbiter.move(primary.position.x, primary.position.y, event.changes.count { it.pressed }, lastTime)
+                }
+                if (wasSelecting || arbiter.selecting) event.changes.forEach { it.consume() }
+                actions.forEach(onAction)
             }
-        } finally {
-            // Cancelled mid-drag (the detector restarted): finish where the finger last was.
-            if (!ended) onPhase(SelectionPhase.END, last)
         }
+    } finally {
+        arbiter.cancel().forEach(onAction)
     }
 }
 
