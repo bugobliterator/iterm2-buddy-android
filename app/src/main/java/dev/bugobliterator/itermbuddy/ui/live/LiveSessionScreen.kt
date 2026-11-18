@@ -55,10 +55,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
@@ -85,6 +89,8 @@ import dev.bugobliterator.itermbuddy.core.stream.ActiveStream
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
 import dev.bugobliterator.itermbuddy.core.stream.fitGrid
+import dev.bugobliterator.itermbuddy.core.wire.SelectionPhase
+import dev.bugobliterator.itermbuddy.core.wire.SelectionPoint
 import dev.bugobliterator.itermbuddy.ui.LiveSessionTheme
 import dev.bugobliterator.itermbuddy.video.VideoStats
 import kotlin.math.roundToInt
@@ -157,6 +163,16 @@ interface LiveSessionActions {
  * scrolled up. On the alternate screen with mouse-wheel reporting a one-finger drag sends wheel
  * notches to the active stream through the ordered input sender, only while input is offered.
  * Browser sessions keep the plain [VideoCanvas].
+ *
+ * **Selection** (iOS `SessionView.swift:2806-2860, 2935-2948`). While the active stream is this
+ * session's, a 0.3 s hold on the picture or the history begins a selection on the Mac through the
+ * app's [LiveVideoSource.selection] driver, the same press drags it, and lifting ends it (at the
+ * last mapped point if the lift cannot be mapped) and shows the [SelectionMenu] there: **Copy**
+ * (the Mac's text to the clipboard, marked sensitive; "Nothing selected" when it has none),
+ * **Select All** (the menu stays, for Copy), and **Paste** (the clipboard's first text item through
+ * the ordered input sender, only while input is offered). The Mac draws the selection into the
+ * video and the tiles. A tap while the menu or a selection is up sends Clear Selection and hides
+ * the menu instead of raising the keyboard.
  *
  * **Edge to edge** (iOS `SessionView.swift:870-889, 1985-2005`). The canvas is the whole window
  * on black; the compact [LiveTopBar] (status bar scrim and a 48 dp row), the navigation bar, and
@@ -240,6 +256,25 @@ private fun LiveSessionContent(
     val keyboard = remember { TerminalKeyboard() }
     val currentTarget by rememberUpdatedState(target)
     val currentActions by rememberUpdatedState(actions)
+    val context = LocalContext.current
+    val haptics = LocalHapticFeedback.current
+    val selection = source.selection
+    var menuAnchor by remember(session.guid) { mutableStateOf<Offset?>(null) }
+    var menuClipboardHasText by remember(session.guid) { mutableStateOf(false) }
+    // The last point a drag mapped to, for an end that cannot be mapped (iOS `lastDragLivePoint`).
+    val lastDragPoint = remember(session.guid) { arrayOfNulls<SelectionPoint>(1) }
+    // The menu belongs to the stream it was shown on: gone with it (an end, a reconnect, another session).
+    val selectionStream = activeStream?.takeIf { it.sessionGuid == session.guid }?.let { it.linkId to it.streamID }
+    LaunchedEffect(selectionStream) { menuAnchor = null }
+    val canvasTap = {
+        val range = selection?.range?.value
+        if (menuAnchor != null || range != null) {
+            selection?.clear()
+            menuAnchor = null
+        } else if (currentTarget != null) {
+            keyboard.show()
+        }
+    }
     var modifierVersion by remember { mutableIntStateOf(0) }
     // App-scoped per session (like the draft), so rotation keeps an armed ctrl, the tray and the restore flag.
     val memory = remember(session.guid) { actions.inputMemory(session.guid) }
@@ -344,12 +379,38 @@ private fun LiveSessionContent(
                     val wheelStream = currentStreamID
                     if (wheelTarget != null && wheelStream != null) currentActions.scrollWheel(wheelTarget, wheelStream, up, lines)
                 },
-                onTap = { if (currentTarget != null) keyboard.show() },
+                onTap = canvasTap,
                 topInset = topChrome.toFloat(),
                 restBottomInset = navigationBottom.toFloat(),
                 bottomInset = bottomCover,
                 leftInset = leftInset.toFloat(),
                 rightInset = rightInset.toFloat(),
+                onSelection = if (selection == null || streamID == null) {
+                    null
+                } else {
+                    { phase, point, x, y ->
+                        when (phase) {
+                            SelectionPhase.BEGIN -> {
+                                menuAnchor = null
+                                lastDragPoint[0] = point
+                                if (point != null) {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    selection.begin(point)
+                                }
+                            }
+                            SelectionPhase.MOVE -> if (point != null) {
+                                lastDragPoint[0] = point
+                                selection.move(point)
+                            }
+                            SelectionPhase.END -> {
+                                (point ?: lastDragPoint[0])?.let(selection::end)
+                                lastDragPoint[0] = null
+                                menuClipboardHasText = clipboardHasText(context)
+                                menuAnchor = Offset(x, y)
+                            }
+                        }
+                    }
+                },
             )
         } else {
             VideoCanvas(
@@ -402,6 +463,33 @@ private fun LiveSessionContent(
                 LiveChip(onClick = scrollback::jumpToLive, modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp))
             }
             SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
+        }
+        val anchor = menuAnchor
+        if (selection != null && anchor != null) {
+            SelectionMenu(
+                anchor = anchor,
+                bounds = { Rect4(leftInset, topChrome, canvas.width - rightInset, canvas.height - bottomCover().roundToInt()) },
+                canPaste = offersInput && menuClipboardHasText,
+                onCopy = {
+                    menuAnchor = null
+                    snackbarScope.launch {
+                        val text = selection.copy(session.guid)
+                        val outcome = copyOutcome(text)
+                        if (outcome == CopyOutcome.COPIED && text != null) copyToClipboard(context, text)
+                        copyMessage(outcome)?.let { message ->
+                            snackbar.currentSnackbarData?.dismiss()
+                            snackbar.showSnackbar(message)
+                        }
+                    }
+                },
+                onSelectAll = selection::selectAll,
+                onPaste = {
+                    menuAnchor = null
+                    val text = clipboardText(context)
+                    val pasteTarget = currentTarget
+                    if (text != null && pasteTarget != null) currentActions.paste(pasteTarget, text)
+                },
+            )
         }
         LiveTopBar(
             title = title,

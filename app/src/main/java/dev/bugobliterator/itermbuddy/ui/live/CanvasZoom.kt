@@ -1,6 +1,11 @@
 package dev.bugobliterator.itermbuddy.ui.live
 
 import dev.bugobliterator.itermbuddy.core.stream.ScrollWheelAccumulator
+import dev.bugobliterator.itermbuddy.core.stream.ScrollbackLayout
+import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
+import dev.bugobliterator.itermbuddy.core.stream.cellAt
+import dev.bugobliterator.itermbuddy.core.stream.historyCellAt
+import dev.bugobliterator.itermbuddy.core.wire.SelectionPoint
 
 /*
  * The live canvas's zoom state and per-event decisions, pure so they are tested on the JVM;
@@ -91,4 +96,39 @@ internal fun gestureStep(
     }
     val next = applyGesture(shown, centroidX, centroidY, zoom, panX, panY, g.docFit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right)
     return GestureStep(KeptZoom(next, inset, g.history), emptyList(), latched)
+}
+
+/** How long a still finger is held before a selection begins: iOS's 0.3 s (`IOS/Screens/SessionView.swift:1928-1933`). */
+internal const val SELECTION_HOLD_MILLIS = 300L
+
+/**
+ * Whether a press waiting out [SELECTION_HOLD_MILLIS] is no longer a selection hold: a second
+ * finger came down (zoom), the finger moved more than [slop] from where it went down (a pan,
+ * a wheel drag or a scroll, decided by [gestureStep]), or it was lifted (a tap). As UIKit's long
+ * press with its default allowable movement, so a drag that moves before the hold scrolls instead.
+ * Once the hold passes, the selection owns the rest of the gesture and the pan and tap detectors
+ * see it consumed.
+ */
+internal fun holdCancelled(travel: Float, pointers: Int, released: Boolean, slop: Float): Boolean =
+    released || pointers > 1 || !(travel <= slop)
+
+/**
+ * The selection point under screen point ([x], [y]) of a terminal shown with zoom [shown], the
+ * live band at [fit] and the document [layout] above it ([ScrollbackLayout.liveBandTopPx] of
+ * history): over the band, the video's cell ([cellAt], margins included, from the layout's live
+ * top); over history, the tile's cell on that line ([historyCellAt], tile space, no margins).
+ * Clamped to the document and the grid, as iOS (`IOS/Screens/SessionView.swift:2710-2717`), so
+ * a drag past an edge selects up to it. Null without a usable zoom, fit or image, or for a config
+ * that cannot select (a browser, no cell geometry).
+ */
+internal fun selectionPointAt(x: Float, y: Float, shown: ZoomState, fit: FitRect, layout: ScrollbackLayout, config: StreamConfig): SelectionPoint? {
+    if (fit.isEmpty || config.pixelWidth <= 0 || config.pixelHeight <= 0) return null
+    val history = layout.liveBandTopPx
+    val (docX, docY) = screenToDocument(x, y, shown, fit, history) ?: return null
+    val imageX = (docX - fit.left) * config.pixelWidth / fit.width
+    return if (docY >= history) {
+        cellAt(imageX, (docY - history) * config.pixelHeight / fit.height, config, layout.liveTop)
+    } else {
+        historyCellAt(layout.absLineAt(docY), imageX, config)
+    }
 }

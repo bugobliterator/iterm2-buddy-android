@@ -39,6 +39,8 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
 import dev.bugobliterator.itermbuddy.core.stream.TileState
 import dev.bugobliterator.itermbuddy.core.stream.wheelStepPx
 import dev.bugobliterator.itermbuddy.core.wire.HistoryTile
+import dev.bugobliterator.itermbuddy.core.wire.SelectionPhase
+import dev.bugobliterator.itermbuddy.core.wire.SelectionPoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.combine
 import kotlin.math.roundToInt
@@ -101,6 +103,12 @@ class ScrollbackControl {
  * sends notches through [onWheel] (see [VideoCanvas]), one step per displayed line (24 dp before
  * any layout).
  *
+ * **Selection** ([onSelection] non-null, a terminal with cell geometry and the store's geometry
+ * for it). A long press (see [VideoCanvas]) maps each phase's screen point to a terminal point
+ * with [selectionPointAt]: over the live band through the video's cells from the live top, over
+ * history in the tile's own space (tiles have no margins), clamped to the document. The point is
+ * null only when nothing can be mapped (no layout yet).
+ *
  * The geometry is used only while it is [config]'s stream. Never logs tile content.
  */
 @Composable
@@ -119,6 +127,7 @@ fun ScrollbackCanvas(
     bottomInset: () -> Float = { restBottomInset },
     leftInset: Float = 0f,
     rightInset: Float = 0f,
+    onSelection: ((phase: SelectionPhase, point: SelectionPoint?, x: Float, y: Float) -> Unit)? = null,
 ) {
     var canvas by remember { mutableStateOf(IntSize.Zero) }
     val streamGeometry by store.geometry.collectAsStateWithLifecycle()
@@ -154,6 +163,9 @@ fun ScrollbackCanvas(
     val currentLayout by rememberUpdatedState(layout)
     val currentTiles by rememberUpdatedState(tiles)
     val currentGeometry by rememberUpdatedState(geometry)
+    val currentTerminal by rememberUpdatedState(terminal)
+    val currentOnSelection by rememberUpdatedState(onSelection)
+    val selectable = onSelection != null && terminal?.cellGeometry != null
     // The slots on screen: the draw is invalidated only when this set changes, not per frame.
     val visibleSlots by remember {
         derivedStateOf {
@@ -213,6 +225,16 @@ fun ScrollbackCanvas(
         jumpToLive = control.jumps,
         wheelStepPx = wheelStep,
         onWheel = onWheel,
+        onSelect = if (!selectable) {
+            null
+        } else {
+            { phase, x, y, shown, bandFit ->
+                val shownLayout = currentLayout
+                val shownConfig = currentTerminal
+                val point = if (shownLayout == null || shownConfig == null) null else selectionPointAt(x, y, shown, bandFit, shownLayout, shownConfig)
+                currentOnSelection?.invoke(phase, point, x, y)
+            }
+        },
     )
 }
 

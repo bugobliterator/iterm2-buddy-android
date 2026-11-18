@@ -1,8 +1,13 @@
 package dev.bugobliterator.itermbuddy.ui.live
 
+import dev.bugobliterator.itermbuddy.core.stream.CellGeometry
 import dev.bugobliterator.itermbuddy.core.stream.ScrollWheelAccumulator
+import dev.bugobliterator.itermbuddy.core.stream.ScrollbackLayout
+import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
+import dev.bugobliterator.itermbuddy.core.wire.SelectionPoint
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -82,5 +87,53 @@ class CanvasZoomTest {
         // From the bottom (1400) down by 300 px reveals older lines.
         assertEquals(1700f, step.kept.state.offsetY, eps)
         assertEquals(3000f, step.kept.history)
+    }
+
+    /** 10×5 cells of 96 px with margins 20 left and 10 top, in a 1000×500 image shown at [bandFit]. */
+    private val terminal = StreamConfig(
+        streamID = 1, generationId = 1, codecExtradata = ByteArray(0), pixelWidth = 1000, pixelHeight = 500, scale = 1.0,
+        columns = 10, rows = 5, cellGeometry = CellGeometry(96.0, 96.0, 20.0, 10.0), firstAbsLine = 0, totalLines = 205,
+        canResize = true, altScreen = false, scrollWheelReporting = false, isBrowser = false,
+    )
+
+    /** 200 history lines of 100 px above the band; the live top is line 200. */
+    private val document = ScrollbackLayout(firstAbsLine = 0, liveTop = 200, totalLines = 205, rows = 5, lineHeightPx = 100f, altScreen = false)
+
+    @Test
+    fun selectionOverTheBandUsesTheVideoCells() {
+        val atBottom = ZoomState.FIT
+        assertEquals(SelectionPoint(202, 3), selectionPointAt(20f + 96 * 3 + 1, 100f + 10 + 96 * 2 + 1, atBottom, bandFit, document, terminal))
+        assertEquals("the top margin is row 0", SelectionPoint(200, 0), selectionPointAt(5f, 101f, atBottom, bandFit, document, terminal))
+        assertEquals("below the band, clamped", SelectionPoint(204, 9), selectionPointAt(999f, 1900f, atBottom, bandFit, document, terminal))
+        // Zoomed in 2x on the band's top-left corner.
+        val zoomed = ZoomState(2f, 0f, -100f)
+        assertEquals(SelectionPoint(200, 1), selectionPointAt(2 * (20f + 96 + 1), 2 * (100f + 11) - 100f, zoomed, bandFit, document, terminal))
+    }
+
+    @Test
+    fun selectionOverHistoryUsesTileSpace() {
+        // Just above the band: the last history line; 105 px is column 1 of a margin-free tile
+        // (the video's margins would make it column 0).
+        assertEquals(SelectionPoint(199, 1), selectionPointAt(105f, 50f, ZoomState.FIT, bandFit, document, terminal))
+        // Scrolled up 10000 px: the band's top edge on screen is line 100.
+        assertEquals(SelectionPoint(100, 9), selectionPointAt(999f, 100f, ZoomState(1f, 0f, 10000f), bandFit, document, terminal))
+        assertEquals("above the document, clamped", SelectionPoint(0, 0), selectionPointAt(-5f, 0f, ZoomState(1f, 0f, 30000f), bandFit, document, terminal))
+    }
+
+    @Test
+    fun selectionNeedsCellsAndAnImage() {
+        assertNull(selectionPointAt(500f, 300f, ZoomState.FIT, bandFit, document, terminal.copy(cellGeometry = null)))
+        assertNull(selectionPointAt(500f, 300f, ZoomState.FIT, bandFit, document, terminal.copy(isBrowser = true)))
+        assertNull(selectionPointAt(500f, 300f, ZoomState.FIT, FitRect.EMPTY, document, terminal))
+        assertNull(selectionPointAt(500f, 300f, ZoomState(0f, 0f, 0f), bandFit, document, terminal))
+    }
+
+    @Test
+    fun holdBeginsOnlyForOneStillFinger() {
+        assertFalse("still, one finger: wait out the hold", holdCancelled(travel = 3f, pointers = 1, released = false, slop = 8f))
+        assertTrue("moved past the slop: a pan, wheel drag or scroll", holdCancelled(travel = 9f, pointers = 1, released = false, slop = 8f))
+        assertTrue("two fingers: a pinch", holdCancelled(travel = 0f, pointers = 2, released = false, slop = 8f))
+        assertTrue("lifted: a tap", holdCancelled(travel = 0f, pointers = 0, released = true, slop = 8f))
+        assertTrue("a lost pointer", holdCancelled(travel = Float.NaN, pointers = 1, released = false, slop = 8f))
     }
 }

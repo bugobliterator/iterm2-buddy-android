@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
@@ -43,6 +44,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.bugobliterator.itermbuddy.core.stream.HistoryTileStore
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.stream.ScrollWheelAccumulator
+import dev.bugobliterator.itermbuddy.core.stream.SelectionDriver
+import dev.bugobliterator.itermbuddy.core.wire.SelectionPhase
 import dev.bugobliterator.itermbuddy.ui.settings.decoderRowText
 import dev.bugobliterator.itermbuddy.video.HevcVideoOutput
 import kotlinx.coroutines.flow.Flow
@@ -56,9 +59,15 @@ import kotlin.math.roundToInt
 /**
  * The app-scoped pieces the live view reads directly, outside the home model, so the decoder's
  * per-frame stats and the live top recompose only what shows them: the process's [output], the
- * stream controller's [state] and its [historyTiles] (null: no scrollback).
+ * stream controller's [state] and its [historyTiles] (null: no scrollback), and the app's
+ * [selection] driver (null: no selection).
  */
-class LiveVideoSource(val output: HevcVideoOutput, val state: StateFlow<LiveViewState>, val historyTiles: HistoryTileStore? = null) {
+class LiveVideoSource(
+    val output: HevcVideoOutput,
+    val state: StateFlow<LiveViewState>,
+    val historyTiles: HistoryTileStore? = null,
+    val selection: SelectionDriver? = null,
+) {
     /** [videoVisible] now, for the view of [sessionGuid]. */
     fun visible(sessionGuid: String): Boolean = videoVisible(state, output.stats, sessionGuid)
 
@@ -127,6 +136,12 @@ class LiveVideoSource(val output: HevcVideoOutput, val state: StateFlow<LiveView
  * one-finger drag pans a zoomed picture first, and the travel past the pan edge ([wheelDrag])
  * becomes notches, [onWheel] once per drag step that reaches one, with the notch count of that
  * step (iOS `accrueWheel`). A gesture that has had two fingers down only zooms and pans.
+ *
+ * **Selection** ([onSelect] non-null). One finger held still for [SELECTION_HOLD_MILLIS]
+ * ([holdCancelled] otherwise: it moved, a second finger came down, or it lifted) begins a
+ * selection; the same press then drags it and lifting ends it, each phase given with the screen
+ * point and the zoom and fit as shown. From the hold on, every change is consumed in the initial
+ * pass, so the pan, wheel and tap detectors see the gesture cancelled.
  */
 @Composable
 fun VideoCanvas(
@@ -148,6 +163,7 @@ fun VideoCanvas(
     jumpToLive: Int = 0,
     wheelStepPx: Float? = null,
     onWheel: (up: Boolean, lines: Int) -> Unit = { _, _ -> },
+    onSelect: ((phase: SelectionPhase, x: Float, y: Float, shown: ZoomState, fit: FitRect) -> Unit)? = null,
 ) {
     var canvas by remember { mutableStateOf(IntSize.Zero) }
     val viewW = canvas.width.toFloat()
@@ -173,6 +189,8 @@ fun VideoCanvas(
     val currentWheel by rememberUpdatedState(wheel)
     val currentOnWheel by rememberUpdatedState(onWheel)
     val currentOnDocumentView by rememberUpdatedState(onDocumentView)
+    val currentOnSelect by rememberUpdatedState(onSelect)
+    val selectable = onSelect != null
     LaunchedEffect(zoomKey) {
         snapshotFlow {
             val g = geometry
@@ -234,6 +252,13 @@ fun VideoCanvas(
                     },
                     onTap = { currentOnTap() },
                 )
+            }
+            .pointerInput(zoomKey, selectable) {
+                if (!selectable) return@pointerInput
+                detectSelectionHold { phase, position ->
+                    val g = geometry
+                    currentOnSelect?.invoke(phase, position.x, position.y, shownZoom(kept, g, currentInset()), g.fit)
+                }
             },
     ) {
         Box(
@@ -289,6 +314,50 @@ private fun VideoSurface(output: HevcVideoOutput, modifier: Modifier) {
     DisposableEffect(output) {
         onDispose {
             if (attached.getAndSet(null) != null) output.detachSurface()
+        }
+    }
+}
+
+/**
+ * A selection press: one finger held still for [SELECTION_HOLD_MILLIS] ([holdCancelled] decides
+ * when it is something else), then [onPhase] `BEGIN` where it is, `MOVE` on each move and `END`
+ * where it lifts (or where it last was, if the gesture is cancelled). From the hold on, every
+ * change is consumed in the initial pass, before the pan and tap detectors see it.
+ */
+private suspend fun PointerInputScope.detectSelectionHold(onPhase: (SelectionPhase, Offset) -> Unit) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        val slop = viewConfiguration.touchSlop
+        var cancelled = false
+        withTimeoutOrNull(SELECTION_HOLD_MILLIS) {
+            while (!cancelled) {
+                val event = awaitPointerEvent()
+                val finger = event.changes.firstOrNull { it.id == down.id }
+                val travel = finger?.let { (it.position - down.position).getDistance() } ?: Float.NaN
+                val released = finger == null || !finger.pressed
+                cancelled = holdCancelled(travel, event.changes.count { it.pressed }, released, slop)
+            }
+        }
+        if (cancelled) return@awaitEachGesture
+        var last = currentEvent.changes.firstOrNull { it.id == down.id }?.position ?: down.position
+        onPhase(SelectionPhase.BEGIN, last)
+        var ended = false
+        try {
+            while (!ended) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                event.changes.forEach { it.consume() }
+                val finger = event.changes.firstOrNull { it.id == down.id }
+                if (finger == null || !finger.pressed) {
+                    ended = true
+                    onPhase(SelectionPhase.END, finger?.position ?: last)
+                } else if (finger.position != last) {
+                    last = finger.position
+                    onPhase(SelectionPhase.MOVE, last)
+                }
+            }
+        } finally {
+            // Cancelled mid-drag (the detector restarted): finish where the finger last was.
+            if (!ended) onPhase(SelectionPhase.END, last)
         }
     }
 }
