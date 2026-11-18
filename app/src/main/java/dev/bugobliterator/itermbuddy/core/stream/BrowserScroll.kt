@@ -18,7 +18,9 @@ data class ScrollStep(val x: Double, val y: Double, val deltaX: Int, val deltaY:
  * flush and a slow one still adds up.
  *
  * - View pixels become image pixels by `× imagePxPerViewPx / zoom` (iOS
- *   `imagePixelsPerScrollPoint`, 2246-2250), for drags and fling velocities alike.
+ *   `imagePixelsPerScrollPoint`, 2246-2250), for drags and fling velocities alike, where
+ *   `imagePxPerViewPx` is the image's density at zoom 1 (Fit) and `zoom` the current zoom, divided
+ *   separately.
  * - A fling coasts: on each [flush] its velocity adds `velocity × elapsed`, then decays by
  *   `0.998^elapsedMs` (UIScrollView's normal deceleration), and stops below 30 image px/s. Each
  *   flush counts at most 100 ms, as iOS caps a display-link step (2337-2350).
@@ -41,8 +43,8 @@ class BrowserScrollAccumulator {
     val isFlinging: Boolean get() = velocityX != 0.0 || velocityY != 0.0
 
     /**
-     * Adds a drag of ([dxViewPx], [dyViewPx]) view pixels, at view-to-image density
-     * [imagePxPerViewPx] and [zoom], over the encoded-image pixel ([atX], [atY]); ignored when any
+     * Adds a drag of ([dxViewPx], [dyViewPx]) view pixels, at the image's density at zoom 1 (Fit)
+     * [imagePxPerViewPx] and the current [zoom], over the encoded-image pixel ([atX], [atY]); ignored when any
      * of them is not finite or the density or zoom is not positive.
      */
     fun drag(dxViewPx: Float, dyViewPx: Float, imagePxPerViewPx: Float, zoom: Float, atX: Float, atY: Float) {

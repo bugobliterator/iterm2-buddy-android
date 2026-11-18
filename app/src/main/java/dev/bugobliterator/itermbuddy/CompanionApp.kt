@@ -32,6 +32,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -190,11 +193,13 @@ class CompanionApp : Application() {
             log = { Log.i(SELECTION_TAG, it) },
         )
         browser = BrowserDriver(
-            link = sessions.client,
+            input = input,
             active = sessions.controller.activeStream,
             editing = sessions.controller.browserEditing,
             navigation = sessions.controller.browserNavigation,
-            macRevision = { (sessions.client.state.value as? ClientState.Connected)?.macRevision ?: 0 },
+            macRevision = sessions.client.state
+                .map { (it as? ClientState.Connected)?.macRevision ?: 0 }
+                .stateIn(scope, SharingStarted.Eagerly, (sessions.client.state.value as? ClientState.Connected)?.macRevision ?: 0),
             scope = scope,
             nowMillis = SystemClock::uptimeMillis,
             log = { Log.i(BROWSER_TAG, it) },
