@@ -720,3 +720,10 @@ try checkSessionSamples(historySelectionSampleList)
 try writeSessionSamples(historySelectionSampleList,
                         to: outputDirectory.appendingPathComponent("messages/history-and-selection", isDirectory: true))
 print("wire-fixtures: wrote \(messagesDirectory.path)/history-and-selection: samples=\(historySelectionSampleList.count)")
+
+// MARK: - Browser and Mac status samples (BrowserSamples.swift)
+
+let browserSampleList = try browserSamples()
+try writeSessionSamples(browserSampleList,
+                        to: outputDirectory.appendingPathComponent("messages/browser-sessions", isDirectory: true))
+print("wire-fixtures: wrote \(messagesDirectory.path)/browser-sessions: samples=\(browserSampleList.count)")

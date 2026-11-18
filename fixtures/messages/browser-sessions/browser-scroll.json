@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: nil, payload: WireFixtures.CompanionClientMessage.browserScroll(streamID: 2, x: 640.0, y: 400.0, deltaX: 0.0, deltaY: -48.0))",
+  "json" : {"payload":{"browserScroll":{"deltaX":0,"deltaY":-48,"streamID":2,"x":640,"y":400}}}
+}

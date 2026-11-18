@@ -26,8 +26,10 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamInput
 import dev.bugobliterator.itermbuddy.core.stream.StreamLink
 import dev.bugobliterator.itermbuddy.core.stream.StreamSink
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
+import dev.bugobliterator.itermbuddy.core.wire.MacStatus
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.core.wire.ProtocolRevision
+import dev.bugobliterator.itermbuddy.core.wire.macStatus
 import dev.bugobliterator.itermbuddy.store.PairingRecord
 import dev.bugobliterator.itermbuddy.store.PairingStage
 import dev.bugobliterator.itermbuddy.store.PairingStore
@@ -241,6 +243,29 @@ class CompanionClient internal constructor(
      * then true while the stored record is `CONFIRMED` or `REGISTERED`.
      */
     val paired: StateFlow<Boolean?> = pairedFlow.asStateFlow()
+
+    private val macStatusFlow = MutableStateFlow<MacStatus?>(null)
+
+    /**
+     * The Mac's status on the current connection (revision 14): whether its main thread is blocked
+     * and how many alerts it shows. Null while no connection has one: before the hello reply, after
+     * the connection ends, and for a Mac that sent no `macStatus` in its hello (one older than 14).
+     *
+     * Seeded from the hello reply before the state goes [ClientState.Connected], since the Mac sends
+     * only changes after its hello (`MC/CompanionLink.swift:518-524, 559-564`); then replaced by
+     * each [MacMessage.MacStatusChanged] on that connection (still emitted on [events]); reset to
+     * null when the connection ends, before the state leaves Connected. A change that arrives after
+     * the hello reply but before the seed wins over the seed (the hello reply is older on the wire).
+     */
+    val macStatus: StateFlow<MacStatus?> = macStatusFlow.asStateFlow()
+
+    private val macStatusLock = Any()
+
+    /** The connection whose status [macStatus] shows; events from any other are not applied. */
+    private var macStatusSession: CompanionSession? = null
+
+    /** Whether a [MacMessage.MacStatusChanged] has been applied for [macStatusSession] (it beats the seed). */
+    private var macStatusChangeApplied = false
 
     private val relayOriginFlow = MutableStateFlow<String?>(null)
 
@@ -800,16 +825,19 @@ class CompanionClient internal constructor(
                     is Shake.Failed -> return End.Retry(WaitReason.MAC_OFFLINE, shake.relayClose)
                 }
                 return coroutineScope {
+                    var self: CompanionSession? = null
                     val live = CompanionSession(
                         socket,
                         handshake.channel,
                         confirmationMode(),
-                        onEvent = ::emitEvent,
+                        onEvent = { emitEvent(it, self) },
                         log = log,
                         sink = streamSink,
                         sinkStall = timeouts.sinkStall,
                         arrivals = treeArrivals,
                     )
+                    self = live
+                    ownMacStatus(live)
                     live.start(this)
                     try {
                         val end = converse(live, handshake.hash, endpoints, token)
@@ -835,6 +863,7 @@ class CompanionClient internal constructor(
          */
         private suspend fun endLink(live: CompanionSession) {
             if (active?.session === live) active = null
+            dropMacStatus(live)
             live.close()
             val ended = linkId ?: return
             linkId = null
@@ -990,6 +1019,7 @@ class CompanionClient internal constructor(
             // before LinkUp is sunk, so the sink can send on it; Connected follows.
             attempt = 0
             val revision = helloReply.revision.coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
+            seedMacStatus(live, helloReply.macStatus())
             val id = nextLinkId.getAndIncrement()
             linkId = id
             val linkUpTaken = live.linkUp(id) {
@@ -1168,7 +1198,36 @@ class CompanionClient internal constructor(
         }
     }
 
-    private fun emitEvent(message: MacMessage) {
+    /** [live] is the connection whose status [macStatus] will show; nothing is shown until it has one. */
+    private fun ownMacStatus(live: CompanionSession) = synchronized(macStatusLock) {
+        macStatusSession = live
+        macStatusChangeApplied = false
+        macStatusFlow.value = null
+    }
+
+    /** The hello reply's status, unless a newer change on [live] has been applied already. */
+    private fun seedMacStatus(live: CompanionSession, status: MacStatus?) = synchronized(macStatusLock) {
+        if (macStatusSession === live && !macStatusChangeApplied) macStatusFlow.value = status
+    }
+
+    /** [live] has ended: its status goes with it. */
+    private fun dropMacStatus(live: CompanionSession) = synchronized(macStatusLock) {
+        if (macStatusSession === live) {
+            macStatusSession = null
+            macStatusFlow.value = null
+        }
+    }
+
+    /** An unsolicited message from [from]; a status change on the current connection updates [macStatus]. */
+    private fun emitEvent(message: MacMessage, from: CompanionSession?) {
+        if (message is MacMessage.MacStatusChanged) {
+            synchronized(macStatusLock) {
+                if (from != null && from === macStatusSession) {
+                    macStatusChangeApplied = true
+                    macStatusFlow.value = message.status
+                }
+            }
+        }
         // With no collector the message is simply not delivered; with a slow one the buffer fills.
         if (!eventFlow.tryEmit(message)) log("dropped an unsolicited ${message.javaClass.simpleName}: the events buffer is full")
     }

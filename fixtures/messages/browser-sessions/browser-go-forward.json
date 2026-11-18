@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: nil, payload: WireFixtures.CompanionClientMessage.browserGoForward(streamID: 2))",
+  "json" : {"payload":{"browserGoForward":{"streamID":2}}}
+}

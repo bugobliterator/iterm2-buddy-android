@@ -8,10 +8,11 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 /**
- * A message the phone sends to the Mac: the pairing, live-session, history and selection
- * subset of upstream `CompanionClientMessage` (`sources/Companion/Shared/CompanionMessages.swift`).
- * The live-session cases' encoders are in `StreamMessages.kt`, the history and selection
- * ones in `HistorySelectionMessages.kt`.
+ * A message the phone sends to the Mac: the pairing, live-session, history, selection and
+ * browser subset of upstream `CompanionClientMessage`
+ * (`sources/Companion/Shared/CompanionMessages.swift`). The live-session cases' encoders are in
+ * `StreamMessages.kt`, the history and selection ones in `HistorySelectionMessages.kt`, the
+ * browser ones in `BrowserMessages.kt`.
  *
  * Payloads follow Swift's synthesized enum coding: `{"<case>": {...}}`, labelled
  * values by name, an unlabelled value under `_0`, `{}` for a case with no values,
@@ -157,19 +158,71 @@ sealed interface PhoneMessage {
     data class CopySelection(val sessionGuid: String) : PhoneMessage {
         override fun payload(): JsonObject = encodeCopySelection(this)
     }
+
+    /**
+     * `browserTap(streamID:x:y:)`, fire-and-forget (revision 15): a click on a browser stream's
+     * page at ([x], [y]) in encoded-image pixels, origin top left. Integral values are written as
+     * integers (`300`), as Swift writes them; NaN and infinities are refused.
+     */
+    data class BrowserTap(val streamID: Long, val x: Double, val y: Double) : PhoneMessage {
+        override fun payload(): JsonObject = encodeBrowserTap(this)
+    }
+
+    /**
+     * `browserScroll(streamID:x:y:deltaX:deltaY:)`, fire-and-forget (revision 15): scrolls what is
+     * under ([x], [y]) (encoded-image pixels, origin top left) so the content moves by
+     * ([deltaX], [deltaY]) encoded-image pixels, positive right and down, following the finger.
+     */
+    data class BrowserScroll(val streamID: Long, val x: Double, val y: Double, val deltaX: Double, val deltaY: Double) :
+        PhoneMessage {
+        override fun payload(): JsonObject = encodeBrowserScroll(this)
+    }
+
+    /** `browserGoBack(streamID:)`, fire-and-forget (revision 15); the result is a [MacMessage.BrowserNavigationChanged]. */
+    data class BrowserGoBack(val streamID: Long) : PhoneMessage {
+        override fun payload(): JsonObject = encodeStreamIdCase("browserGoBack", streamID)
+    }
+
+    /** `browserGoForward(streamID:)`, fire-and-forget (revision 15). */
+    data class BrowserGoForward(val streamID: Long) : PhoneMessage {
+        override fun payload(): JsonObject = encodeStreamIdCase("browserGoForward", streamID)
+    }
+
+    /** `browserReload(streamID:)`, fire-and-forget (revision 15). */
+    data class BrowserReload(val streamID: Long) : PhoneMessage {
+        override fun payload(): JsonObject = encodeStreamIdCase("browserReload", streamID)
+    }
+
+    /** `browserStopLoading(streamID:)`, fire-and-forget (revision 15). */
+    data class BrowserStopLoading(val streamID: Long) : PhoneMessage {
+        override fun payload(): JsonObject = encodeStreamIdCase("browserStopLoading", streamID)
+    }
+
+    /**
+     * `browserLoad(streamID:text:)`, fire-and-forget (revision 15): the address field's text,
+     * which the Mac opens as a URL or searches for. The caller trims it and sends nothing when it
+     * is empty, as iOS does (`AppModel.swift:4706-4710`). [toString] shows only its length.
+     */
+    data class BrowserLoad(val streamID: Long, val text: String) : PhoneMessage {
+        override fun payload(): JsonObject = encodeBrowserLoad(this)
+
+        override fun toString(): String = "BrowserLoad(streamID=$streamID, text(len=${text.length}))"
+    }
 }
 
 /**
- * A message the Mac sends to the phone: the pairing, live-session, history and selection
- * subset of upstream `CompanionHostMessage`. Every other host case decodes to [Unsupported].
- * The decoders are in `StreamMessages.kt` and `HistorySelectionMessages.kt`.
+ * A message the Mac sends to the phone: the pairing, live-session, history, selection, browser
+ * and Mac status subset of upstream `CompanionHostMessage`. Every other host case decodes to
+ * [Unsupported] (`modalAlertAnswerRejected` among them: this app never answers an alert).
+ * The decoders are in `StreamMessages.kt`, `HistorySelectionMessages.kt`, `BrowserMessages.kt`
+ * and `MacStatus.kt`.
  */
 sealed interface MacMessage {
     /**
      * `hello(revision:minimumPeer:wantsNotificationPermission:aiAvailable:macStatus:)`.
      * [raw] is the whole case body, so later plans can read the optional fields
-     * (`macStatus` arrives only for a phone at revision 14 or later). The revisions
-     * are [Long] to match Swift's 64-bit `Int`.
+     * (`macStatus` arrives only for a phone at revision 14 or later; read it with
+     * [macStatus]). The revisions are [Long] to match Swift's 64-bit `Int`.
      */
     data class HelloReply(val revision: Long, val minimumPeer: Long, val raw: JsonObject) : MacMessage
 
@@ -232,6 +285,28 @@ sealed interface MacMessage {
      */
     data class SelectionText(val text: String) : MacMessage {
         override fun toString(): String = "SelectionText(text(len=${text.length}))"
+    }
+
+    /**
+     * `macStatusChanged(status:)`, unsolicited (revision 14): the Mac's complete current status,
+     * sent on every change after the hello reply. Not stream-scoped: it reaches `events`.
+     */
+    data class MacStatusChanged(val status: MacStatus) : MacMessage
+
+    /**
+     * `browserEditingChanged(streamID:editing:)`, unsolicited (revision 15): whether a text field on
+     * a browser stream's page has keyboard focus. Sent on the stream's first tick and on each
+     * change (`MC/CompanionHostBridge.swift:745-758`).
+     */
+    data class BrowserEditingChanged(val streamID: Long, val editing: Boolean) : MacMessage
+
+    /**
+     * `browserNavigationChanged(streamID:state:)`, unsolicited (revision 15): a browser stream's
+     * address, title, history and loading state, on the stream's first tick and on each change
+     * (`MC/CompanionHostBridge.swift:773-788`). [toString] redacts the URL and title.
+     */
+    data class BrowserNavigationChanged(val streamID: Long, val state: BrowserNavigationState) : MacMessage {
+        override fun toString(): String = "BrowserNavigationChanged(streamID=$streamID, state=$state)"
     }
 
     /**

@@ -126,12 +126,13 @@ class MainActivity : ComponentActivity() {
             val activeStream by activeForView.collectAsStateWithLifecycle(initialValue = activeNow)
             val videoStatsShown by app.videoStatsShown.collectAsStateWithLifecycle()
             val query by sessions.search.query.collectAsStateWithLifecycle()
+            val macStatus by app.client.macStatus.collectAsStateWithLifecycle()
             AppTheme {
                 AppRoot(
                     paired = paired,
                     home = HomeModel(
                         state, destination, tree, live, unpairing, unpairFailed, version, relayOrigin,
-                        activeStream, video, debugBuild, videoStatsShown, query,
+                        activeStream, video, debugBuild, videoStatsShown, query, macStatus,
                     ),
                     homeActions = homeActions,
                     pairingActions = actions,

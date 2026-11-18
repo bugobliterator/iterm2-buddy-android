@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.browserEditingChanged(streamID: 2, editing: true))",
+  "json" : {"payload":{"browserEditingChanged":{"editing":true,"streamID":2}}}
+}

@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.browserNavigationChanged(streamID: 2, state: WireFixtures.CompanionBrowserNavigationState(url: \"https://iterm2.com/documentation-web-browser.html\", title: \"Web Browser - Documentation - iTerm2\", canGoBack: true, canGoForward: false, isLoading: true)))",
+  "json" : {"payload":{"browserNavigationChanged":{"state":{"canGoBack":true,"canGoForward":false,"isLoading":true,"title":"Web Browser - Documentation - iTerm2","url":"https:\/\/iterm2.com\/documentation-web-browser.html"},"streamID":2}}}
+}

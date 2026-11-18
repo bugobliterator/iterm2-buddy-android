@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.modalAlertAnswerRejected(alertID: \"6F1C2B3A-4D5E-4F60-8172-93A4B5C6D7E8\"))",
+  "json" : {"payload":{"modalAlertAnswerRejected":{"alertID":"6F1C2B3A-4D5E-4F60-8172-93A4B5C6D7E8"}}}
+}

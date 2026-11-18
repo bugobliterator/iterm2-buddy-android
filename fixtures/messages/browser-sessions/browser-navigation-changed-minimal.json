@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.browserNavigationChanged(streamID: 2, state: WireFixtures.CompanionBrowserNavigationState(url: \"\", title: \"\", canGoBack: false, canGoForward: false, isLoading: false)))",
+  "json" : {"payload":{"browserNavigationChanged":{"state":{},"streamID":2}}}
+}
