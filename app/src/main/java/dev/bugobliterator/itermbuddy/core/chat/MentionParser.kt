@@ -108,12 +108,16 @@ object MentionParser {
      * renderer may linkify and must keep whole through its markdown pass, so a stable ID's "_"
      * never pairs up as emphasis; a mention a span touches stays text. Used in place of
      * upstream's random-nonce placeholders.
+     *
+     * [atSignOptional] false keeps only "@"-signed mentions: for the owner's text, where a bare
+     * stable ID is prose, as iOS links only "@"-signed ones (`MessageBubbleView.swift:119-121`).
+     * True (upstream's `protect`) adds the agent's bare stable IDs, which the Mac links too.
      */
-    fun protectedMentions(markdown: String, indentedCodeBlocks: Boolean = false): List<Mention> =
-        findProtectedMentions(markdown, indentedCodeBlocks)
+    fun protectedMentions(markdown: String, indentedCodeBlocks: Boolean = false, atSignOptional: Boolean = true): List<Mention> =
+        findProtectedMentions(markdown, indentedCodeBlocks, atSignOptional)
 
-    internal fun findProtectedMentions(markdown: CharSequence, indentedCodeBlocks: Boolean): List<Mention> {
-        val found = findMentions(markdown, atSignOptional = true)
+    internal fun findProtectedMentions(markdown: CharSequence, indentedCodeBlocks: Boolean, atSignOptional: Boolean = true): List<Mention> {
+        val found = findMentions(markdown, atSignOptional)
         if (found.isEmpty()) return found
         val codeAndLinks = ProtectedSpanScanner.codeAndLinkSpans(markdown)
         val indentedLines = if (indentedCodeBlocks) ProtectedSpanScanner.indentedLineSpans(markdown) else emptyList()
