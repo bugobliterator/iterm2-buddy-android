@@ -1,0 +1,118 @@
+name: Real iTerm2
+
+# Runs the app's own CompanionClient, as the phone, against a real iTerm2 3.7.7 on a macOS
+# runner, through a local relay behind TLS. See ci/real-iterm2/README.md.
+#
+# Manual only: it is slow and depends on iterm2.com, so it never runs on every push to main.
+on:
+  workflow_dispatch:
+  # Temporary, while the job is being brought up: runs on pushes to the bring-up branch that
+  # touch the job itself. Remove this trigger once the job is stable.
+  push:
+    branches: [claude/pairing-milestone-handover-8y7390]
+    paths:
+      - .github/workflows/real-iterm2.yml
+      - ci/real-iterm2/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pairing-and-session-tree:
+    # Apple Silicon, macOS 15: iTerm2 3.7.7 needs macOS 13 or later, and later stages need the
+    # hardware HEVC encoder, which Apple Silicon has.
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    # The scripts work in $RUNNER_TEMP/real-iterm2 (ci/real-iterm2/common.sh).
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 11.3.0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          # `yes` exits on SIGPIPE when sdkmanager stops reading; ignore that under pipefail.
+          (yes || true) | "$sdkmanager" --licenses > /dev/null
+          "$sdkmanager" --install "platforms;android-37.0" "build-tools;37.0.0"
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      # Compiled before iTerm2 starts, so a build failure fails fast and the wait for the Mac
+      # is not padded with compile time.
+      - name: Compile the unit tests
+        run: ./gradlew compileDebugUnitTestKotlin
+
+      - name: Install iTerm2 3.7.7
+        run: bash ci/real-iterm2/install-iterm2.sh
+
+      - name: Install the companion plugin
+        run: bash ci/real-iterm2/install-companion-plugin.sh
+
+      - name: Generate the pairing keys
+        run: bash ci/real-iterm2/generate-pairing.sh
+
+      - name: Seed iTerm2's pairing
+        run: bash ci/real-iterm2/seed-pairing.sh
+
+      - name: Start the relay and the TLS proxy
+        run: bash ci/real-iterm2/start-relay.sh
+
+      - name: Launch iTerm2
+        run: bash ci/real-iterm2/launch-iterm2.sh
+
+      - name: Pair, ping and read the session tree
+        env:
+          REAL_ITERM2: '1'
+          REAL_ITERM2_PAIRING_FILE: ${{ runner.temp }}/real-iterm2/pairing.env
+          REAL_ITERM2_RELAY_URL: ws://127.0.0.1:8787/
+          REAL_ITERM2_CONNECT_TIMEOUT_SECONDS: '180'
+          REAL_ITERM2_REQUEST_TIMEOUT_SECONDS: '30'
+        run: ./gradlew realIterm2Test
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          bash ci/real-iterm2/collect-diagnostics.sh
+          summary="$RUNNER_TEMP/real-iterm2/diagnostics/summary.txt"
+          if [ -f "$summary" ]; then
+            {
+              echo "### Real iTerm2 diagnostics"
+              echo
+              echo '```'
+              cat "$summary"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload diagnostics and test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: real-iterm2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/real-iterm2/diagnostics/
+            app/build/reports/tests/realIterm2Test/
+            app/build/test-results/realIterm2Test/
+          retention-days: 14
+          if-no-files-found: warn

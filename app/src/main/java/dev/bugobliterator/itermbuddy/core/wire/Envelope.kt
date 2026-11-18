@@ -214,6 +214,7 @@ private fun decodeMacCase(
     "chatListChanged" -> decodeChatListChanged(body)
     "aiAvailabilityChanged" -> decodeAiAvailabilityChanged(body)
     "sessionScreenInfo" -> decodeSessionScreenInfo(body)
+    "sessionContent" -> decodeSessionContent(body)
     "error" -> {
         val error = body.asObject(case)[UNLABELLED] as? JsonObject
             ?: throw WireDecodeException("error.$UNLABELLED is missing or not an object")

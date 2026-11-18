@@ -45,6 +45,30 @@ data class SessionScreenInfo(
             "width=$width, lineHeight=$lineHeight, scale=$scale)"
 }
 
+/**
+ * Upstream `CompanionSessionContent` (`MSG:156-163`): the session lines [firstLine] ..< [firstLine] +
+ * [lineCount] the Mac actually rendered, as one PNG. [pngData] is rendered terminal content: the
+ * value keeps its own copy, hands out a fresh copy on every read, and [toString] shows only its size.
+ */
+class SessionContent(val guid: String, val firstLine: Int, val lineCount: Int, pngData: ByteArray) {
+    private val png = pngData.copyOf()
+
+    /** A copy of the PNG bytes. */
+    val pngData: ByteArray get() = png.copyOf()
+
+    /** The PNG's size in bytes, without a copy. */
+    val pngSize: Int get() = png.size
+
+    override fun equals(other: Any?): Boolean =
+        other is SessionContent && other.guid == guid && other.firstLine == firstLine &&
+            other.lineCount == lineCount && other.png.contentEquals(png)
+
+    override fun hashCode(): Int = ((guid.hashCode() * 31 + firstLine) * 31 + lineCount) * 31 + png.contentHashCode()
+
+    override fun toString(): String =
+        "SessionContent(guid=$guid, firstLine=$firstLine, lineCount=$lineCount, pngData=${png.size} bytes)"
+}
+
 private fun obj(vararg entries: Pair<String, JsonElement>) = JsonObject(linkedMapOf(*entries))
 
 internal fun encodeChatIdCase(name: String, chatID: String): JsonObject = case(name, obj("chatID" to JsonPrimitive(chatID)))
@@ -95,6 +119,15 @@ internal fun encodeFetchWorkgroupInfo(message: PhoneMessage.FetchWorkgroupInfo):
 
 internal fun encodeFetchSessionScreenInfo(message: PhoneMessage.FetchSessionScreenInfo): JsonObject =
     case("fetchSessionScreenInfo", obj("sessionGuid" to JsonPrimitive(message.sessionGuid)))
+
+internal fun encodeFetchSessionContent(message: PhoneMessage.FetchSessionContent): JsonObject = case(
+    "fetchSessionContent",
+    obj(
+        "sessionGuid" to JsonPrimitive(message.sessionGuid),
+        "firstLine" to JsonPrimitive(message.firstLine),
+        "lineCount" to JsonPrimitive(message.lineCount),
+    ),
+)
 
 // Decoders. [budgets] bound the file attachment bytes a history or delivery keeps.
 
@@ -212,6 +245,20 @@ internal fun decodeSessionScreenInfo(body: JsonElement): MacMessage {
             width = info.double(path, "width"),
             lineHeight = info.double(path, "lineHeight"),
             scale = info.double(path, "scale"),
+        ),
+    )
+}
+
+internal fun decodeSessionContent(body: JsonElement): MacMessage {
+    val case = "sessionContent"
+    val content = body.asObject(case).obj(case, UNLABELLED)
+    val path = "$case.$UNLABELLED"
+    return MacMessage.SessionContentMessage(
+        SessionContent(
+            guid = content.string(path, "guid"),
+            firstLine = content.int(path, "firstLine"),
+            lineCount = content.int(path, "lineCount"),
+            pngData = content.base64(path, "pngData"),
         ),
     )
 }
