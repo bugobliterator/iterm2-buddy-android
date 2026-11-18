@@ -1,7 +1,8 @@
 name: Real iTerm2
 
 # Runs the app's own CompanionClient, as the phone, against a real iTerm2 3.7.7 on a macOS
-# runner, through a local relay behind TLS. See ci/real-iterm2/README.md.
+# runner, through a local relay behind TLS: pairing, the session tree, typing into a session and
+# its live HEVC stream. See ci/real-iterm2/README.md.
 #
 # Manual only: it is slow and depends on iterm2.com, so it never runs on every push to main.
 on:
@@ -22,7 +23,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pairing-and-session-tree:
+  pairing-input-and-stream:
     # Apple Silicon, macOS 15: iTerm2 3.7.7 needs macOS 13 or later, and later stages need the
     # hardware HEVC encoder, which Apple Silicon has.
     runs-on: macos-15
@@ -81,7 +82,11 @@ jobs:
       - name: Launch iTerm2
         run: bash ci/real-iterm2/launch-iterm2.sh
 
-      - name: Pair, ping and read the session tree
+      # Stage 1 (RealIterm2PairingTest): pair, ping, read the session tree and a session's
+      # content. Stage 2 (RealIterm2SessionInputTest, RealIterm2LiveStreamTest): type a command
+      # into the session and see it change; start a live stream, check its HEVC config and
+      # keyframe, and stop it. One JVM runs them one after another (app/build.gradle.kts).
+      - name: Pair, type into a session and stream it
         env:
           REAL_ITERM2: '1'
           REAL_ITERM2_PAIRING_FILE: ${{ runner.temp }}/real-iterm2/pairing.env

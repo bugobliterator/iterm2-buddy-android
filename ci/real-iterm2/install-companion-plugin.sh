@@ -3,9 +3,9 @@
 # (CompanionPluginInstaller.swift:93-146): unpacked into Application Support/iTerm2/Plugins,
 # quarantine stripped, registered with LaunchServices.
 #
-# Before installing it checks the zip against COMPANION_PLUGIN_ZIP_SHA256 when that pin is set,
-# and always checks the plugin's JavaScript against its Ed25519 signature with the key iTerm2
-# embeds (CompanionPlugin.swift:24), which is the check iTerm2 makes before it runs the plugin.
+# Before installing it checks the zip against the pinned COMPANION_PLUGIN_ZIP_SHA256 (a mismatch
+# fails the job), then checks the plugin's JavaScript against its Ed25519 signature with the key
+# iTerm2 embeds (CompanionPlugin.swift:24), which is the check iTerm2 makes before it runs it.
 # Afterwards it asks NSWorkspace for the bundle ID, as iTerm2 does, so a plugin iTerm2 would not
 # find fails here and not as a silent "plugin missing" (which makes iTerm2 drop the pairing).
 #
@@ -21,13 +21,10 @@ LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchS
 zip="$DOWNLOADS_DIR/iTermCompanion.zip"
 download "$COMPANION_PLUGIN_ZIP_URL" "$zip"
 actual="$(sha256_of "$zip")"
-if [[ -n "$COMPANION_PLUGIN_ZIP_SHA256" ]]; then
-    [[ "$actual" == "$COMPANION_PLUGIN_ZIP_SHA256" ]] ||
-        die "companion plugin zip sha256 is $actual, expected the pinned $COMPANION_PLUGIN_ZIP_SHA256"
-    log "companion plugin zip matches the pinned sha256"
-else
-    warn "the companion plugin zip is not pinned yet: set COMPANION_PLUGIN_ZIP_SHA256=\"$actual\" in ci/real-iterm2/common.sh. Its Ed25519 signature is still checked below."
-fi
+[[ -n "$COMPANION_PLUGIN_ZIP_SHA256" ]] || die "COMPANION_PLUGIN_ZIP_SHA256 is not set in ci/real-iterm2/common.sh"
+[[ "$actual" == "$COMPANION_PLUGIN_ZIP_SHA256" ]] ||
+    die "companion plugin zip sha256 is $actual, expected the pinned $COMPANION_PLUGIN_ZIP_SHA256; if iterm2.com replaced the plugin on purpose, check it and update the pin in ci/real-iterm2/common.sh"
+log "companion plugin zip matches the pinned sha256"
 
 unpacked="$DOWNLOADS_DIR/companion-plugin-unpacked"
 rm -rf "$unpacked"

@@ -22,10 +22,10 @@ ITERM2_APP="/Applications/iTerm.app"
 
 # The companion plugin iTerm2 3.7.7 installs itself (CompanionPluginInstaller.swift:59).
 COMPANION_PLUGIN_ZIP_URL="https://iterm2.com/downloads/companion-plugin/iTermCompanion-1.0.zip"
-# Empty until the first CI run prints the hash to pin. Until then the plugin is trusted only
-# through iTerm2's own check, repeated here: an Ed25519 signature over its JavaScript, made with
+# Pinned from run 44406337389, the first to install it; a different zip fails the job. The
+# plugin's JavaScript is also checked the way iTerm2 checks it: an Ed25519 signature made with
 # the key iTerm2 3.7.7 embeds.
-COMPANION_PLUGIN_ZIP_SHA256=""
+COMPANION_PLUGIN_ZIP_SHA256="2a6cea5e99a75d53ae673476ea5042ced6e4b2cad3ccbdbf5e54c89065f6e748"
 COMPANION_PLUGIN_SIGNING_KEY="GHS0N02DR3kF7u3gqB5GF52dmre/oUkJuarQzEv8crw="
 COMPANION_PLUGIN_BUNDLE_ID="com.googlecode.iterm2.iTermCompanion"
 
