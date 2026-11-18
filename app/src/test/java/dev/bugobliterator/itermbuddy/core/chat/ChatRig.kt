@@ -151,6 +151,9 @@ internal class ChatRig(
     /** Replaces the reply to `listChatsAndSessions`: the whole envelope, given the request ID. */
     @Volatile var listFrame: ((Long?) -> ByteArray)? = null
 
+    /** Each `listChatsAndSessions` reply is sent this much later (its own coroutine). */
+    @Volatile var listHold: Duration? = null
+
     /** Runs after a chat's history and snapshot are sent. */
     @Volatile var afterSubscribe: suspend (String) -> Unit = {}
 
@@ -167,7 +170,22 @@ internal class ChatRig(
         mac.onRequestScripted("listChatsAndSessions") { envelope ->
             listRequests.incrementAndGet()
             val id = requestIDOf(envelope)
-            mac.sendRaw(listFrame?.invoke(id) ?: envelope(listPayload("chatsAndSessions"), id))
+            val frame = listFrame?.invoke(id) ?: envelope(listPayload("chatsAndSessions"), id)
+            val hold = listHold
+            if (hold == null) {
+                mac.sendRaw(frame)
+            } else {
+                test.backgroundScope.launch {
+                    delay(hold)
+                    try {
+                        mac.sendRaw(frame)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        // The link went away while the reply was held back.
+                    }
+                }
+            }
         }
         mac.onRequestScripted("subscribe") { envelope ->
             val id = requestIDOf(envelope)
@@ -228,15 +246,7 @@ internal class ChatRig(
     }
 
     /** The chat list as the Mac sends it with payload [case]. */
-    fun listPayload(case: String): JsonObject {
-        val sample = FakeChatMac.samplePayload("chats-and-sessions.json").getValue("chatsAndSessions").jsonObject
-        val template = sample.getValue("chats").jsonArray[1].jsonObject
-        val entries = chats.map { (id, lastModified) -> entry(template, id, lastModified) }
-        val body = LinkedHashMap<String, JsonElement>()
-        body["chats"] = JsonArray(entries)
-        if (case == "chatsAndSessions") body["sessions"] = sample.getValue("sessions")
-        return JsonObject(mapOf(case to JsonObject(body)))
-    }
+    fun listPayload(case: String): JsonObject = listPayloadOf(case, chats)
 
     /** Pushes `chatListChanged` with [chats]. */
     suspend fun pushList() = mac.sendRaw(envelope(listPayload("chatListChanged"), null))
@@ -249,6 +259,17 @@ internal class ChatRig(
     fun subscribesFor(chatID: String): Int = subscribes.count { it == chatID }
 
     companion object {
+        /** A chat list payload with [case] listing [chats] ((chat ID, `lastModifiedDate`)). */
+        fun listPayloadOf(case: String, chats: List<Pair<String, Double>>): JsonObject {
+            val sample = FakeChatMac.samplePayload("chats-and-sessions.json").getValue("chatsAndSessions").jsonObject
+            val template = sample.getValue("chats").jsonArray[1].jsonObject
+            val entries = chats.map { (id, lastModified) -> entry(template, id, lastModified) }
+            val body = LinkedHashMap<String, JsonElement>()
+            body["chats"] = JsonArray(entries)
+            if (case == "chatsAndSessions") body["sessions"] = sample.getValue("sessions")
+            return JsonObject(mapOf(case to JsonObject(body)))
+        }
+
         const val ORIGIN = "https://relay.example.ts.net"
         const val SEED = 20261119
         const val RAW_CAP = 32 * 1024

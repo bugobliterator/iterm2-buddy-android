@@ -238,7 +238,8 @@ class ChatSubscriptionsTest {
         // A timeout does not release it: it may be the frame still arriving.
         settle(CHAT_A, TIMEOUT)
         assertEquals(emptyList<String>(), planAndStart(wanted))
-        subscriptions.subscribed(CHAT_A)
+        // Its late history lands, with a request ID the caller could not map.
+        subscriptions.subscribed(CHAT_A, consumeLateTicket = true)
         assertEquals(setOf(CHAT_C), oversized.suspects)
 
         assertEquals("the next suspect, alone", listOf(CHAT_C), planAndStart(wanted))
@@ -479,6 +480,47 @@ class ChatSubscriptionsTest {
         assertEquals("the newer request can still end the link", setOf(CHAT_A), subscriptions.outstanding)
         settle(CHAT_A, ANSWERED)
         assertEquals(emptySet<String>(), subscriptions.outstanding)
+    }
+
+    @Test
+    fun twoTimedOutTicketsAreAnsweredOnlyByTheirOwnReplies() {
+        val wanted = listed(CHAT_A)
+        assertEquals(listOf(CHAT_A), planAndStart(wanted))
+        val older = tickets.remove(CHAT_A)!!
+        subscriptions.settled(older, TIMEOUT)
+        subscriptions.tryAgain(CHAT_A)
+        assertEquals(listOf(CHAT_A), planAndStart(wanted))
+        val newer = tickets.remove(CHAT_A)!!
+        subscriptions.settled(newer, TIMEOUT)
+
+        // A mapped history: the caller settles its own ticket; this consumes none.
+        subscriptions.settled(older, ANSWERED)
+        subscriptions.subscribed(CHAT_A)
+        assertEquals("the newer request can still end the link", setOf(CHAT_A), subscriptions.outstanding)
+        subscriptions.settled(newer, ANSWERED)
+        assertEquals(emptySet<String>(), subscriptions.outstanding)
+    }
+
+    @Test
+    fun anUnmappedHistoryConsumesOnlyTheOldestTimedOutTicket() {
+        val wanted = listed(CHAT_A)
+        planAndStart(wanted)
+        subscriptions.settled(tickets.remove(CHAT_A)!!, TIMEOUT)
+        subscriptions.tryAgain(CHAT_A)
+        planAndStart(wanted)
+        subscriptions.settled(tickets.remove(CHAT_A)!!, TIMEOUT)
+        subscriptions.subscribed(CHAT_A, consumeLateTicket = true)
+        assertEquals(setOf(CHAT_A), subscriptions.outstanding)
+        subscriptions.subscribed(CHAT_A, consumeLateTicket = true)
+        assertEquals(emptySet<String>(), subscriptions.outstanding)
+    }
+
+    @Test
+    fun aSingleUnansweredChatWithTheListOutIsOnlyASuspect() {
+        planAndStart(listOf(CHAT_A))
+        subscriptions.linkEnded(messageTooLarge = true, listOut = true)
+        assertEquals(emptySet<String>(), oversized.tooLarge)
+        assertEquals(setOf(CHAT_A), oversized.suspects)
     }
 
     private companion object {

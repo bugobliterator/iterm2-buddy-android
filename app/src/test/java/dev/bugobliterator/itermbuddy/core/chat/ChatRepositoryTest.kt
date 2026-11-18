@@ -7,6 +7,8 @@ import dev.bugobliterator.itermbuddy.core.chat.ChatRig.Companion.SETTLE
 import dev.bugobliterator.itermbuddy.core.chat.ChatRig.Companion.chatId
 import dev.bugobliterator.itermbuddy.core.chat.ChatRig.Companion.envelope
 import dev.bugobliterator.itermbuddy.core.chat.ChatRig.Companion.padded
+import dev.bugobliterator.itermbuddy.core.RequestNotSentException
+import dev.bugobliterator.itermbuddy.core.stream.StreamLink
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.core.wire.decodeEnvelope
@@ -14,8 +16,10 @@ import dev.bugobliterator.itermbuddy.fakemac.FakeChatMac
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -1013,6 +1017,94 @@ class ChatRepositoryTest {
         assertEquals(first, ConversationState.Shown(emptyList(), version = 7, stale = false, deleted = false, sendable = true))
         assertNotEquals(first, ConversationState.Shown(listOf(one), version = 8, stale = false, deleted = false, sendable = true))
         assertNotEquals(first, ConversationState.Shown(listOf(one), version = 7, stale = true, deleted = false, sendable = true))
+    }
+
+    @Test
+    fun listLatchesEvenWhenItsReplyOutlastsTheTimeout() = runTest {
+        val rig = ChatRig(this, timeouts = ChatTimeouts(list = 2.seconds))
+        rig.chats = listOf(A to MAC_TIME)
+        rig.listHold = 5.seconds
+        rig.listFrame = { id -> envelope(padded(rig.listPayload("chatsAndSessions"), "chatsAndSessions", NOISE_CAP + 1024), id) }
+        rig.connect()
+        rig.awaitConnected(2)
+        settle()
+        advanceTimeBy(5.minutes)
+        runCurrent()
+        assertEquals("no reconnect loop", 2, rig.connectionCount)
+        assertEquals(1, rig.listRequests.get())
+        assertEquals(ChatListState.Failed(retryable = true), rig.repository.list.value)
+    }
+
+    @Test
+    fun oversizedListWithAnOpenChatSuspectsTheListFirst() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME)
+        rig.listFrame = { id -> envelope(padded(rig.listPayload("chatsAndSessions"), "chatsAndSessions", NOISE_CAP + 1024), id) }
+        rig.repository.open(A)
+        rig.connect()
+        rig.awaitConnected(3)
+        settle()
+        advanceTimeBy(5.minutes)
+        runCurrent()
+        // Link 1: the list and A out together; link 2: the suspect list first and alone, which
+        // ends it by itself; link 3: no list, the suspect A alone, answered.
+        assertEquals(3, rig.connectionCount)
+        assertEquals(2, rig.listRequests.get())
+        assertEquals(listOf(A, A), rig.subscribes.toList())
+        assertEquals("the chat is not blamed for the list", emptySet<String>(), rig.repository.tooLargeChats())
+        assertEquals(sampleHistory.size, rig.shown(A).messages.size)
+        assertEquals(ChatListState.Failed(retryable = true), rig.repository.list.value)
+    }
+
+    @Test
+    fun aListThatLandsClearsItsSuspicion() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
+        rig.repository.open(A)
+        rig.historyFrames[A] = { id -> envelope(padded(FakeChatMac.history(A), "history", NOISE_CAP + 1024), id) }
+        // Every list reply is held a second. Link 1: A's oversized history ends the link with the
+        // list still out, so both are suspects.
+        rig.listHold = 1.seconds
+        rig.connect()
+        rig.awaitConnected(3)
+        settle()
+        advanceTimeBy(5.minutes)
+        runCurrent()
+        // Link 2: the list first and alone, which lands; only then the suspect A, alone, which
+        // ends the link by itself (had A gone beside the held list, the list would be suspected
+        // again); link 3: the list and B.
+        assertEquals(setOf(A), rig.repository.tooLargeChats())
+        assertEquals(3, rig.listRequests.get())
+        assertEquals(listOf(A, A, B), rig.subscribes.toList())
+        assertEquals(listOf(A, B), rig.listedIDs())
+    }
+
+    @Test
+    fun refusedSubscribeIsSettledBeforeAQueuedLinkDown() = runTest {
+        var nextID = 1L
+        val link = object : StreamLink {
+            override suspend fun send(message: PhoneMessage, onLink: Long?) = Unit
+
+            override suspend fun request(
+                message: PhoneMessage,
+                onLink: Long?,
+                timeout: Duration?,
+                onSent: (requestID: Long) -> Unit,
+            ): MacMessage {
+                // The client's linkFor: the session has ended, its LinkDown not yet consumed.
+                if (message is PhoneMessage.Subscribe && message.chatID == B) throw RequestNotSentException("not connected")
+                onSent(nextID++)
+                awaitCancellation()
+            }
+        }
+        val repository = ChatRepository(link, backgroundScope, InMemoryChatSeenStore(), nowMillis = { testScheduler.currentTime })
+        repository.sink.accept(ChatInput.LinkUp(1, 15, aiAvailable = true))
+        runCurrent()
+        val list = envelope(ChatRig.listPayloadOf("chatsAndSessions", listOf(A to MAC_TIME, B to MAC_TIME - 1)), 1)
+        repository.sink.accept(ChatInput.Payload(1, 1, "chatsAndSessions", list))
+        repository.sink.accept(ChatInput.LinkDown(1, messageTooLarge = true))
+        runCurrent()
+        assertEquals("B never reached the Mac: A alone ended the link", setOf(A), repository.tooLargeChats())
     }
 
     /** Counts single marks and batches. */
