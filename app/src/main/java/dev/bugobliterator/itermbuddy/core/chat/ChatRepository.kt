@@ -143,9 +143,11 @@ data class ChatTimeouts(
  * alone ([OversizedChats], [ChatSubscriptions]). Only [retry] subscribes a too-large chat again,
  * or the chat leaving the list and coming back. The list request is unanswered until its reply
  * lands through the sink (a timeout does not answer it). A link ended that way with only the list
- * unanswered marks the list too large for the process: it is not fetched again until [refresh].
- * With subscribes unanswered too, the list and those chats (even one alone) become suspects, and
- * the next link fetches the list first and alone.
+ * unanswered makes it a suspect (the frame may have been anything early on the link); the next
+ * link fetches it first and alone, and if it ends that link alone too it is too large for the
+ * process: not fetched again until [refresh]. With subscribes unanswered too, those chats (even
+ * one alone) become suspects beside it. A suspect list that times out stops holding the chats
+ * back on its link.
  *
  * **Unread.** A chat is unread when the Mac's `lastModified` is past the owner's mark
  * ([ChatSeenStore], Mac values only, never phone time), or its turn ended unseen (Done). A chat's
@@ -266,6 +268,15 @@ class ChatRepository(
      * alone latches [listTooLarge].
      */
     private var listSuspect = false
+
+    /** The list request on this link went out as a suspect: ending this link alone latches it. */
+    private var listRequestedAsSuspect = false
+
+    /**
+     * A request on this link could not be sent ([RequestNotSentException]): the link is gone and
+     * its LinkDown is on the way. Nothing more is planned on it, and nothing is marked failed.
+     */
+    private var linkGone = false
 
     /** Bumped by every list applied, so a failed request does not hide a list that landed meanwhile. */
     private var listGeneration = 0L
@@ -438,6 +449,8 @@ class ChatRepository(
         subscriptions = ChatSubscriptions(oversized)
         listOnThisLink = false
         listInFlight = false
+        listRequestedAsSuspect = false
+        linkGone = false
         subscribeTickets.clear()
         failedThisLink.clear()
         newestDeliveryAuthor.clear()
@@ -456,19 +469,22 @@ class ChatRepository(
     private fun endLink(messageTooLarge: Boolean) {
         val linkId = currentLink ?: return
         val listOut = messageTooLarge && listUnanswered
-        if (listOut && subscriptions.outstanding.isEmpty()) {
-            // Only the list was out: it is what ended the link. Fetching it on every link would
-            // end every link (and the live view with it).
+        if (listOut && subscriptions.outstanding.isEmpty() && (listSuspect || listRequestedAsSuspect)) {
+            // The suspect list was the only thing out: it is what ended the link. Fetching it on
+            // every link would end every link (and the live view with it).
             listTooLarge = true
             listSuspect = false
             listFailed = true
             log("chat link $linkId ended on a frame over the Noise cap with only the list out: the list is too large")
         } else if (listOut) {
-            // The list or a subscribe: the list goes first and alone on the next link.
+            // The list, a subscribe, or some other frame that came early on the link: the list
+            // goes first and alone on the next link, and is latched only if it ends that one alone.
             listSuspect = true
             log("chat link $linkId ended on a frame over the Noise cap with the list out: the list is a suspect")
         }
         listUnanswered = false
+        listRequestedAsSuspect = false
+        linkGone = false
         val before = oversized.tooLarge
         subscriptions.linkEnded(messageTooLarge, listOut)
         val named = oversized.tooLarge - before
@@ -721,6 +737,7 @@ class ChatRepository(
         }
         listInFlight = true
         listUnanswered = true
+        if (listSuspect) listRequestedAsSuspect = true
         listFailed = false
         val generation = listGeneration
         launchRequest(PhoneMessage.ListChatsAndSessions, linkId, timeouts.list, onSent = {}) { outcome ->
@@ -743,13 +760,19 @@ class ChatRepository(
                 is Outcome.NotSent -> {
                     log("the chat list request failed: $outcome")
                     listUnanswered = false
-                    planNeeded = true
-                    if (listGeneration == generation) listFailed = true
+                    linkGone = true
                 }
                 // A timeout leaves the list unanswered: its reply may still be arriving.
                 is Outcome.Failed -> {
                     log("the chat list request failed: $outcome")
                     if (listGeneration == generation) listFailed = true
+                    if (listSuspect) {
+                        // Waiting on it any longer would hold every chat back on this link. It
+                        // stays unanswered, so if it ends this link alone it is still latched.
+                        listSuspect = false
+                        planNeeded = true
+                        log("the suspect chat list timed out: subscribing meanwhile")
+                    }
                 }
             }
         }
@@ -759,7 +782,9 @@ class ChatRepository(
 
     private fun plan() {
         val linkId = currentLink ?: return
-        // A suspect list goes first and alone: nothing else is out until it is answered.
+        // The link is gone (a request could not be sent): its LinkDown is on the way.
+        if (linkGone) return
+        // A suspect list goes first and alone: nothing else is out until it is answered or times out.
         if (listSuspect && listUnanswered) return
         val wanted = subscriptions.wanted(open.keys.toList(), entries.takeIf { listOnThisLink })
         lastWanted = wanted
@@ -802,9 +827,11 @@ class ChatRepository(
             }
             is Outcome.NotSent -> {
                 // The Mac never saw it: nothing of it can still arrive, and it cannot have ended a link.
+                // The link is gone: stop planning on it, and show no failure (the conversation
+                // waits for the next link, as on any drop).
                 log("chat $chatID subscribe was not sent: ${outcome.reason}")
                 subscriptions.settled(ticket, SubscribeOutcome.ERROR)
-                if (chatID !in subscriptions.subscribedChats) failedThisLink += chatID
+                linkGone = true
             }
             is Outcome.Failed -> {
                 // Still installed on the Mac: its history may land later and answer the ticket.
@@ -920,6 +947,8 @@ class ChatRepository(
         listTooLarge = false
         listUnanswered = false
         listSuspect = false
+        listRequestedAsSuspect = false
+        linkGone = false
         subscribeTickets.clear()
         failedThisLink.clear()
         open.clear()

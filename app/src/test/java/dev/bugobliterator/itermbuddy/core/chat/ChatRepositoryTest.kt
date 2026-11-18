@@ -840,12 +840,13 @@ class ChatRepositoryTest {
         rig.chats = listOf(A to MAC_TIME)
         rig.listFrame = { id -> envelope(padded(rig.listPayload("chatsAndSessions"), "chatsAndSessions", NOISE_CAP + 1024), id) }
         rig.connect()
-        rig.awaitConnected(2)
+        rig.awaitConnected(3)
         settle()
         advanceTimeBy(5.minutes)
         runCurrent()
-        assertEquals("no reconnect loop", 2, rig.connectionCount)
-        assertEquals(1, rig.listRequests.get())
+        // Link 1: suspected; link 2: requested alone, ends it alone again: latched.
+        assertEquals("no reconnect loop", 3, rig.connectionCount)
+        assertEquals(2, rig.listRequests.get())
         assertEquals(ChatListState.Failed(retryable = true), rig.repository.list.value)
 
         rig.listFrame = null
@@ -1020,18 +1021,23 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun listLatchesEvenWhenItsReplyOutlastsTheTimeout() = runTest {
+    fun suspectListLatchesEvenWhenItsReplyOutlastsTheTimeout() = runTest {
         val rig = ChatRig(this, timeouts = ChatTimeouts(list = 2.seconds))
         rig.chats = listOf(A to MAC_TIME)
         rig.listHold = 5.seconds
         rig.listFrame = { id -> envelope(padded(rig.listPayload("chatsAndSessions"), "chatsAndSessions", NOISE_CAP + 1024), id) }
+        rig.repository.open(A)
         rig.connect()
-        rig.awaitConnected(2)
+        rig.awaitConnected(3)
         settle()
         advanceTimeBy(5.minutes)
         runCurrent()
-        assertEquals("no reconnect loop", 2, rig.connectionCount)
-        assertEquals(1, rig.listRequests.get())
+        // Link 1: A answered at once, the list ends the link alone at 5 s: suspected. Link 2: the
+        // list alone; its 2 s timeout lets A go meanwhile (answered); at 5 s it ends the link
+        // alone again: latched. Link 3: A, no list.
+        assertEquals("no reconnect loop", 3, rig.connectionCount)
+        assertEquals(2, rig.listRequests.get())
+        assertEquals("the timed-out suspect list stopped holding A back", listOf(A, A, A), rig.subscribes.toList())
         assertEquals(ChatListState.Failed(retryable = true), rig.repository.list.value)
     }
 
@@ -1105,6 +1111,43 @@ class ChatRepositoryTest {
         repository.sink.accept(ChatInput.LinkDown(1, messageTooLarge = true))
         runCurrent()
         assertEquals("B never reached the Mac: A alone ended the link", setOf(A), repository.tooLargeChats())
+    }
+
+    @Test
+    fun deadLinkStopsPlanningWithoutFailingConversations() = runTest {
+        var attempts = 0
+        val link = object : StreamLink {
+            override suspend fun send(message: PhoneMessage, onLink: Long?) = Unit
+
+            override suspend fun request(
+                message: PhoneMessage,
+                onLink: Long?,
+                timeout: Duration?,
+                onSent: (requestID: Long) -> Unit,
+            ): MacMessage {
+                if (message is PhoneMessage.Subscribe) {
+                    // The session has ended; its LinkDown is not consumed yet.
+                    attempts++
+                    throw RequestNotSentException("not connected")
+                }
+                onSent(1)
+                awaitCancellation()
+            }
+        }
+        val repository = ChatRepository(link, backgroundScope, InMemoryChatSeenStore(), nowMillis = { testScheduler.currentTime })
+        val seenStates = CopyOnWriteArrayList<ConversationState>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { repository.conversation(A).collect { seenStates += it } }
+        repository.open(A)
+        repository.sink.accept(ChatInput.LinkUp(1, 15, aiAvailable = true))
+        runCurrent()
+        val list = envelope(ChatRig.listPayloadOf("chatsAndSessions", listOf(A to MAC_TIME, B to MAC_TIME - 1, C to MAC_TIME - 2)), 1)
+        repository.sink.accept(ChatInput.Payload(1, 1, "chatsAndSessions", list))
+        runCurrent()
+        assertEquals("nothing more is planned on a gone link", 1, attempts)
+        assertTrue("no Failed flash: $seenStates", seenStates.none { it is ConversationState.Failed })
+        repository.sink.accept(ChatInput.LinkDown(1))
+        runCurrent()
+        assertEquals(ConversationState.Loading, repository.conversation(A).value)
     }
 
     /** Counts single marks and batches. */
