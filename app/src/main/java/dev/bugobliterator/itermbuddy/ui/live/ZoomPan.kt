@@ -322,3 +322,134 @@ fun visibleFitRect(
  */
 fun fitViewport(canvasW: Int, canvasH: Int, topInset: Int, bottomInset: Int, leftInset: Int = 0, rightInset: Int = 0): Pair<Int, Int> =
     maxOf(0, canvasW - maxOf(0, leftInset) - maxOf(0, rightInset)) to maxOf(0, canvasH - maxOf(0, topInset) - maxOf(0, bottomInset))
+
+/*
+ * The scrollback document (iOS `SessionView.swift:2041-2112`). A terminal's history tiles sit
+ * directly above the live band (the video, drawn at its fit rect) and share its horizontal span,
+ * so in view coordinates the document is [documentFit]: the fit rect grown upward by the history's
+ * height. Zoom and pan treat it as the content (pass it as `fit` to [applyGesture], [clampZoom],
+ * [toggleZoom] and [liftForKeyboard]), so dragging at scale 1 scrolls the history, and a
+ * document taller than the visible area rests with the live band's bottom on the bottom inset
+ * (iOS `scrollToBottom`, 2152-2157); a shorter one sits just below the top inset.
+ *
+ * Document coordinates: x is view x (unscaled), y is 0 at the history's first line and the live
+ * band's top at the history height.
+ */
+
+/** Within this of the visible bottom the live band counts as at the bottom (iOS `isPinnedToBottom`, 1 pt, `SessionView.swift:2144-2147`). */
+private const val LIVE_BOTTOM_SLACK = 1f
+
+/** The document's rect at fit: [fit] (the live band) with [historyHeightPx] of history above it. */
+fun documentFit(fit: FitRect, historyHeightPx: Float): FitRect {
+    val history = inset(historyHeightPx)
+    if (fit.isEmpty || history == 0f) return fit
+    return FitRect(fit.left, fit.top - history, fit.width, fit.height + history)
+}
+
+/**
+ * The image x under document x [docX]: `(docX − fit.left) × imageW / fit.width`, or null outside
+ * the band's span (or for an empty fit or image). Tiles and the band share the span, so this
+ * holds for any document y.
+ */
+fun documentXToImageX(docX: Float, fit: FitRect, imageW: Int): Float? {
+    if (fit.isEmpty || imageW <= 0) return null
+    val imageX = (docX - fit.left) * imageW / fit.width
+    return if (imageX >= 0f && imageX < imageW) imageX else null
+}
+
+/**
+ * The document point (x, y) under screen point ([x], [y]) for the zoom as shown, with
+ * [historyHeightPx] of history above the band at [fit]; null for an unusable zoom or empty fit.
+ */
+fun screenToDocument(x: Float, y: Float, state: ZoomState, fit: FitRect, historyHeightPx: Float): Pair<Float, Float>? {
+    if (!(state.scale > 0f) || !state.scale.isFinite() || fit.isEmpty) return null
+    val viewX = (x - state.offsetX) / state.scale
+    val viewY = (y - state.offsetY) / state.scale
+    return viewX to viewY - documentFit(fit, historyHeightPx).top
+}
+
+/** The document span on screen: y [topPx]…[bottomPx], and whether the live band's bottom is in view. */
+data class DocumentView(val topPx: Float, val bottomPx: Float, val atLiveBottom: Boolean)
+
+/**
+ * What a [viewH]-tall canvas shows of the document under [state]: the document y span from its
+ * top edge to its bottom edge, and whether the live band's bottom is at or above the bottom inset
+ * (the bottom is "live": growth keeps it pinned, and no ↓ Live is offered).
+ */
+fun documentView(state: ZoomState, fit: FitRect, historyHeightPx: Float, viewH: Float, bottomInset: Float = 0f): DocumentView {
+    val current = sane(state)
+    val docTop = documentFit(fit, historyHeightPx).top
+    val top = -current.offsetY / current.scale - docTop
+    val bottom = (finite(viewH) - current.offsetY) / current.scale - docTop
+    val bandBottom = current.offsetY + current.scale * (fit.top + fit.height)
+    return DocumentView(finite(top), finite(bottom), fit.isEmpty || bandBottom <= finite(viewH) - inset(bottomInset) + LIVE_BOTTOM_SLACK)
+}
+
+/**
+ * [state] after the history above the band grew or shrank from [fromHistoryPx] to [toHistoryPx]
+ * (output scrolling into history, a trim or a clear): a document whose live band was at the
+ * bottom stays there, following live output; otherwise the document's top stays put, so the
+ * history being read does not move (iOS re-pins only `wasAtBottom` and leaves the content offset
+ * of a document laid out from its top, `SessionView.swift:2060, 2101-2111`). Then clamped.
+ */
+fun followDocument(
+    state: ZoomState,
+    fit: FitRect,
+    viewW: Float,
+    viewH: Float,
+    fromHistoryPx: Float,
+    toHistoryPx: Float,
+    bottomInset: Float = 0f,
+    topInset: Float = 0f,
+    leftInset: Float = 0f,
+    rightInset: Float = 0f,
+): ZoomState {
+    val edges = Edges(leftInset, topInset, rightInset, bottomInset)
+    val from = clamp(sane(state), documentFit(fit, fromHistoryPx), viewW, viewH, edges)
+    val to = documentFit(fit, toHistoryPx)
+    if (documentView(from, fit, fromHistoryPx, viewH, bottomInset).atLiveBottom) return clamp(from, to, viewW, viewH, edges)
+    val grown = inset(toHistoryPx) - inset(fromHistoryPx)
+    return clamp(ZoomState(from.scale, from.offsetX, finite(from.offsetY + from.scale * grown)), to, viewW, viewH, edges)
+}
+
+/** [state] scrolled so the live band's bottom is on the bottom inset (or the document just below the top one, if shorter); scale and x kept. */
+fun scrollToLive(
+    state: ZoomState,
+    fit: FitRect,
+    historyHeightPx: Float,
+    viewW: Float,
+    viewH: Float,
+    bottomInset: Float = 0f,
+    topInset: Float = 0f,
+    leftInset: Float = 0f,
+    rightInset: Float = 0f,
+): ZoomState {
+    val current = sane(state)
+    return clamp(ZoomState(current.scale, current.offsetX, -Float.MAX_VALUE), documentFit(fit, historyHeightPx), viewW, viewH, Edges(leftInset, topInset, rightInset, bottomInset))
+}
+
+/** One step of a one-finger drag in wheel mode: the panned [state], and the vertical travel the pan edge stopped. */
+class WheelDrag(val state: ZoomState, val pastEdgeY: Float)
+
+/**
+ * A one-finger drag of ([panX], [panY]) over [documentFit] `docFit` while scroll gestures report
+ * mouse-wheel notches: the zoomed content pans first, and only the vertical travel past the pan
+ * edge is left for the wheel (iOS `accrueWheel`, `SessionView.swift:2422-2448`). At scale 1 the
+ * band fits, so the whole drag is past the edge.
+ */
+fun wheelDrag(
+    state: ZoomState,
+    panX: Float,
+    panY: Float,
+    docFit: FitRect,
+    viewW: Float,
+    viewH: Float,
+    bottomInset: Float = 0f,
+    topInset: Float = 0f,
+    leftInset: Float = 0f,
+    rightInset: Float = 0f,
+): WheelDrag {
+    val shown = clamp(sane(state), docFit, viewW, viewH, Edges(leftInset, topInset, rightInset, bottomInset))
+    val moved = applyGesture(shown, 0f, 0f, 1f, panX, panY, docFit, viewW, viewH, shown.scale, bottomInset, topInset, leftInset, rightInset)
+    return WheelDrag(moved, finite(panY) - (moved.offsetY - shown.offsetY))
+}

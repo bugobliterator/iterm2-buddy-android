@@ -409,4 +409,115 @@ class ZoomPanTest {
         assertEquals(ZoomState.FIT, clampZoom(ZoomState(2f, 37f, -12f), FitRect.EMPTY, 500f, 1000f, 300f, 100f))
         assertEquals(ZoomState.FIT, liftForKeyboard(ZoomState(2f, 5f, 5f), FitRect.EMPTY, 500f, 1000f, 0f, 300f))
     }
+
+    // ---- Scrollback document: history tiles above the live band ----
+
+    /** 1000×500 under a 100 px top bar in a 1000×2000 view: the live band at (0, 100, 1000, 500). */
+    private val bandFit = visibleFitRect(1000, 500, 1000f, 2000f, topInset = 100f, bottomInset = 0f)
+
+    @Test
+    fun documentFitPutsHistoryAboveTheLiveBand() {
+        assertEquals(FitRect(0f, 100f, 1000f, 500f), bandFit)
+        assertEquals(FitRect(0f, -2900f, 1000f, 3500f), documentFit(bandFit, 3000f))
+        assertEquals("no history: the band alone", bandFit, documentFit(bandFit, 0f))
+        assertEquals("nonsense history is none", bandFit, documentFit(bandFit, Float.NaN))
+    }
+
+    @Test
+    fun documentOffsetClampsToHistoryTop() {
+        val doc = documentFit(bandFit, 3000f)
+        val top = applyGesture(ZoomState.FIT, 0f, 0f, 1f, 0f, 1e6f, doc, 1000f, 2000f, 4f, topInset = 100f)
+        // The history's first line just below the top bar, never further.
+        assertEquals(3000f, top.offsetY, eps)
+        assertEquals(100f, top.offsetY + doc.top, eps)
+        val bottom = applyGesture(top, 0f, 0f, 1f, 0f, -1e6f, doc, 1000f, 2000f, 4f, topInset = 100f)
+        // The live band's bottom on the view's bottom.
+        assertEquals(1400f, bottom.offsetY, eps)
+        assertEquals(2000f, bottom.offsetY + doc.top + doc.height, eps)
+    }
+
+    @Test
+    fun shortDocumentSitsBelowTheBar() {
+        // 200 px of history and the band fit the 1900 px below the bar: history first, then the band.
+        val doc = documentFit(bandFit, 200f)
+        val state = scrollToLive(ZoomState.FIT, bandFit, 200f, 1000f, 2000f, topInset = 100f)
+        assertEquals(200f, state.offsetY, eps)
+        assertEquals(100f, state.offsetY + doc.top, eps)
+        assertTrue(documentView(state, bandFit, 200f, 2000f).atLiveBottom)
+    }
+
+    @Test
+    fun documentTouchMapsThroughFitLeft() {
+        val fit = FitRect(40f, 0f, 1000f, 500f)
+        assertEquals(1000f, checkNotNull(documentXToImageX(540f, fit, 2000)), eps)
+        assertEquals(0f, checkNotNull(documentXToImageX(40f, fit, 2000)), eps)
+        assertNull("left of the band", documentXToImageX(20f, fit, 2000))
+        assertNull("right of the band", documentXToImageX(1040f, fit, 2000))
+        assertNull(documentXToImageX(540f, FitRect.EMPTY, 2000))
+        assertNull(documentXToImageX(540f, fit, 0))
+    }
+
+    @Test
+    fun screenPointMapsToDocument() {
+        val bottom = scrollToLive(ZoomState.FIT, bandFit, 3000f, 1000f, 2000f, topInset = 100f)
+        // The live band's top is document y 3000, on screen at 1500.
+        assertPoint(540f to 3000f, checkNotNull(screenToDocument(540f, 1500f, bottom, bandFit, 3000f)))
+        val zoomed = ZoomState(2f, -100f, -1000f)
+        // view = (screen − offset) / scale = (320, 1250); document y = 1250 − (100 − 3000).
+        assertPoint(320f to 4150f, checkNotNull(screenToDocument(540f, 1500f, zoomed, bandFit, 3000f)))
+        assertNull(screenToDocument(540f, 1500f, ZoomState(0f, 0f, 0f), bandFit, 3000f))
+    }
+
+    @Test
+    fun documentViewReportsVisibleSpanAndLiveBottom() {
+        val bottom = scrollToLive(ZoomState.FIT, bandFit, 3000f, 1000f, 2000f, topInset = 100f)
+        val atBottom = documentView(bottom, bandFit, 3000f, 2000f)
+        assertEquals(1500f, atBottom.topPx, eps)
+        assertEquals(3500f, atBottom.bottomPx, eps)
+        assertTrue(atBottom.atLiveBottom)
+        val up = documentView(ZoomState(1f, 0f, 2000f), bandFit, 3000f, 2000f)
+        assertEquals(900f, up.topPx, eps)
+        assertEquals(2900f, up.bottomPx, eps)
+        assertTrue(!up.atLiveBottom)
+        // The keyboard's inset: the band's bottom must be above it to count as at the bottom.
+        assertTrue(!documentView(bottom, bandFit, 3000f, 2000f, bottomInset = 600f).atLiveBottom)
+    }
+
+    @Test
+    fun growthKeepsBottomPinnedOnlyAtBottom() {
+        val bottom = scrollToLive(ZoomState.FIT, bandFit, 3000f, 1000f, 2000f, topInset = 100f)
+        val grown = followDocument(bottom, bandFit, 1000f, 2000f, 3000f, 3500f, topInset = 100f)
+        assertEquals("still following the live band", 1400f, grown.offsetY, eps)
+        val reading = ZoomState(1f, 0f, 2000f)
+        val kept = followDocument(reading, bandFit, 1000f, 2000f, 3000f, 3500f, topInset = 100f)
+        // The history under the finger stays put: the document grew below it.
+        assertEquals(2500f, kept.offsetY, eps)
+        assertEquals(documentView(reading, bandFit, 3000f, 2000f).topPx, documentView(kept, bandFit, 3500f, 2000f).topPx, eps)
+        val zoomedReading = ZoomState(2f, 0f, 4000f)
+        assertEquals(5000f, followDocument(zoomedReading, bandFit, 1000f, 2000f, 3000f, 3500f, topInset = 100f).offsetY, eps)
+    }
+
+    @Test
+    fun scaleOneWheelDragIsAllPastTheEdge() {
+        // The alternate screen: no history, the band shorter than the view.
+        val shown = clampZoom(ZoomState.FIT, bandFit, 1000f, 2000f, topInset = 100f)
+        val drag = wheelDrag(shown, 0f, 30f, bandFit, 1000f, 2000f, topInset = 100f)
+        assertEquals(shown, drag.state)
+        assertEquals(30f, drag.pastEdgeY, eps)
+        assertEquals(-30f, wheelDrag(shown, 0f, -30f, bandFit, 1000f, 2000f, topInset = 100f).pastEdgeY, eps)
+    }
+
+    @Test
+    fun zoomedWheelDragPansBeforeWheeling() {
+        // At scale 4 the band is 2000 tall: the offset runs from 2000 − 4·600 = −400 to 100 − 4·100 = −300.
+        val zoomed = ZoomState(4f, 0f, -290f)
+        val clamped = clampZoom(zoomed, bandFit, 1000f, 2000f, topInset = 100f)
+        assertEquals(-300f, clamped.offsetY, eps)
+        val up = wheelDrag(ZoomState(4f, 0f, -390f), 0f, 30f, bandFit, 1000f, 2000f, topInset = 100f)
+        assertEquals("panned to the top edge first", -360f, up.state.offsetY, eps)
+        assertEquals(0f, up.pastEdgeY, eps)
+        val past = wheelDrag(ZoomState(4f, 0f, -310f), 0f, 30f, bandFit, 1000f, 2000f, topInset = 100f)
+        assertEquals(-300f, past.state.offsetY, eps)
+        assertEquals("only the drag past the edge wheels", 20f, past.pastEdgeY, eps)
+    }
 }

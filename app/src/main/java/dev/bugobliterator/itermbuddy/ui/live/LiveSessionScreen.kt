@@ -117,6 +117,12 @@ interface LiveSessionActions {
      */
     fun typeThenReturn(target: InputTarget, text: String)
 
+    /**
+     * Mouse-wheel notches for [target]'s stream [streamID] (the alternate screen with wheel
+     * reporting), through the same ordered input sender as keys.
+     */
+    fun scrollWheel(target: InputTarget, streamID: Long, up: Boolean, lines: Int)
+
     /** The composer's draft for [sessionGuid], kept in memory per session (not in saved state). */
     fun composerDraft(sessionGuid: String): String
 
@@ -145,6 +151,12 @@ interface LiveSessionActions {
  * went away (a reconnect) comes back with it. Multi-line or long commits (dictation) open the
  * composer seeded with them. Sticky modifiers, the tray and the draft are per session; the draft
  * is cleared only once its paste was handed to the sender.
+ *
+ * **Scrollback.** A terminal session's picture is a [ScrollbackCanvas]: its history tiles above
+ * the live band, opening at the bottom, with **↓ Live** over the bottom of the visible area while
+ * scrolled up. On the alternate screen with mouse-wheel reporting a one-finger drag sends wheel
+ * notches to the active stream through the ordered input sender, only while input is offered.
+ * Browser sessions keep the plain [VideoCanvas].
  *
  * **Edge to edge** (iOS `SessionView.swift:870-889, 1985-2005`). The canvas is the whole window
  * on black; the compact [LiveTopBar] (status bar scrim and a 48 dp row), the navigation bar, and
@@ -221,6 +233,7 @@ private fun LiveSessionContent(
     val fitState = fitButton(session, live, config, viewportWidth, viewportHeight, source.output.maxSize(), source.output::sizeSupported)
     val fit = { actions.fitToPhone(session.guid, viewportWidth, viewportHeight) }
     var menuOpen by remember { mutableStateOf(false) }
+    val scrollback = remember(session.guid) { ScrollbackControl() }
     val snackbar = remember { SnackbarHostState() }
     val snackbarScope = rememberCoroutineScope()
 
@@ -315,19 +328,44 @@ private fun LiveSessionContent(
             .onSizeChanged { canvas = it },
     ) {
         TerminalInput(keyboard, translator.takeIf { offersInput }, Modifier.align(Alignment.TopStart))
-        VideoCanvas(
-            source = source,
-            imageWidth = config?.pixelWidth ?: 0,
-            imageHeight = config?.pixelHeight ?: 0,
-            sessionGuid = session.guid,
-            onCanvasSize = {},
-            onTap = { if (currentTarget != null) keyboard.show() },
-            topInset = topChrome.toFloat(),
-            restBottomInset = navigationBottom.toFloat(),
-            bottomInset = bottomCover,
-            leftInset = leftInset.toFloat(),
-            rightInset = rightInset.toFloat(),
-        )
+        val historyTiles = source.historyTiles
+        if (historyTiles != null && !session.isBrowser) {
+            val streamID = activeStream?.takeIf { it.sessionGuid == session.guid }?.streamID
+            val currentStreamID by rememberUpdatedState(streamID)
+            ScrollbackCanvas(
+                source = source,
+                store = historyTiles,
+                config = config,
+                sessionGuid = session.guid,
+                control = scrollback,
+                onCanvasSize = {},
+                onWheel = { up, lines ->
+                    val wheelTarget = currentTarget
+                    val wheelStream = currentStreamID
+                    if (wheelTarget != null && wheelStream != null) currentActions.scrollWheel(wheelTarget, wheelStream, up, lines)
+                },
+                onTap = { if (currentTarget != null) keyboard.show() },
+                topInset = topChrome.toFloat(),
+                restBottomInset = navigationBottom.toFloat(),
+                bottomInset = bottomCover,
+                leftInset = leftInset.toFloat(),
+                rightInset = rightInset.toFloat(),
+            )
+        } else {
+            VideoCanvas(
+                source = source,
+                imageWidth = config?.pixelWidth ?: 0,
+                imageHeight = config?.pixelHeight ?: 0,
+                sessionGuid = session.guid,
+                onCanvasSize = {},
+                onTap = { if (currentTarget != null) keyboard.show() },
+                topInset = topChrome.toFloat(),
+                restBottomInset = navigationBottom.toFloat(),
+                bottomInset = bottomCover,
+                leftInset = leftInset.toFloat(),
+                rightInset = rightInset.toFloat(),
+            )
+        }
         // The visible area inside the insets, for what is drawn over the picture: its bottom follows
         // the keyboard (read in layout), so an overlay's button is never behind the key bar.
         Box(
@@ -359,6 +397,9 @@ private fun LiveSessionContent(
             }
             if (debugBuild && videoStatsShown) {
                 VideoStatsOverlay(source, Modifier.align(Alignment.TopStart).padding(8.dp))
+            }
+            if (scrollback.offerLive) {
+                LiveChip(onClick = scrollback::jumpToLive, modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp))
             }
             SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
         }
@@ -518,6 +559,15 @@ private fun FitToolbarButton(enabled: Boolean, onFit: () -> Unit, onExplain: () 
             },
         contentAlignment = Alignment.Center,
     ) { Text("⤢", style = MaterialTheme.typography.titleMedium, color = color) }
+}
+
+/** **↓ Live**: back to the live band from the history (Android-only; iOS has no such control). */
+@Composable
+private fun LiveChip(onClick: () -> Unit, modifier: Modifier) {
+    FilledTonalButton(
+        onClick = onClick,
+        modifier = modifier.semantics { contentDescription = "Back to live output" },
+    ) { Text("↓ Live") }
 }
 
 /** Material's alpha for disabled content. */

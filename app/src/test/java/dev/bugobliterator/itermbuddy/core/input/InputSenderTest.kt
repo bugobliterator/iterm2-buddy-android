@@ -108,6 +108,30 @@ class InputSenderTest {
     }
 
     @Test
+    fun scrollWheelIsSentInOrderWithKeys() = runTest {
+        val h = harness()
+        h.sender.key(first, text("a"))
+        h.sender.scrollWheel(first, streamID = 7, up = true, lines = 2)
+        h.sender.key(first, text("b"))
+        h.sender.scrollWheel(first, streamID = 7, up = false, lines = 1)
+        settle()
+        assertEquals(
+            listOf(sendKey("a"), PhoneMessage.ReportScrollWheel(7, true, 2), sendKey("b"), PhoneMessage.ReportScrollWheel(7, false, 1)),
+            h.link.completed.map { it.message },
+        )
+        assertTrue(h.link.completed.all { it.onLink == first.linkId })
+    }
+
+    @Test
+    fun staleScrollWheelIsDiscarded() = runTest {
+        val h = harness()
+        h.current = first.copy(watchEpoch = 2)
+        h.sender.scrollWheel(first, streamID = 7, up = true, lines = 1)
+        settle()
+        assertEquals(emptyList<Sent>(), h.link.attempted)
+    }
+
+    @Test
     fun slowSendIsSkippedAfterTwoSeconds() = runTest {
         val h = harness()
         h.link.behaviour = { message -> if (message == sendKey("a")) awaitCancellation() }

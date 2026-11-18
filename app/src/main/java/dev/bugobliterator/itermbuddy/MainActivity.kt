@@ -74,6 +74,9 @@ class MainActivity : ComponentActivity() {
 
         override fun typeThenReturn(target: InputTarget, text: String) = app.input.typeThenReturn(target, text)
 
+        override fun scrollWheel(target: InputTarget, streamID: Long, up: Boolean, lines: Int) =
+            app.input.scrollWheel(target, streamID, up, lines)
+
         override fun composerDraft(sessionGuid: String): String = app.drafts.get(sessionGuid)
 
         override fun setComposerDraft(sessionGuid: String, draft: String) = app.drafts.set(sessionGuid, draft)
@@ -102,7 +105,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val version = appVersion()
         val sessions = app.sessions
-        val video = LiveVideoSource(app.video, sessions.controller.state)
+        val video = LiveVideoSource(app.video, sessions.controller.state, sessions.controller.historyTiles)
         val debugBuild = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         // The live view reads the stream's session and config; liveTop moves with the output, so
         // it is dropped here rather than recompose the whole home on every scroll.

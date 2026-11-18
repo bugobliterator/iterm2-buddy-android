@@ -3,31 +3,46 @@ package dev.bugobliterator.itermbuddy.ui.live
 import android.view.Surface
 import androidx.compose.foundation.AndroidEmbeddedExternalSurface
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculateCentroidSize
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.bugobliterator.itermbuddy.core.stream.HistoryTileStore
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
+import dev.bugobliterator.itermbuddy.core.stream.ScrollWheelAccumulator
 import dev.bugobliterator.itermbuddy.ui.settings.decoderRowText
 import dev.bugobliterator.itermbuddy.video.HevcVideoOutput
 import kotlinx.coroutines.flow.Flow
@@ -35,14 +50,15 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
  * The app-scoped pieces the live view reads directly, outside the home model, so the decoder's
- * per-frame stats recompose only what shows them: the process's [output] and the stream
- * controller's [state].
+ * per-frame stats and the live top recompose only what shows them: the process's [output], the
+ * stream controller's [state] and its [historyTiles] (null: no scrollback).
  */
-class LiveVideoSource(val output: HevcVideoOutput, val state: StateFlow<LiveViewState>) {
+class LiveVideoSource(val output: HevcVideoOutput, val state: StateFlow<LiveViewState>, val historyTiles: HistoryTileStore? = null) {
     /** [videoVisible] now, for the view of [sessionGuid]. */
     fun visible(sessionGuid: String): Boolean = videoVisible(state, output.stats, sessionGuid)
 
@@ -96,6 +112,20 @@ class LiveVideoSource(val output: HevcVideoOutput, val state: StateFlow<LiveView
  * (sliding up, its top may leave the screen), the owner can pan up to the top, and when the
  * keyboard closes the picture returns to where it was (fit at scale 1). A tap maps to the image
  * with [viewToImage] of the shown state ([shownZoom]), so it accounts for the lift.
+ *
+ * **Scrollback document** ([ScrollbackCanvas]). With [historyHeightPx] above 0 the content is the
+ * [documentFit]: [drawHistory] paints the history above the band (given the band's left, top and
+ * width as the surface is placed, so the last history line meets the band's first), and zoom,
+ * pan, the clamp and the keyboard lift all treat the document as the content. The kept zoom
+ * remembers the history height it was made for and is shown through [followDocument], so growth
+ * keeps the live band pinned only when it was at the bottom. [onDocumentView] hears what is shown
+ * ([documentView]) on every change, outside composition; each change of [jumpToLive] scrolls the
+ * band back to the bottom ([scrollToLive]).
+ *
+ * **Wheel** ([wheelStepPx] non-null: the alternate screen with mouse-wheel reporting). A
+ * one-finger drag pans a zoomed picture first, and the travel past the pan edge ([wheelDrag])
+ * becomes notches, [onWheel] once per drag step that reaches one, with the notch count of that
+ * step (iOS `accrueWheel`). A gesture that has had two fingers down only zooms and pans.
  */
 @Composable
 fun VideoCanvas(
@@ -111,6 +141,12 @@ fun VideoCanvas(
     bottomInset: () -> Float = { restBottomInset },
     leftInset: Float = 0f,
     rightInset: Float = 0f,
+    historyHeightPx: Float = 0f,
+    drawHistory: (DrawScope.(bandLeft: Float, bandTop: Float, bandWidth: Float) -> Unit)? = null,
+    onDocumentView: (DocumentView) -> Unit = {},
+    jumpToLive: Int = 0,
+    wheelStepPx: Float? = null,
+    onWheel: (up: Boolean, lines: Int) -> Unit = { _, _ -> },
 ) {
     var canvas by remember { mutableStateOf(IntSize.Zero) }
     val viewW = canvas.width.toFloat()
@@ -123,14 +159,32 @@ fun VideoCanvas(
     // No image size yet: the surface fills the visible area, so the decoder has one at once.
     val surfaceRect = if (fit.isEmpty) FitRect(leftInset, topInset, viewW - leftInset - rightInset, viewH - topInset - restBottomInset) else fit
     val max = maxScale(image?.width ?: 0, fit)
+    val history = if (fit.isEmpty || !historyHeightPx.isFinite()) 0f else maxOf(0f, historyHeightPx)
     // Read in the layer and the gesture handlers only (see bottomInset).
     var kept by remember(zoomKey) { mutableStateOf(KeptZoom(ZoomState.FIT, null)) }
     val visible by remember(source, sessionGuid) { source.visibility(sessionGuid) }
         .collectAsStateWithLifecycle(initialValue = source.visible(sessionGuid))
     val density = LocalDensity.current
     val currentOnTap by rememberUpdatedState(onTap)
-    val geometry by rememberUpdatedState(GestureGeometry(fit, viewW, viewH, max, topInset, restBottomInset, leftInset, rightInset))
+    val geometry by rememberUpdatedState(GestureGeometry(fit, viewW, viewH, max, topInset, restBottomInset, leftInset, rightInset, history))
     val currentInset by rememberUpdatedState(bottomInset)
+    val wheel = remember(wheelStepPx) { wheelStepPx?.let { ScrollWheelAccumulator(it) } }
+    val currentWheel by rememberUpdatedState(wheel)
+    val currentOnWheel by rememberUpdatedState(onWheel)
+    val currentOnDocumentView by rememberUpdatedState(onDocumentView)
+    LaunchedEffect(zoomKey) {
+        snapshotFlow {
+            val g = geometry
+            val inset = currentInset()
+            documentView(shownZoom(kept, g, inset), g.fit, g.history, g.viewH, inset)
+        }.collect { currentOnDocumentView(it) }
+    }
+    LaunchedEffect(zoomKey, jumpToLive) {
+        if (jumpToLive == 0) return@LaunchedEffect
+        val g = geometry
+        val inset = currentInset()
+        kept = KeptZoom(scrollToLive(shownZoom(kept, g, inset), g.fit, g.history, g.viewW, g.viewH, inset, g.top, g.left, g.right), inset, g.history)
+    }
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -144,11 +198,27 @@ fun VideoCanvas(
             // animates, and restarting the detectors then would drop a gesture in progress. The
             // geometry is read at each event instead.
             .pointerInput(zoomKey) {
-                detectTransformGestures { centroid, pan, gestureZoom, _ ->
+                var multiTouch = false
+                detectZoomPan(
+                    onStart = {
+                        multiTouch = false
+                        currentWheel?.reset()
+                    },
+                    onEnd = { currentWheel?.reset() },
+                ) { centroid, pan, gestureZoom, pointers ->
                     val g = geometry
                     val inset = currentInset()
                     val shown = shownZoom(kept, g, inset)
-                    kept = KeptZoom(applyGesture(shown, centroid.x, centroid.y, gestureZoom, pan.x, pan.y, g.fit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right), inset)
+                    if (pointers > 1) multiTouch = true
+                    val accumulator = currentWheel
+                    if (accumulator != null && !multiTouch) {
+                        val drag = wheelDrag(shown, pan.x, pan.y, g.docFit, g.viewW, g.viewH, inset, g.top, g.left, g.right)
+                        kept = KeptZoom(drag.state, inset, g.history)
+                        val notches = accumulator.drag(drag.pastEdgeY)
+                        if (notches.isNotEmpty()) currentOnWheel(notches.first(), notches.size)
+                    } else {
+                        kept = KeptZoom(applyGesture(shown, centroid.x, centroid.y, gestureZoom, pan.x, pan.y, g.docFit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right), inset, g.history)
+                    }
                 }
             }
             .pointerInput(zoomKey) {
@@ -156,7 +226,14 @@ fun VideoCanvas(
                     onDoubleTap = { tap ->
                         val g = geometry
                         val inset = currentInset()
-                        kept = KeptZoom(toggleZoom(shownZoom(kept, g, inset), tap.x, tap.y, g.fit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right), inset)
+                        val shown = shownZoom(kept, g, inset)
+                        // Zooming out over history keeps the line under the tap rather than jump to the live band.
+                        val next = if (g.history > 0f && shown.scale > 1f) {
+                            applyGesture(shown, tap.x, tap.y, 1f / shown.scale, 0f, 0f, g.docFit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right)
+                        } else {
+                            toggleZoom(shown, tap.x, tap.y, g.docFit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right)
+                        }
+                        kept = KeptZoom(next, inset, g.history)
                     },
                     onTap = { currentOnTap() },
                 )
@@ -173,10 +250,17 @@ fun VideoCanvas(
             },
         ) {
             if (surfaceRect.width >= 1f && surfaceRect.height >= 1f) {
+                val left = surfaceRect.left.roundToInt()
+                val top = surfaceRect.top.roundToInt()
+                if (drawHistory != null && history > 0f) {
+                    // Drawn above the box's top (the layer does not clip); placed from the surface's
+                    // rounded corner so the history's last line meets the band's first.
+                    Spacer(Modifier.fillMaxSize().drawBehind { drawHistory(left.toFloat(), top.toFloat(), surfaceRect.width) })
+                }
                 VideoSurface(
                     output = source.output,
                     modifier = Modifier
-                        .offset { IntOffset(surfaceRect.left.roundToInt(), surfaceRect.top.roundToInt()) }
+                        .offset { IntOffset(left, top) }
                         .size(with(density) { surfaceRect.width.toDp() }, with(density) { surfaceRect.height.toDp() })
                         .graphicsLayer { alpha = if (visible) 1f else 0f },
                 )
@@ -212,7 +296,7 @@ private fun VideoSurface(output: HevcVideoOutput, modifier: Modifier) {
     }
 }
 
-/** What the gesture detectors read at each event: the current fit, view size and maximum scale. */
+/** What the gesture detectors read at each event: the current fit, view size, maximum scale and history height. */
 private class GestureGeometry(
     val fit: FitRect,
     val viewW: Float,
@@ -222,11 +306,75 @@ private class GestureGeometry(
     val restBottom: Float,
     val left: Float,
     val right: Float,
-)
+    val history: Float,
+) {
+    /** The content zoom and pan work on: the band with the history above it ([documentFit]). */
+    val docFit: FitRect = documentFit(fit, history)
+}
 
-/** A zoom as the owner left it, with the bottom inset (px) it was made for; null: the resting one. */
-internal data class KeptZoom(val state: ZoomState, val inset: Float?)
+/**
+ * A zoom as the owner left it, with the bottom inset (px) it was made for (null: the resting one)
+ * and the history height (px) it was made for (null: whatever it is now).
+ */
+internal data class KeptZoom(val state: ZoomState, val inset: Float?, val history: Float? = null)
 
-/** What is shown: [kept] lifted from its inset to [inset] ([liftForKeyboard]), clamped for [geometry]. */
-private fun shownZoom(kept: KeptZoom, geometry: GestureGeometry, inset: Float): ZoomState =
-    liftForKeyboard(kept.state, geometry.fit, geometry.viewW, geometry.viewH, kept.inset ?: geometry.restBottom, inset, geometry.top, geometry.left, geometry.right)
+/**
+ * What is shown: [kept] moved with the document from its history height to the current one
+ * ([followDocument]), then lifted from its inset to [inset] ([liftForKeyboard]), clamped for [geometry].
+ */
+private fun shownZoom(kept: KeptZoom, geometry: GestureGeometry, inset: Float): ZoomState {
+    val keptInset = kept.inset ?: geometry.restBottom
+    val keptHistory = kept.history ?: geometry.history
+    val followed = if (keptHistory == geometry.history) {
+        kept.state
+    } else {
+        followDocument(kept.state, geometry.fit, geometry.viewW, geometry.viewH, keptHistory, geometry.history, keptInset, geometry.top, geometry.left, geometry.right)
+    }
+    return liftForKeyboard(followed, geometry.docFit, geometry.viewW, geometry.viewH, keptInset, inset, geometry.top, geometry.left, geometry.right)
+}
+
+/**
+ * Pinch and drag, as `detectTransformGestures` (touch slop, then centroid, pan and zoom per event,
+ * no rotation), also giving how many pointers are down and when a gesture past the slop starts and
+ * ends (the wheel's accumulator resets then).
+ */
+private suspend fun PointerInputScope.detectZoomPan(
+    onStart: () -> Unit,
+    onEnd: () -> Unit,
+    onGesture: (centroid: Offset, pan: Offset, zoom: Float, pointers: Int) -> Unit,
+) {
+    awaitEachGesture {
+        var zoom = 1f
+        var pan = Offset.Zero
+        var pastTouchSlop = false
+        val touchSlop = viewConfiguration.touchSlop
+        awaitFirstDown(requireUnconsumed = false)
+        try {
+            do {
+                val event = awaitPointerEvent()
+                val canceled = event.changes.any { it.isConsumed }
+                if (!canceled) {
+                    val zoomChange = event.calculateZoom()
+                    val panChange = event.calculatePan()
+                    if (!pastTouchSlop) {
+                        zoom *= zoomChange
+                        pan += panChange
+                        val zoomMotion = abs(1 - zoom) * event.calculateCentroidSize(useCurrent = false)
+                        if (zoomMotion > touchSlop || pan.getDistance() > touchSlop) {
+                            pastTouchSlop = true
+                            onStart()
+                        }
+                    }
+                    if (pastTouchSlop) {
+                        if (zoomChange != 1f || panChange != Offset.Zero) {
+                            onGesture(event.calculateCentroid(useCurrent = false), panChange, zoomChange, event.changes.count { it.pressed })
+                        }
+                        event.changes.forEach { if (it.positionChanged()) it.consume() }
+                    }
+                }
+            } while (!canceled && event.changes.any { it.pressed })
+        } finally {
+            if (pastTouchSlop) onEnd()
+        }
+    }
+}
