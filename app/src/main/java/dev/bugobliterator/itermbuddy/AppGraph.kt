@@ -3,11 +3,15 @@ package dev.bugobliterator.itermbuddy
 import androidx.compose.ui.graphics.ImageBitmap
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.CompanionClient
+import dev.bugobliterator.itermbuddy.core.chat.BoundSessionProbe
 import dev.bugobliterator.itermbuddy.core.chat.ChatInput
+import dev.bugobliterator.itermbuddy.core.chat.ChatListState
+import dev.bugobliterator.itermbuddy.core.chat.ChatMessage
 import dev.bugobliterator.itermbuddy.core.chat.ChatRepository
 import dev.bugobliterator.itermbuddy.core.chat.ChatSink
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolver
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
+import dev.bugobliterator.itermbuddy.core.sessions.TreeState
 import dev.bugobliterator.itermbuddy.core.sessions.clearOnUnpair
 import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.core.stream.StreamInput
@@ -20,12 +24,16 @@ import dev.bugobliterator.itermbuddy.ui.chats.chatListContents
 import dev.bugobliterator.itermbuddy.ui.chats.ChatSearch
 import dev.bugobliterator.itermbuddy.ui.chats.ImageBytesDecoder
 import dev.bugobliterator.itermbuddy.ui.chats.noteSnippetMentions
+import dev.bugobliterator.itermbuddy.ui.conversation.ConversationContent
+import dev.bugobliterator.itermbuddy.ui.conversation.ConversationMentions
+import dev.bugobliterator.itermbuddy.ui.conversation.conversationContents
 import dev.bugobliterator.itermbuddy.ui.live.ComposerDrafts
 import dev.bugobliterator.itermbuddy.ui.live.LiveInputMemories
 import dev.bugobliterator.itermbuddy.ui.sessions.SessionSearch
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -51,10 +59,16 @@ import kotlinx.coroutines.launch
  *   ([ChatRepository.linkGeneration]) and when AI comes back on ([noteSnippetMentions]);
  * - [chatList] is the Chats root's content ([chatListContents], computed off the main thread
  *   while collected); [chatIcons] holds its decoded icons;
+ * - [conversationContent] is a conversation's content (`conversationContents`, off the main
+ *   thread); [openConversation] and [closeConversation] are what the navigator calls: they open
+ *   and close the chat in [chats], reopen the mention retry gate, and watch the chat's bound
+ *   session with [boundSessions], which probes it again on each chat link up and when the chat's
+ *   binding changes in the list; [inlineImages] holds decoded inline images (48 MiB);
  * - [search], [chatSearch], [drafts] and [inputMemories] hold what the owner typed in the UI, app-scoped;
  * - on every unpair (local, Mac-sent, or a re-scan), [navigator] is reset (closing the stream),
  *   [repository] and [chats] cleared (the chat repository clears its seen marks itself, on its
- *   consumer), the mentions and icons forgotten, and the searches, drafts and input memories emptied.
+ *   consumer), the mentions, bound-session verdicts, icons and images forgotten, and the searches,
+ *   drafts and input memories emptied.
  */
 class HomeGraph(
     val client: CompanionClient,
@@ -69,7 +83,48 @@ class HomeGraph(
     val chatSearch: ChatSearch,
     val chatIcons: ChatIconCache<ImageBitmap>,
     val chatList: StateFlow<ChatListContent>,
-)
+    val boundSessions: BoundSessionProbe,
+    val inlineImages: ChatIconCache<ImageBitmap>,
+    private val contentContext: CoroutineContext,
+) {
+    /** Opens [chatID]'s conversation (a navigator push): subscribed, gate reopened, bound session probed. */
+    fun openConversation(chatID: String) {
+        chats.open(chatID)
+        mentions.reopenRetryGate()
+        boundSessions.watch(chatID, boundGuid(chatID))
+    }
+
+    /** Closes [chatID]'s conversation (a navigator pop). */
+    fun closeConversation(chatID: String) {
+        chats.close(chatID)
+        boundSessions.unwatch(chatID)
+    }
+
+    /** [chatID]'s conversation screen content, computed off the main thread while collected. */
+    fun conversationContent(chatID: String): Flow<ConversationContent> = conversationContents(
+        chatID,
+        chats.conversation(chatID),
+        chats.listSnapshot,
+        chats.activity,
+        chats.macRevision,
+        repository.state.map { (it as? TreeState.Loaded)?.tree },
+        boundSessions.live,
+        mentions.resolutions,
+        reopenings = merge(chats.linkGeneration.drop(1).map { }, chats.aiAvailable.drop(1).filter { it }.map { }),
+        mentions = object : ConversationMentions {
+            override fun reopen() = mentions.reopenRetryGate()
+
+            override fun noteMessages(messages: List<ChatMessage>) = mentions.noteMessages(messages)
+        },
+        context = contentContext,
+    )
+
+    private fun boundGuid(chatID: String): String? = boundGuid(chats.listSnapshot.value.list, chatID)
+}
+
+/** [chatID]'s bound session in [list], or null (unbound, or not listed yet). */
+private fun boundGuid(list: ChatListState, chatID: String): String? =
+    (list as? ChatListState.Loaded)?.entries?.firstOrNull { it.chat.id == chatID }?.chat?.terminalSessionGuid
 
 /**
  * Builds the home graph: `CompanionApp` with production parts, tests with the fake relay, fake
@@ -80,9 +135,10 @@ class HomeGraph(
  * sink before the client's `start` or `pair`, which callers make only after this returns.
  *
  * @param iconDecoder decodes chat icons (the app passes `BitmapImageDecoder`; tests decode nothing).
+ * @param imageDecoder decodes inline images in conversations (likewise).
  * @param log for a failed unpair cleanup.
  * @param chatLog the mention resolver's diagnostics (counts and failure kinds only).
- * @param listContext where [HomeGraph.chatList] is computed.
+ * @param listContext where [HomeGraph.chatList] and conversations' content are computed.
  */
 fun wireHome(
     scope: CoroutineScope,
@@ -91,6 +147,7 @@ fun wireHome(
     newRepository: (CompanionClient) -> SessionTreeRepository,
     newChats: (StreamLink) -> ChatRepository,
     iconDecoder: ImageBytesDecoder<ImageBitmap> = ImageBytesDecoder { null },
+    imageDecoder: ImageBytesDecoder<ImageBitmap> = ImageBytesDecoder { null },
     log: (String) -> Unit = {},
     chatLog: (String) -> Unit = {},
     listContext: CoroutineContext = Dispatchers.Default,
@@ -118,6 +175,16 @@ fun wireHome(
     scope.launch {
         noteSnippetMentions(chats.rows, merge(linkUps, aiBackOn), mentions::reopenRetryGate) { mentions.note(it) }
     }
+    val boundSessions = BoundSessionProbe(client, scope, log = chatLog)
+    val inlineImages = ChatIconCache(imageDecoder, INLINE_IMAGE_BUDGET_BYTES)
+    // A new link probes the open conversations' bound sessions again; a binding that changes in
+    // the list (or first appears there) is probed once.
+    scope.launch { chats.linkGeneration.drop(1).collect { boundSessions.linkUp() } }
+    scope.launch {
+        chats.listSnapshot.map { it.list }.distinctUntilChanged().collect { list ->
+            boundSessions.refreshBindings { chatID -> boundGuid(list, chatID) }
+        }
+    }
     val chatList = chatListContents(chats.listSnapshot, chats.macRevision, chatSearch.query, mentions.resolutions, listContext)
         .stateIn(scope, SharingStarted.WhileSubscribed(LIST_SHARING_STOP_MILLIS), ChatListContent.Loading)
     clearOnUnpair(
@@ -126,13 +193,19 @@ fun wireHome(
         // Not the chat seen store: ChatRepository.clear() clears it on its consumer, after its
         // barrier against inputs from earlier links, so no mark still queued lands after the wipe.
         listOf(
-            navigator::reset, repository::clear, chats::clear, mentions::clear, chatIcons::clear, search::clear,
-            chatSearch::clear, drafts::clear, inputMemories::clear,
+            navigator::reset, repository::clear, chats::clear, mentions::clear, boundSessions::clear, chatIcons::clear,
+            inlineImages::clear, search::clear, chatSearch::clear, drafts::clear, inputMemories::clear,
         ),
         log,
     )
-    return HomeGraph(client, controller, repository, chats, navigator, search, drafts, inputMemories, mentions, chatSearch, chatIcons, chatList)
+    return HomeGraph(
+        client, controller, repository, chats, navigator, search, drafts, inputMemories, mentions, chatSearch, chatIcons, chatList,
+        boundSessions, inlineImages, listContext,
+    )
 }
+
+/** The decoded inline images' shared bitmap budget (*Global Constraints*). */
+private const val INLINE_IMAGE_BUDGET_BYTES = 48 * 1024 * 1024
 
 /** How long [HomeGraph.chatList] keeps computing after its last collector (rotation) leaves. */
 private const val LIST_SHARING_STOP_MILLIS = 5_000L

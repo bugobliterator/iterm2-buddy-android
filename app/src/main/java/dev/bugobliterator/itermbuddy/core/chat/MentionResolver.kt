@@ -36,8 +36,12 @@ sealed interface MentionDisplay {
 }
 
 /** How the mention [identifier] renders with [resolutions] ([MentionResolver.resolutions]). */
-fun mentionDisplay(resolutions: Map<String, MentionResolution>, identifier: String): MentionDisplay {
-    val resolution = resolutions[identifier] ?: return MentionDisplay.Raw
+fun mentionDisplay(resolutions: Map<String, MentionResolution>, identifier: String): MentionDisplay =
+    mentionDisplay(resolutions[identifier])
+
+/** How a mention renders given what the Mac said about it: [resolution], null when it has not answered. */
+fun mentionDisplay(resolution: MentionResolution?): MentionDisplay {
+    if (resolution == null) return MentionDisplay.Raw
     val opens = resolution.workgroupID != null || resolution.sessionGuid != null
     return if (resolution.displayName != null && opens) MentionDisplay.Named(resolution) else MentionDisplay.Defunct
 }

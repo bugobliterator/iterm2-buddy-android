@@ -196,6 +196,8 @@ class CompanionApp : Application() {
             },
             // The row shows icons at 44 dp: decode them to that size in pixels.
             iconDecoder = BitmapImageDecoder((44 * resources.displayMetrics.density).roundToInt()),
+            // Inline images show at most the screen's width: decode them no larger.
+            imageDecoder = BitmapImageDecoder(resources.displayMetrics.widthPixels),
             log = { Log.w(TAG, it) },
             chatLog = { Log.i(CHAT_TAG, it) },
         )
