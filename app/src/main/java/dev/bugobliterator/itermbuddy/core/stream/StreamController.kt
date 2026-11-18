@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.ContinuationInterceptor
 import kotlin.coroutines.CoroutineContext
 import kotlin.time.Duration
@@ -180,6 +181,9 @@ class StreamController(
 
     private val items = Channel<Item>(Channel.UNLIMITED)
 
+    /** The most inputs the inbox has held at once, for tests that need its bound reached. */
+    internal val inboxHighWater = AtomicInteger()
+
     // ---- Outbox: stops and keyframe requests in order, and start requests launched in turn ----
 
     private sealed interface Out {
@@ -291,7 +295,10 @@ class StreamController(
     private suspend fun reserve(bytes: Long) {
         while (true) {
             val seen = usage.value.takeIf { fits(it, bytes) } ?: usage.first { fits(it, bytes) }
-            if (usage.compareAndSet(seen, Usage(seen.items + 1, seen.bytes + bytes))) return
+            if (usage.compareAndSet(seen, Usage(seen.items + 1, seen.bytes + bytes))) {
+                inboxHighWater.accumulateAndGet(seen.items + 1, ::maxOf)
+                return
+            }
         }
     }
 

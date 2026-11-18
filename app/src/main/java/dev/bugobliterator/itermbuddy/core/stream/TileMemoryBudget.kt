@@ -14,15 +14,26 @@ internal fun distanceFrom(wanted: LongRange, line: Long): Long = when {
 }
 
 /**
+ * Eviction order for tiles by first line: the farthest from [wanted] first; ties (inside it, say)
+ * the farthest from its centre first, then the higher line.
+ */
+internal fun <T> evictionOrder(wanted: LongRange, line: (T) -> Long): Comparator<T> {
+    val doubledCentre = wanted.first + wanted.last
+    return compareByDescending<T> { distanceFrom(wanted, line(it)) }
+        .thenByDescending { kotlin.math.abs(2 * line(it) - doubledCentre) }
+        .thenByDescending { line(it) }
+}
+
+/**
  * The tiles to drop so the rest of [sizes] (bytes by a tile's first absolute line) fit in
- * [budgetBytes]: the farthest from [wanted] first (ties: the higher line first), until the rest
- * fit. Empty when everything already fits.
+ * [budgetBytes], in [evictionOrder] (the farthest from [wanted] first, then the farthest from its
+ * centre), until the rest fit. Empty when everything already fits.
  */
 fun tilesToEvict(sizes: Map<Long, Long>, wanted: LongRange, budgetBytes: Long): List<Long> {
     var total = sizes.values.sum()
     if (total <= budgetBytes) return emptyList()
     val evicted = ArrayList<Long>()
-    for (line in sizes.keys.sortedWith(compareByDescending<Long> { distanceFrom(wanted, it) }.thenByDescending { it })) {
+    for (line in sizes.keys.sortedWith(evictionOrder(wanted) { it })) {
         if (total <= budgetBytes) break
         evicted += line
         total -= sizes.getValue(line)
@@ -43,8 +54,9 @@ fun decodedTileBytes(widthPx: Int, lineCount: Int, lineHeightPx: Int): Long =
  * included, plus the bytes reserved by decodes in flight.
  *
  * Eviction only drops the cache's reference: it never recycles a bitmap. It never drops a handle
- * the renderer reports as [displayed], so every bitmap still drawn stays retained and counted;
- * an evicted bitmap is never drawn again and the garbage collector reclaims it.
+ * the renderer reports as [displayed], nor one [get] returned since the renderer's last [displayed]
+ * report (it may be about to draw it), so every bitmap still drawn stays retained and counted; an
+ * evicted bitmap is never drawn again and the garbage collector reclaims it.
  *
  * Thread-safe; [get]'s decode runs outside the lock.
  */
@@ -61,6 +73,9 @@ class DecodedTileCache<T : Any>(
     /** Decodes in flight whose tile stopped being current: dropped when they finish. */
     private val abandoned = IdentityHashMap<HistoryTile, Unit>()
     private val shown = IdentityHashMap<HistoryTile, Unit>()
+
+    /** Handles [get] returned since the last [displayed] report: kept like displayed ones. */
+    private val pinned = IdentityHashMap<HistoryTile, Unit>()
 
     /** Tiles no longer current that are kept only while displayed. */
     private val outgoing = IdentityHashMap<HistoryTile, Unit>()
@@ -84,7 +99,10 @@ class DecodedTileCache<T : Any>(
      */
     suspend fun get(tile: HistoryTile, bytes: Long, decode: suspend () -> T): T? {
         synchronized(lock) {
-            retained[tile]?.let { return it.handle }
+            retained[tile]?.let {
+                pinned[tile] = Unit
+                return it.handle
+            }
             if (bytes > budgetBytes || reserved.size >= maxConcurrentDecodes || reserved.containsKey(tile)) return null
             if (!makeRoom(bytes)) return null
             reserved[tile] = bytes
@@ -96,7 +114,12 @@ class DecodedTileCache<T : Any>(
             synchronized(lock) {
                 reserved.remove(tile)
                 val dropped = abandoned.remove(tile) != null
-                if (handle != null && !dropped) retained[tile] = Entry(handle, bytes) else handle = null
+                if (handle != null && !dropped) {
+                    retained[tile] = Entry(handle, bytes)
+                    pinned[tile] = Unit
+                } else {
+                    handle = null
+                }
             }
         }
         return handle
@@ -118,7 +141,7 @@ class DecodedTileCache<T : Any>(
                 val stays = keep.containsKey(tile) && distanceFrom(wanted, tile.firstAbsLine) == 0L
                 when {
                     stays -> outgoing.remove(tile)
-                    shown.containsKey(tile) -> outgoing[tile] = Unit
+                    kept(tile) -> outgoing[tile] = Unit
                     else -> iterator.remove()
                 }
             }
@@ -126,12 +149,14 @@ class DecodedTileCache<T : Any>(
     }
 
     /**
-     * The renderer's drawn set, reported whenever it changes: these handles are never evicted.
-     * A handle that was kept only because it was displayed is dropped once it is not.
+     * The renderer's drawn set, reported whenever it changes: these handles are never evicted. It
+     * also ends the pins of handles [get] returned before it. A handle that was kept only because
+     * it was displayed or pinned is dropped once it is neither.
      */
     fun displayed(tiles: Collection<HistoryTile>) {
         synchronized(lock) {
             shown.clear()
+            pinned.clear()
             tiles.forEach { shown[it] = Unit }
             val iterator = outgoing.keys.iterator()
             while (iterator.hasNext()) {
@@ -149,16 +174,18 @@ class DecodedTileCache<T : Any>(
         synchronized(lock) {
             retained.clear()
             outgoing.clear()
+            pinned.clear()
             for (tile in reserved.keys) abandoned[tile] = Unit
         }
     }
+
+    private fun kept(tile: HistoryTile): Boolean = shown.containsKey(tile) || pinned.containsKey(tile)
 
     /** Evicts undisplayed handles, farthest from [wanted] first, until [bytes] more fit. */
     private fun makeRoom(bytes: Long): Boolean {
         var used = retained.values.sumOf { it.bytes } + reserved.values.sum()
         if (used + bytes <= budgetBytes) return true
-        val candidates = retained.keys.filter { !shown.containsKey(it) }
-            .sortedWith(compareByDescending<HistoryTile> { distanceFrom(wanted, it.firstAbsLine) }.thenByDescending { it.firstAbsLine })
+        val candidates = retained.keys.filter { !kept(it) }.sortedWith(evictionOrder(wanted) { it.firstAbsLine })
         for (tile in candidates) {
             if (used + bytes <= budgetBytes) break
             used -= retained.remove(tile)?.bytes ?: 0

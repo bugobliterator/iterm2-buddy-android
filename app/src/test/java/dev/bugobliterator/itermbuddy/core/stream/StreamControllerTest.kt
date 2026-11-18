@@ -88,6 +88,7 @@ class StreamControllerTest {
         val test: TestScope,
         timeouts: StreamTimeouts = StreamTimeouts(),
         clientTimeouts: ClientTimeouts = ClientTimeouts(),
+        budgets: StreamBudgets = StreamBudgets(),
     ) {
         val store = InMemoryPairingStore()
         val relay = FakeRelay(ORIGIN)
@@ -112,6 +113,7 @@ class StreamControllerTest {
             video,
             test.backgroundScope,
             timeouts,
+            budgets,
             nowMillis = { test.currentTime },
             log = { logs += it },
             ackContext = EmptyCoroutineContext,
@@ -1436,7 +1438,8 @@ class StreamControllerTest {
 
     @Test
     fun historyTileReplyDuringMediaBurst() = runTest {
-        val h = Harness(this)
+        // A small inbox, so the burst fills it and the receive loop waits on it with replies behind media.
+        val h = Harness(this, budgets = StreamBudgets(inboxItems = 16))
         h.answerTiles()
         h.openLiveWith(first = 0, total = 1040, rows = 40)
         val submitsBefore = h.video.submits.size
@@ -1449,6 +1452,7 @@ class StreamControllerTest {
         assertEquals(2000, h.video.submits.size - submitsBefore)
         assertEquals(33L * 2000, h.ackPts().last())
         assertTrue(h.state is LiveViewState.Live)
+        assertEquals("the inbox bound was reached", 16, h.controller.inboxHighWater.get())
     }
 
     /** Brings [controller] to Live on link 1, stream 1, over [link]: the reply goes through the sink first, as the session delivers it. */

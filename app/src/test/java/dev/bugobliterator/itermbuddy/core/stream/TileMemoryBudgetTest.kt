@@ -48,6 +48,8 @@ class TileMemoryBudgetTest {
         assertTrue(cache.used() <= budget)
         assertTrue(cache.get(retainedB, 25 * MIB) { Handle("b") } != null)
         assertTrue(cache.used() <= budget)
+        // The renderer reports it draws neither, which ends their pins.
+        cache.displayed(emptyList())
         val gate = CompletableDeferred<Unit>()
         val blocked = listOf(tile(100), tile(150)).map { t ->
             async { cache.get(t, 25 * MIB) { gate.await(); Handle("${t.firstAbsLine}") } }
@@ -94,6 +96,7 @@ class TileMemoryBudgetTest {
         val handleA = cache.get(replyA, MIB) { Handle("a") }!!
         val handleB = cache.get(replyB, MIB) { Handle("b") }!!
         assertNotSame("a new reply for the same slot decodes anew", handleA, handleB)
+        cache.displayed(emptyList())
         cache.retainOnly(listOf(replyB), 1000L..1049L)
         assertEquals(1, cache.retainedCount)
         assertEquals(MIB, cache.retainedBytes)
@@ -108,6 +111,30 @@ class TileMemoryBudgetTest {
         assertNull(late.await())
         assertEquals(0, cache.retainedCount)
         assertEquals(0L, cache.reservedBytes)
+    }
+
+    @Test
+    fun returnedHandlesArePinnedUntilTheNextDisplayedReport() = runTest {
+        val cache = DecodedTileCache<Handle>(budgetBytes = 2 * MIB)
+        val first = tile(0)
+        val handle = cache.get(first, MIB) { Handle("first") }!!
+        cache.get(tile(50), MIB) { Handle("second") }!!
+        // Returned but not yet reported drawn: neither may be evicted, nor dropped by retainOnly.
+        assertNull(cache.get(tile(100), MIB) { Handle("third") })
+        cache.retainOnly(emptyList(), 0L..49L)
+        assertSame(handle, cache.get(first, MIB) { Handle("again") })
+        assertEquals(2, cache.retainedCount)
+        // The renderer draws only the first: the second is no longer pinned, nor current.
+        cache.displayed(listOf(first))
+        assertEquals(1, cache.retainedCount)
+        assertTrue(cache.get(tile(100), MIB) { Handle("third") } != null)
+        assertTrue(cache.used() <= 2 * MIB)
+    }
+
+    @Test
+    fun evictionTiesGoFarthestFromTheCentreFirst() {
+        val sizes = (0L until 500L step 50).associateWith { 1L }
+        assertEquals(listOf(0L, 450L, 50L), tilesToEvict(sizes, wanted = 0L..499L, budgetBytes = 7))
     }
 
     @Test
