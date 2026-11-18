@@ -265,11 +265,112 @@ class ChatSubscriptionsTest {
     fun suspectWaitsForAChatAlreadyOut() {
         planAndStart(listOf(CHAT_A, CHAT_B))
         nextLink(messageTooLarge = true)
-        // The open conversation was planned before the list named the suspect.
-        assertEquals(listOf(CHAT_C), planAndStart(listOf(CHAT_C)))
-        assertEquals(emptyList<String>(), planAndStart(listOf(CHAT_C, CHAT_A, CHAT_D)))
+        // A first list without the suspects lets C go; a later list names suspect A.
+        assertEquals(listOf(CHAT_C), planAndStart(listed(CHAT_C)))
+        assertEquals(emptyList<String>(), planAndStart(listed(CHAT_C, CHAT_A, CHAT_D)))
         answer(CHAT_C)
-        assertEquals(listOf(CHAT_A), planAndStart(listOf(CHAT_C, CHAT_A, CHAT_D)))
+        assertEquals(listOf(CHAT_A), planAndStart(listed(CHAT_C, CHAT_A, CHAT_D)))
+    }
+
+    @Test
+    fun beforeTheListOnlyOpenSuspectsArePlanned() {
+        planAndStart(listOf(CHAT_A, CHAT_B))
+        nextLink(messageTooLarge = true)
+        val beforeList = subscriptions.wanted(open = listOf(CHAT_C, CHAT_B), entries = null)
+        assertEquals("the open suspect, alone; not the open ordinary chat", listOf(CHAT_B), planAndStart(beforeList))
+        answer(CHAT_B)
+        assertEquals("still no list: C waits for it", emptyList<String>(), planAndStart(subscriptions.wanted(listOf(CHAT_C), null)))
+
+        // The list names suspect A, which goes before C.
+        assertEquals(listOf(CHAT_A), planAndStart(listed(CHAT_A, CHAT_D, open = listOf(CHAT_C))))
+        answer(CHAT_A)
+        assertEquals(listOf(CHAT_C, CHAT_D), planAndStart(listed(CHAT_A, CHAT_D, open = listOf(CHAT_C))))
+    }
+
+    @Test
+    fun withoutSuspectsOpenChatsGoBeforeTheList() {
+        assertEquals(listOf(CHAT_C), planAndStart(subscriptions.wanted(listOf(CHAT_C), null)))
+    }
+
+    @Test
+    fun lateUndecodableAfterTimeoutAnswersTheChat() {
+        planAndStart(listOf(CHAT_A, CHAT_B))
+        val ticketA = tickets.getValue(CHAT_A)
+        settle(CHAT_A, TIMEOUT)
+        assertEquals(setOf(CHAT_A, CHAT_B), subscriptions.outstanding)
+        // The history frame arrives after the timeout but cannot be decoded: no History lands,
+        // yet the whole frame came, so A is answered.
+        subscriptions.settled(ticketA, ANSWERED)
+        assertEquals(setOf(CHAT_B), subscriptions.outstanding)
+        assertEquals("the slot was freed once, by the timeout", listOf(CHAT_C), planAndStart(listOf(CHAT_A, CHAT_B, CHAT_C, CHAT_D)))
+        subscriptions.settled(ticketA, ANSWERED)
+        assertEquals(emptyList<String>(), planAndStart(listOf(CHAT_A, CHAT_B, CHAT_C, CHAT_D)))
+
+        nextLink(messageTooLarge = true)
+        assertEquals("A is not blamed", setOf(CHAT_B, CHAT_C), oversized.suspects)
+    }
+
+    @Test
+    fun lateErrorAfterTimeoutAnswersTheChat() {
+        planAndStart(listOf(CHAT_A))
+        val ticketA = tickets.getValue(CHAT_A)
+        settle(CHAT_A, TIMEOUT)
+        subscriptions.settled(ticketA, TIMEOUT)
+        assertEquals(setOf(CHAT_A), subscriptions.outstanding)
+        subscriptions.settled(ticketA, ERROR)
+        assertEquals(emptySet<String>(), subscriptions.outstanding)
+    }
+
+    @Test
+    fun lateAnswerFromAnOlderRequestLeavesANewerOneUnanswered() {
+        planAndStart(listOf(CHAT_A))
+        val oldA = tickets.getValue(CHAT_A)
+        settle(CHAT_A, TIMEOUT)
+        subscriptions.tryAgain(CHAT_A)
+        planAndStart(listOf(CHAT_A))
+        subscriptions.settled(oldA, ANSWERED)
+        assertEquals(setOf(CHAT_A), subscriptions.outstanding)
+    }
+
+    @Test
+    fun lateAnswerUnblocksASuspect() {
+        planAndStart(listOf(CHAT_A, CHAT_B))
+        nextLink(messageTooLarge = true)
+        assertEquals(listOf(CHAT_A), planAndStart(listOf(CHAT_A, CHAT_B)))
+        val ticketA = tickets.getValue(CHAT_A)
+        settle(CHAT_A, TIMEOUT)
+        assertEquals(emptyList<String>(), planAndStart(listOf(CHAT_A, CHAT_B)))
+        subscriptions.settled(ticketA, ANSWERED)
+        assertEquals(setOf(CHAT_B), oversized.suspects)
+        assertEquals(listOf(CHAT_B), planAndStart(listOf(CHAT_A, CHAT_B)))
+    }
+
+    @Test
+    fun errorOnASuspectAnswersItButKeepsItSuspect() {
+        planAndStart(listOf(CHAT_A, CHAT_B))
+        nextLink(messageTooLarge = true)
+        assertEquals(listOf(CHAT_A), planAndStart(listOf(CHAT_A, CHAT_B, CHAT_C)))
+        settle(CHAT_A, ERROR)
+        assertEquals(emptySet<String>(), subscriptions.outstanding)
+        assertEquals(setOf(CHAT_A, CHAT_B), oversized.suspects)
+        assertEquals("the next suspect, alone", listOf(CHAT_B), planAndStart(listOf(CHAT_A, CHAT_B, CHAT_C)))
+    }
+
+    @Test
+    fun resubscribePlansAStaleChatOnceWithoutLiftingTooLarge() {
+        planAndStart(listOf(CHAT_A, CHAT_B))
+        answer(CHAT_A)
+        answer(CHAT_B, tooLarge = true)
+
+        assertTrue(subscriptions.resubscribe(CHAT_A))
+        assertEquals(listOf(CHAT_A), planAndStart(listOf(CHAT_A, CHAT_B)))
+        answer(CHAT_A)
+        assertEquals("once per link", false, subscriptions.resubscribe(CHAT_A))
+        assertEquals(emptyList<String>(), planAndStart(listOf(CHAT_A, CHAT_B)))
+
+        assertEquals("too large: skipped", false, subscriptions.resubscribe(CHAT_B))
+        assertEquals(setOf(CHAT_B), oversized.tooLarge)
+        assertEquals(emptyList<String>(), planAndStart(listOf(CHAT_A, CHAT_B)))
     }
 
     @Test
