@@ -46,6 +46,7 @@ import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.ui.LiveSessionTheme
 import dev.bugobliterator.itermbuddy.ui.live.KeyBarActions
 import dev.bugobliterator.itermbuddy.ui.live.KeyBarSlot
+import dev.bugobliterator.itermbuddy.ui.live.LiveInputMemory
 import dev.bugobliterator.itermbuddy.ui.live.LiveSessionActions
 import dev.bugobliterator.itermbuddy.ui.live.LiveVideoSource
 import dev.bugobliterator.itermbuddy.ui.live.OverlayAction
@@ -69,16 +70,27 @@ internal enum class KeyboardMove { SHOW, HIDE }
  * (`IOS/Screens/SessionView.swift:2188-2222`): a change of the Mac's `browserEditing` raises or
  * lowers it, but only while browser input is active, so an editing state that arrives before the
  * first config says browser is applied once it does; a tap on the page while editing raises it
- * again (tapping the focused field makes no editing change). Not thread-safe; the main thread.
+ * again (tapping the focused field makes no editing change).
+ *
+ * - While inactive (a reconnect, the app in the background) what was applied is forgotten, so a
+ *   page still editing when input comes back raises the keyboard again (the view lowers it while
+ *   inactive).
+ * - While the address field has focus the page's editing moves nothing and is not recorded; it is
+ *   applied when the field lets go.
+ * - What was applied lives in the session's [memory], so a rotation (a new view, a new rule) does
+ *   not re-raise a keyboard the owner hid.
+ *
+ * Not thread-safe; the main thread.
  */
-internal class BrowserKeyboardRule {
-    /** The editing state last acted on (iOS `appliedBrowserEditing`). */
-    private var applied = false
-
-    /** The page's editing state is [editing]; [active] whether browser input is. */
-    fun onEditing(editing: Boolean, active: Boolean): KeyboardMove? {
-        if (!active || editing == applied) return null
-        applied = editing
+internal class BrowserKeyboardRule(private val memory: LiveInputMemory = LiveInputMemory()) {
+    /** The page's editing state is [editing]; [active] whether browser input is; [addressFocused] whether the address field has focus. */
+    fun onEditing(editing: Boolean, active: Boolean, addressFocused: Boolean = false): KeyboardMove? {
+        if (!active) {
+            memory.appliedBrowserEditing = false
+            return null
+        }
+        if (addressFocused || editing == memory.appliedBrowserEditing) return null
+        memory.appliedBrowserEditing = editing
         return if (editing) KeyboardMove.SHOW else KeyboardMove.HIDE
     }
 
@@ -110,12 +122,13 @@ internal fun browserInputTarget(session: SessionSummary, live: LiveViewState, ac
  *   searches) and leaves the field, which then shows the page's URL again. Disabled unless
  *   [browserInputTarget] gives a target.
  * - **Page** ([VideoCanvas] with the [BrowserDriver]): a tap clicks the page (no double-tap zoom);
- *   a drag scrolls it and flings at fit; a pinch zooms locally; zoomed in, a drag pans and only
+ *   any tap stops a fling; a drag scrolls it and flings at fit; a pinch zooms locally; zoomed in, a drag pans and only
  *   vertical travel past the pan edge scrolls the page. Leaving cancels a scroll under way.
  * - **Keyboard**: typed keys go as `sendKey` to the page through the app's one ordered input
  *   sender, after any tap before them. It rises when the page reports editing and falls when that
- *   ends ([BrowserKeyboardRule]), a tap re-raises it while editing, and ⌨ shows or hides it
- *   regardless. The [KeyBar][dev.bugobliterator.itermbuddy.ui.live.KeyBar] is its browser
+ *   ends ([BrowserKeyboardRule]; again after a reconnect, never while the address field has
+ *   focus), a tap re-raises it while editing, and ⌨ shows or hides it regardless (greyed while
+ *   input is off). The [KeyBar][dev.bugobliterator.itermbuddy.ui.live.KeyBar] is its browser
  *   variant (no ^C, no compose); dictation or a multi-line commit, which the live view sends to
  *   its composer, is typed into the page. The key bar hides while the address field has focus.
  *
@@ -177,8 +190,8 @@ private fun BrowserSessionContent(
     val focusManager = LocalFocusManager.current
 
     val keyboard = remember { TerminalKeyboard() }
-    val rule = remember(session.guid) { BrowserKeyboardRule() }
     val memory = remember(session.guid) { actions.inputMemory(session.guid) }
+    val rule = remember(memory) { BrowserKeyboardRule(memory) }
     val modifiers = memory.modifiers
     var modifierVersion by remember { mutableIntStateOf(0) }
     DisposableEffect(modifiers) {
@@ -199,9 +212,9 @@ private fun BrowserSessionContent(
     }
     // Held composing text belongs to the target it was typed for.
     LaunchedEffect(translator, target) { translator.reset() }
-    LaunchedEffect(offersInput, editing) {
+    LaunchedEffect(offersInput, editing, address.focused) {
         if (!offersInput) keyboard.hide()
-        when (rule.onEditing(editing, offersInput)) {
+        when (rule.onEditing(editing, offersInput, address.focused)) {
             KeyboardMove.SHOW -> keyboard.show()
             KeyboardMove.HIDE -> keyboard.hide()
             null -> Unit
@@ -298,7 +311,7 @@ private fun BrowserSessionContent(
             address = address,
             url = navigation?.url,
             onAddress = { change -> address = change(address) },
-            offersKeyboard = offersInput,
+            keyboardEnabled = offersInput,
             actions = barActions,
             banner = macAlert,
             modifier = Modifier.align(Alignment.TopCenter).onSizeChanged { topChrome = it.height },

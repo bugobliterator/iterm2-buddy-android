@@ -13,6 +13,9 @@ class LiveInputMemory {
     val modifiers = StickyModifiers()
     var expanded = false
     var restoreKeyboard = false
+
+    /** A browser page's editing state the keyboard last followed (`BrowserKeyboardRule`), so rotation does not re-raise a keyboard the owner hid. */
+    var appliedBrowserEditing = false
 }
 
 /**

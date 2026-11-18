@@ -13,6 +13,9 @@ import dev.bugobliterator.itermbuddy.ui.live.ComposerDrafts
 import dev.bugobliterator.itermbuddy.ui.live.LiveInputMemories
 import dev.bugobliterator.itermbuddy.ui.sessions.SessionSearch
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 /**
  * The app-scoped sessions objects, as [wireSessions] connects them:
@@ -21,7 +24,7 @@ import kotlinx.coroutines.CoroutineScope
  *   controller sends through the client (its [StreamLink]);
  * - [repository] reads the client's state, events and requests;
  * - [navigator] drives [controller]'s `open`/`close`, and reads the Mac's revision from [client]'s
- *   state to choose the browser view;
+ *   state to choose the browser view (at open, and again as the revision changes);
  * - [search], [drafts] and [inputMemories] hold what the owner typed in the UI, app-scoped;
  * - on every unpair (local, Mac-sent, or a re-scan), [navigator] is reset (closing the stream),
  *   [repository] cleared, and the search, drafts and input memories emptied.
@@ -59,6 +62,7 @@ fun wireSessions(
     sink.target = controller
     val repository = newRepository(client)
     val navigator = SessionNavigator(open = controller::open, close = controller::close, macRevision = { macRevisionOf(client.state.value) })
+    scope.launch { client.state.map(::macRevisionOf).distinctUntilChanged().collect(navigator::macRevisionChanged) }
     val search = SessionSearch()
     val drafts = ComposerDrafts()
     val inputMemories = LiveInputMemories()

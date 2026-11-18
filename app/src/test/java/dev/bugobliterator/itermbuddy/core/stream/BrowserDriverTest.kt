@@ -134,6 +134,20 @@ class BrowserDriverTest {
     }
 
     @Test
+    fun stopFlingStopsCoastingAndSendsNothing() = runTest {
+        // A tap off a short page clicks nothing but still stops a fling (iOS SessionView:2192-2193).
+        val rig = Rig(this)
+        rig.driver.fling(0f, 3000f, 1f, 1f, 0f, 0f)
+        advanceTimeBy(200.milliseconds)
+        rig.driver.stopFling()
+        runCurrent()
+        val count = rig.sent().size
+        advanceTimeBy(2_000.milliseconds)
+        assertEquals(count, rig.sent().size)
+        assertTrue(rig.sent().none { it is PhoneMessage.BrowserTap })
+    }
+
+    @Test
     fun loadTrimsAndSkipsEmpty() = runTest {
         val rig = Rig(this)
         rig.driver.load("  \n\t ")

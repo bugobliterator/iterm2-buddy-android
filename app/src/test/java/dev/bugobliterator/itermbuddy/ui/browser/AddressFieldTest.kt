@@ -40,6 +40,30 @@ class AddressFieldTest {
     }
 
     @Test
+    fun compositionSurvivesEdits() {
+        // Gboard's composing span must come back in the field's value, or it restarts input per key.
+        val focused = AddressFieldState("", false).onFocus(URL)
+        val composing = focused.onEdit("exa", TextRange(3), TextRange(0, 3))
+        assertEquals(TextRange(0, 3), composing.composition)
+        val more = composing.onEdit("exam", TextRange(4), TextRange(0, 4))
+        assertEquals(TextRange(0, 4), more.composition)
+        assertEquals(null, more.onEdit("exam ", TextRange(5), null).composition)
+        // A composition change with the same text is kept even while the select-all is held.
+        assertEquals(TextRange(0, URL.length), focused.onEdit(URL, TextRange(2), TextRange(0, URL.length)).composition)
+        // Leaving the field drops it.
+        assertNull(more.onBlur(URL).composition)
+    }
+
+    @Test
+    fun aFocusWithoutATapDoesNotEatTheFirstTap() {
+        // TalkBack or a hardware keyboard focuses with no cursor placement after it; one frame later
+        // the select-all latch is let go, so the owner's first tap moves the cursor.
+        val settled = AddressFieldState("", false).onFocus(URL).settled()
+        assertEquals(TextRange(0, URL.length), settled.selection)
+        assertEquals(TextRange(4), settled.onEdit(URL, TextRange(4)).selection)
+    }
+
+    @Test
     fun blurRestoresUrl() {
         val typing = AddressFieldState("", false).onFocus(URL).onEdit("half typ", TextRange(8))
         val left = typing.onBlur(OTHER_URL)

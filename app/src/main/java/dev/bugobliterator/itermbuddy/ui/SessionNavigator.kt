@@ -35,7 +35,9 @@ sealed interface HomeDestination {
  * @param close stops the stream and drops the watch (the stream controller's `close`).
  * @param macRevision the connected Mac's hello revision now (0 when not connected), read when a
  *   row is opened: a browser row opens [HomeDestination.BrowserSession] at
- *   [BROWSER_INPUT_REVISION] or above, else the view-only live view.
+ *   [BROWSER_INPUT_REVISION] or above, else the view-only live view. A browser opened before the
+ *   revision is known (the tree is kept while reconnecting, revision 0) becomes the browser view
+ *   when [macRevisionChanged] reports 15.
  */
 class SessionNavigator(
     private val open: (SessionSummary) -> Unit,
@@ -59,6 +61,20 @@ class SessionNavigator(
                 HomeDestination.BrowserSession(session, title)
             } else {
                 HomeDestination.LiveSession(session, title)
+            }
+        }
+    }
+
+    /**
+     * The Mac's revision is now [revision]: a browser shown in the live view becomes the browser
+     * view at [BROWSER_INPUT_REVISION] or above, its stream untouched. Never the other way: a
+     * disconnect (revision 0) leaves the browser view as it is, so a reconnect does not flap it.
+     */
+    fun macRevisionChanged(revision: Int) {
+        synchronized(lock) {
+            val now = destinationFlow.value
+            if (now is HomeDestination.LiveSession && now.session.isBrowser && revision >= BROWSER_INPUT_REVISION) {
+                destinationFlow.value = HomeDestination.BrowserSession(now.session, now.title)
             }
         }
     }

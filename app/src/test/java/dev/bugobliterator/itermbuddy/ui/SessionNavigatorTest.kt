@@ -53,6 +53,38 @@ class SessionNavigatorTest {
     }
 
     @Test
+    fun browserOpenedBeforeTheRevisionIsKnownBecomesTheBrowserView() {
+        // The tree is kept while reconnecting: a browser row can be opened at revision 0.
+        macRevision = 0
+        navigator.openSession(BROWSER)
+        assertEquals(HomeDestination.LiveSession(BROWSER, "Widget Docs"), navigator.destination.value)
+        navigator.macRevisionChanged(14)
+        assertEquals(HomeDestination.LiveSession(BROWSER, "Widget Docs"), navigator.destination.value)
+        // The Mac turns out to be at 15: the view becomes the browser view, the stream untouched.
+        navigator.macRevisionChanged(15)
+        assertEquals(HomeDestination.BrowserSession(BROWSER, "Widget Docs"), navigator.destination.value)
+        // A later disconnect (revision 0) never takes it back: no flapping across reconnects.
+        navigator.macRevisionChanged(0)
+        assertEquals(HomeDestination.BrowserSession(BROWSER, "Widget Docs"), navigator.destination.value)
+        assertEquals(listOf(BROWSER), opened)
+        assertEquals(0, closes)
+    }
+
+    @Test
+    fun revisionChangesLeaveOtherDestinationsAlone() {
+        macRevision = 0
+        navigator.openSession(TERMINAL)
+        navigator.macRevisionChanged(15)
+        assertEquals(HomeDestination.LiveSession(TERMINAL, "zsh"), navigator.destination.value)
+        navigator.back()
+        navigator.macRevisionChanged(15)
+        assertEquals(HomeDestination.SessionList, navigator.destination.value)
+        navigator.openSettings()
+        navigator.macRevisionChanged(15)
+        assertEquals(HomeDestination.Settings, navigator.destination.value)
+    }
+
+    @Test
     fun settingsAndBackNeverTouchTheStream() {
         navigator.openSettings()
         assertEquals(HomeDestination.Settings, navigator.destination.value)

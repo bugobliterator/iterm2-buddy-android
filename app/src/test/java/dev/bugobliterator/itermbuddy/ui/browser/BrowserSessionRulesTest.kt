@@ -5,6 +5,7 @@ import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.core.stream.ActiveStream
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
+import dev.bugobliterator.itermbuddy.ui.live.LiveInputMemory
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -27,6 +28,31 @@ class BrowserSessionRulesTest {
         val rule = BrowserKeyboardRule()
         assertNull(rule.onEditing(editing = true, active = false))
         assertEquals(KeyboardMove.SHOW, rule.onEditing(editing = true, active = true))
+    }
+
+    @Test
+    fun editingAfterAReconnectRaisesTheKeyboardAgain() {
+        // Inactive (a reconnect, the app in the background) forgets what was applied.
+        val rule = BrowserKeyboardRule()
+        assertEquals(KeyboardMove.SHOW, rule.onEditing(editing = true, active = true))
+        assertNull(rule.onEditing(editing = false, active = false))
+        assertEquals(KeyboardMove.SHOW, rule.onEditing(editing = true, active = true))
+    }
+
+    @Test
+    fun editingIsIgnoredWhileTheAddressFieldHasFocus() {
+        val rule = BrowserKeyboardRule()
+        assertNull(rule.onEditing(editing = true, active = true, addressFocused = true))
+        // Applied once the field lets go.
+        assertEquals(KeyboardMove.SHOW, rule.onEditing(editing = true, active = true, addressFocused = false))
+    }
+
+    @Test
+    fun whatWasAppliedSurvivesRotation() {
+        // Kept in the session's input memory, so a new view does not re-raise a keyboard the owner hid.
+        val memory = LiveInputMemory()
+        assertEquals(KeyboardMove.SHOW, BrowserKeyboardRule(memory).onEditing(editing = true, active = true))
+        assertNull(BrowserKeyboardRule(memory).onEditing(editing = true, active = true))
     }
 
     @Test
