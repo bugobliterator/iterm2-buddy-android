@@ -59,13 +59,18 @@ data class InlineRun(
  * the Mac named it, "[defunct session]" when it answered a miss, the mention as written while
  * [resolve] has no answer (null). For plain text, which iOS does not read as markdown (`:204-205`).
  */
-fun plainRuns(text: String, mentions: List<Mention>, resolve: (String) -> MentionResolution?): List<InlineRun> {
+fun plainRuns(
+    text: String,
+    mentions: List<Mention>,
+    resolve: (String) -> MentionResolution?,
+    atSignOptional: Boolean = true,
+): List<InlineRun> {
     val runs = RunBuilder()
     var cursor = 0
     for (mention in mentions) {
         if (mention.start < cursor || mention.end > text.length) continue
         runs.add(text.substring(cursor, mention.start), Style.PLAIN, null)
-        val (shown, target) = mentionRun(text, mention, resolve)
+        val (shown, target) = mentionRun(text, mention, resolve, atSignOptional)
         runs.add(shown, Style.PLAIN, target)
         cursor = mention.end
     }
@@ -84,17 +89,42 @@ fun plainRuns(text: String, mentions: List<Mention>, resolve: (String) -> Mentio
  * [mentions] are the protected ones (`MentionParser.protectedMentions`, with the "@" optional
  * for the agent's text): each is kept whole through the markdown pass, so a stable ID's "_" never
  * pairs up as emphasis (`MentionParser.swift:98-118`), takes the emphasis around it, and renders
- * as in [plainRuns]. Linear in [text]'s length. Anything unexpected falls back to [plainRuns].
+ * as in [plainRuns]. With [atSignOptional] false (the owner's text) a bare stable ID is still kept
+ * whole but shown as written, as iOS links only "@"-signed mentions (`MessageBubbleView.swift:119-121`).
+ *
+ * Linear in [text]'s length: every forward scan is bounded (a link destination stops at whitespace
+ * or after [MAX_LINK_DESTINATION] characters) or remembered for the openers after it, so a hostile
+ * or partial text costs a bounded number of steps per character ([inlineMarkdownSteps]). Anything
+ * unexpected falls back to [plainRuns].
  */
-fun inlineMarkdown(text: String, mentions: List<Mention>, resolve: (String) -> MentionResolution?): List<InlineRun> =
+fun inlineMarkdown(
+    text: String,
+    mentions: List<Mention>,
+    resolve: (String) -> MentionResolution?,
+    atSignOptional: Boolean = true,
+): List<InlineRun> =
     try {
-        InlineMarkdownParser(text, mentions, resolve).parse()
+        InlineMarkdownParser(text, mentions, resolve, atSignOptional).parse()
     } catch (_: RuntimeException) {
-        plainRuns(text, mentions, resolve)
+        plainRuns(text, mentions, resolve, atSignOptional)
     }
 
-private fun mentionRun(text: String, mention: Mention, resolve: (String) -> MentionResolution?): Pair<String, LinkTarget?> =
-    when (val display = mentionDisplay(resolve(mention.identifier))) {
+/** How many scanning steps [inlineMarkdown] takes on [text]: the tests bound it by the length. */
+internal fun inlineMarkdownSteps(text: String, mentions: List<Mention>): Long =
+    InlineMarkdownParser(text, mentions, { null }, atSignOptional = true).also { it.parse() }.steps
+
+/** The longest link destination read, as cmark bounds it: a longer one is text. */
+const val MAX_LINK_DESTINATION = 2048
+
+private fun mentionRun(
+    text: String,
+    mention: Mention,
+    resolve: (String) -> MentionResolution?,
+    atSignOptional: Boolean,
+): Pair<String, LinkTarget?> {
+    val raw = text.substring(mention.start, mention.end)
+    if (!atSignOptional && !raw.startsWith('@')) return raw to null
+    return when (val display = mentionDisplay(resolve(mention.identifier))) {
         is MentionDisplay.Named -> {
             val resolution = display.resolution
             val workgroup = resolution.workgroupID
@@ -106,8 +136,9 @@ private fun mentionRun(text: String, mention: Mention, resolve: (String) -> Ment
             display.displayName to target
         }
         MentionDisplay.Defunct -> DEFUNCT_SESSION_TEXT to null
-        MentionDisplay.Raw -> text.substring(mention.start, mention.end) to null
+        MentionDisplay.Raw -> raw to null
     }
+}
 
 private data class Style(val bold: Boolean, val italic: Boolean, val code: Boolean, val strike: Boolean) {
     companion object {
@@ -151,7 +182,12 @@ private class InlineMarkdownParser(
     private val text: String,
     private val mentions: List<Mention>,
     private val resolve: (String) -> MentionResolution?,
+    private val atSignOptional: Boolean,
 ) {
+    /** Scanning steps taken: every loop over the text counts one per character or delimiter it visits. */
+    var steps = 0L
+        private set
+
     private class Token(var text: String, val code: Boolean = false, var link: LinkTarget? = null)
 
     private class Delimiter(val token: Int, val char: Char, val originalCount: Int, val canOpen: Boolean, val canClose: Boolean) {
@@ -180,17 +216,28 @@ private class InlineMarkdownParser(
     private val italicRanges = ArrayList<IntArray>()
     private val strikeRanges = ArrayList<IntArray>()
 
-    /** A backtick run of a length with no closer from this position on: none later either. */
-    private val noCloserFrom = HashMap<Int, Int>()
+    /** By length, the start of every backtick run, ascending; built on the first code span. */
+    private var backtickRuns: Map<Int, IntArray>? = null
+
+    /** The unescaped parentheses, built on the first link destination. */
+    private var parens: ParenIndex? = null
+
+    /** The last [nextDestinationBreak] answer, as for [nextBreak]. */
+    private var destinationBreakFrom = -1
+    private var destinationBreakAt = -1
+
+    /** Per title closer, the last [nextTitleClose] answer: from `[0]`, the next one is at `[1]`. */
+    private val titleCloses = HashMap<Char, IntArray>()
 
     fun parse(): List<InlineRun> {
         var index = 0
         var mention = 0
         while (index < text.length) {
+            steps++
             while (mention < mentions.size && mentions[mention].start < index) mention++
             if (mention < mentions.size && mentions[mention].start == index && mentions[mention].end <= text.length) {
                 val found = mentions[mention]
-                val (shown, target) = mentionRun(text, found, resolve)
+                val (shown, target) = mentionRun(text, found, resolve, atSignOptional)
                 addToken(Token(shown, link = target))
                 index = found.end
                 continue
@@ -241,6 +288,7 @@ private class InlineMarkdownParser(
     private fun runLength(index: Int, char: Char): Int {
         var end = index
         while (end < text.length && text[end] == char) end++
+        steps += end - index
         return end - index
     }
 
@@ -256,21 +304,30 @@ private class InlineMarkdownParser(
         return closer + length
     }
 
-    /** The start of the next backtick run of exactly [length] from [from], or -1. */
+    /**
+     * The start of the next backtick run of exactly [length] from [from], or -1: a binary search
+     * in the runs of that length, all found in one pass on the first code span.
+     */
     private fun findCodeCloser(from: Int, length: Int): Int {
-        noCloserFrom[length]?.let { if (from >= it) return -1 }
-        var at = from
-        while (at < text.length) {
-            if (text[at] != '`') {
-                at++
-                continue
-            }
-            val run = runLength(at, '`')
-            if (run == length) return at
-            at += run
+        val runs = backtickRuns ?: backtickRuns(text).also {
+            backtickRuns = it
+            steps += text.length
         }
-        noCloserFrom[length] = from
-        return -1
+        val starts = runs[length] ?: return -1
+        var low = 0
+        var high = starts.size - 1
+        var found = -1
+        while (low <= high) {
+            steps++
+            val middle = (low + high) ushr 1
+            if (starts[middle] >= from) {
+                found = starts[middle]
+                high = middle - 1
+            } else {
+                low = middle + 1
+            }
+        }
+        return found
     }
 
     /** A fence drops its info line and closing newline; a span drops one space from each end. */
@@ -341,48 +398,63 @@ private class InlineMarkdownParser(
         processEmphasis(opener.delimiterBelow)
         tokens[opener.token].text = ""
         val target = LinkTarget.Url(destination.first)
-        for (inside in opener.token + 1 until end) if (tokens[inside].link == null) tokens[inside].link = target
+        // The link's target covers its text, a bare URL in it included (iOS); a mention keeps its own.
+        for (inside in opener.token + 1 until end) {
+            steps++
+            val link = tokens[inside].link
+            if (link == null || link is LinkTarget.Url) tokens[inside].link = target
+        }
         // No link inside a link: every earlier opener becomes text.
         activeFrom = brackets.size
         return destination.second
     }
 
-    /** `(destination "title")` at [start]: the destination and the index after ")", or null. */
+    /**
+     * `(destination "title")` at [start]: the destination and the index after ")", or null. A
+     * bare destination ends at its ")" at depth zero (found through [ParenIndex], not by
+     * scanning) or at whitespace, within [MAX_LINK_DESTINATION]; a `<…>` one ends at ">" within
+     * the same bound, never past a newline or "<"; a title's closer is found by [nextTitleClose].
+     */
     private fun linkDestination(start: Int): Pair<String, Int>? {
         if (text.getOrNull(start) != '(') return null
         var at = skipSpaces(start + 1)
         val destination: String
         if (text.getOrNull(at) == '<') {
-            val close = text.indexOf('>', at + 1)
-            if (close < 0) return null
+            val limit = minOf(text.length, at + 1 + MAX_LINK_DESTINATION)
+            var close = at + 1
+            while (close < limit && text[close] != '>' && text[close] != '<' && text[close] != '\n') {
+                steps++
+                close++
+            }
+            if (close >= limit || text[close] != '>') return null
             destination = text.substring(at + 1, close)
-            if ('\n' in destination || '<' in destination) return null
             at = close + 1
         } else {
             val begin = at
-            var depth = 0
-            while (at < text.length) {
-                val char = text[at]
-                if (char.isWhitespace() || char.code < 0x20) break
-                if (char == '\\' && at + 1 < text.length && isAsciiPunctuation(text[at + 1])) {
-                    at += 2
-                    continue
-                }
-                if (char == '(') depth++
-                if (char == ')') {
-                    if (depth == 0) break
-                    depth--
-                }
-                at++
+            val stop = nextDestinationBreak(begin)
+            val index = parens ?: ParenIndex(text).also {
+                parens = it
+                steps += text.length
             }
-            if (depth != 0) return null
-            destination = text.substring(begin, at)
+            val level = index.levelBefore(begin)
+            val close = index.firstCloseAt(level, begin)
+            val end = if (close in begin until stop) {
+                close
+            } else if (index.levelBefore(stop) == level) {
+                stop
+            } else {
+                return null
+            }
+            steps += 2
+            if (end - begin > MAX_LINK_DESTINATION) return null
+            destination = text.substring(begin, end)
+            at = end
         }
         if (destination.isEmpty()) return null
         at = skipSpaces(at)
         val quote = text.getOrNull(at)
         if (quote == '"' || quote == '\'' || quote == '(') {
-            val close = text.indexOf(if (quote == '(') ')' else quote, at + 1)
+            val close = nextTitleClose(if (quote == '(') ')' else quote, at + 1)
             if (close < 0) return null
             at = skipSpaces(close + 1)
         }
@@ -390,10 +462,37 @@ private class InlineMarkdownParser(
         return destination to at + 1
     }
 
+    /** The next whitespace or control character at or after [from], remembered for the run it ends. */
+    private fun nextDestinationBreak(from: Int): Int {
+        if (from >= destinationBreakFrom && from <= destinationBreakAt) return destinationBreakAt
+        var at = from
+        while (at < text.length && !text[at].isWhitespace() && text[at].code >= 0x20) {
+            steps++
+            at++
+        }
+        destinationBreakFrom = from
+        destinationBreakAt = at
+        return at
+    }
+
+    /** The next [closer] at or after [from], or -1; remembered, so the openers before it share one scan. */
+    private fun nextTitleClose(closer: Char, from: Int): Int {
+        val known = titleCloses[closer]
+        if (known != null && from >= known[0] && from <= known[1]) return if (known[1] < text.length) known[1] else -1
+        var at = from
+        while (at < text.length && text[at] != closer) {
+            steps++
+            at++
+        }
+        titleCloses[closer] = intArrayOf(from, at)
+        return if (at < text.length) at else -1
+    }
+
     private fun skipSpaces(from: Int): Int {
         var at = from
         var newlines = 0
         while (at < text.length && (text[at] == ' ' || text[at] == '\t' || text[at] == '\n')) {
+            steps++
             if (text[at] == '\n' && ++newlines > 1) break
             at++
         }
@@ -403,10 +502,16 @@ private class InlineMarkdownParser(
     private fun autolink(index: Int): Int {
         var at = index + 1
         val schemeStart = at
-        while (at < text.length && (text[at].isAsciiLetterOrDigit() || text[at] in "+.-")) at++
+        while (at < text.length && (text[at].isAsciiLetterOrDigit() || text[at] in "+.-")) {
+            steps++
+            at++
+        }
         val schemeLength = at - schemeStart
         if (schemeLength !in 2..32 || !text[schemeStart].isAsciiLetter() || text.getOrNull(at) != ':') return literal(index)
-        while (at < text.length && text[at] != '>' && text[at] != '<' && text[at] > ' ') at++
+        while (at < text.length && text[at] != '>' && text[at] != '<' && text[at] > ' ') {
+            steps++
+            at++
+        }
         if (text.getOrNull(at) != '>') return literal(index)
         val url = text.substring(index + 1, at)
         addToken(Token(url, link = LinkTarget.Url(url)))
@@ -425,17 +530,21 @@ private class InlineMarkdownParser(
         }
         var end = minOf(nextBreak(hostStart), limit)
         var hostEnd = hostStart
-        while (hostEnd < end && (text[hostEnd].isAsciiLetterOrDigit() || text[hostEnd] in "._-:")) hostEnd++
-        // A character a host cannot hold, and no path after it, ends the URL there.
-        if (hostEnd < end && text[hostEnd] !in "/?#") end = hostEnd
+        while (hostEnd < end && (text[hostEnd].isAsciiLetterOrDigit() || text[hostEnd] in "._-:")) {
+            steps++
+            hostEnd++
+        }
+        // After a valid host the URL runs to whitespace or "<" (GFM), then sheds trailing punctuation.
         if (!validHost(hostStart, hostEnd, www)) return literal(index)
         // Trailing punctuation, and a ")" without its "(", belong to the sentence.
         var opens = 0
         var closes = 0
         for (at in index until end) {
+            steps++
             if (text[at] == '(') opens++ else if (text[at] == ')') closes++
         }
         while (end > hostStart) {
+            steps++
             val last = text[end - 1]
             if (last in "?!.,:*_~'\"") {
                 end--
@@ -452,15 +561,17 @@ private class InlineMarkdownParser(
         return end
     }
 
-    /** A host is not empty; a `www.` one has a dot after it (GFM's extended autolinks). */
-    private fun validHost(start: Int, end: Int, www: Boolean): Boolean =
-        end > start && (!www || (end - start > 4 && text.indexOf('.', start + 4).let { it in 0 until end }))
+    /** A host is not empty; a `www.` one has something after "www." (GFM links `www.foo`). */
+    private fun validHost(start: Int, end: Int, www: Boolean): Boolean = end > start && (!www || end - start > 4)
 
     /** The next whitespace or "<" at or after [from] (or the end), remembered for the run it ends. */
     private fun nextBreak(from: Int): Int {
         if (from >= breakFrom && from <= breakAt) return breakAt
         var at = from
-        while (at < text.length && !isSpace(text[at]) && text[at] != '<') at++
+        while (at < text.length && !isSpace(text[at]) && text[at] != '<') {
+            steps++
+            at++
+        }
         breakFrom = from
         breakAt = at
         return at
@@ -470,10 +581,14 @@ private class InlineMarkdownParser(
     private fun processEmphasis(bottom: Delimiter?) {
         var closer = topDelimiter
         if (closer == null || closer === bottom) return
-        while (closer!!.previous != null && closer.previous !== bottom) closer = closer.previous
+        while (closer!!.previous != null && closer.previous !== bottom) {
+            steps++
+            closer = closer.previous
+        }
         val openersBottom = HashMap<Int, Delimiter?>()
         var current: Delimiter? = closer
         while (current != null) {
+            steps++
             if (!current.canClose) {
                 current = current.next
                 continue
@@ -482,6 +597,7 @@ private class InlineMarkdownParser(
             val stop = if (openersBottom.containsKey(key)) openersBottom[key] else bottom
             var opener = current.previous
             while (opener != null && opener !== bottom && opener !== stop) {
+                steps++
                 if (opener.char == current.char && opener.canOpen && opener.count > 0 && pairs(opener, current)) break
                 opener = opener.previous
             }
@@ -539,6 +655,7 @@ private class InlineMarkdownParser(
         val italic = depths(italicRanges)
         val strike = depths(strikeRanges)
         val builder = RunBuilder()
+        steps += 2L * tokens.size
         for ((index, token) in tokens.withIndex()) {
             // A delimiter run shows the characters no pair used.
             val shown = delimiterTokens[index]?.let { it.char.toString().repeat(it.count) } ?: token.text
@@ -555,6 +672,95 @@ private class InlineMarkdownParser(
         }
         for (index in 1 until depth.size) depth[index] += depth[index - 1]
         return depth
+    }
+}
+
+/** By length, the start of every run of backticks in [text], ascending. */
+private fun backtickRuns(text: String): Map<Int, IntArray> {
+    val runs = HashMap<Int, ArrayList<Int>>()
+    var at = 0
+    while (at < text.length) {
+        if (text[at] != '`') {
+            at++
+            continue
+        }
+        val start = at
+        while (at < text.length && text[at] == '`') at++
+        runs.getOrPut(at - start) { ArrayList() } += start
+    }
+    return runs.mapValues { it.value.toIntArray() }
+}
+
+/**
+ * The text's unescaped parentheses in one pass, so a link destination's closing ")" (the first ")"
+ * at the destination's own depth) is a binary search, never a scan per opener.
+ */
+private class ParenIndex(text: String) {
+    private val positions: IntArray
+    private val levels: IntArray
+    private val isOpen: BooleanArray
+
+    /** By depth before it: the positions of the ")"s at that depth, ascending. */
+    private val closesByLevel = HashMap<Int, IntArray>()
+
+    init {
+        val found = ArrayList<Int>()
+        var at = 0
+        while (at < text.length) {
+            val char = text[at]
+            if (char == '\\' && at + 1 < text.length && isAsciiPunctuation(text[at + 1])) {
+                at += 2
+                continue
+            }
+            if (char == '(' || char == ')') found += at
+            at++
+        }
+        positions = found.toIntArray()
+        levels = IntArray(positions.size)
+        val closes = HashMap<Int, ArrayList<Int>>()
+        var level = 0
+        for ((index, position) in positions.withIndex()) {
+            levels[index] = level
+            if (text[position] == '(') {
+                level++
+            } else {
+                closes.getOrPut(level) { ArrayList() } += position
+                level--
+            }
+        }
+        for ((depth, list) in closes) closesByLevel[depth] = list.toIntArray()
+        isOpen = BooleanArray(positions.size) { text[positions[it]] == '(' }
+    }
+
+    /** The depth just before [position]: opens minus closes before it. */
+    fun levelBefore(position: Int): Int {
+        val last = lastBefore(positions, position)
+        if (last < 0) return 0
+        return levels[last] + if (isOpen[last]) 1 else -1
+    }
+
+    /** The first ")" at or after [from] whose depth before it is [level], or -1. */
+    fun firstCloseAt(level: Int, from: Int): Int {
+        val closes = closesByLevel[level] ?: return -1
+        val index = lastBefore(closes, from) + 1
+        return if (index < closes.size) closes[index] else -1
+    }
+
+    /** The index of the last element of [sorted] below [value], or -1. */
+    private fun lastBefore(sorted: IntArray, value: Int): Int {
+        var low = 0
+        var high = sorted.size - 1
+        var found = -1
+        while (low <= high) {
+            val middle = (low + high) ushr 1
+            if (sorted[middle] < value) {
+                found = middle
+                low = middle + 1
+            } else {
+                high = middle - 1
+            }
+        }
+        return found
     }
 }
 
@@ -586,6 +792,9 @@ const val MENTION_GLYPH_ID = "mention-terminal-glyph"
 /** URL schemes a tap opens; any other link is styled but not opened. */
 private val OPENABLE_SCHEMES = listOf("http://", "https://", "mailto:")
 
+/** Whether a tap on a link to [url] opens it: http, https and mailto only (never `javascript:`, `intent:`, `file:`). */
+fun isOpenableUrl(url: String): Boolean = OPENABLE_SCHEMES.any { url.startsWith(it, ignoreCase = true) }
+
 /**
  * The runs as Compose text: bold, italic, monospace code on [codeBackground], strikethrough;
  * links underlined in [linkColor]. A mention gets the terminal glyph ([MENTION_GLYPH_ID] inline
@@ -608,7 +817,7 @@ fun List<InlineRun>.toAnnotatedString(
         val linkStyles = TextLinkStyles(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline))
         when (val link = run.link) {
             null -> withStyle(style) { append(run.text) }
-            is LinkTarget.Url -> if (OPENABLE_SCHEMES.any { link.url.startsWith(it, ignoreCase = true) }) {
+            is LinkTarget.Url -> if (isOpenableUrl(link.url)) {
                 withLink(LinkAnnotation.Url(link.url, linkStyles)) { withStyle(style) { append(run.text) } }
             } else {
                 withStyle(style.merge(linkStyles.style ?: SpanStyle())) { append(run.text) }

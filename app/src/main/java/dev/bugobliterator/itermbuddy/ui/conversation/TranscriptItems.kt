@@ -114,3 +114,49 @@ class TranscriptItemCache {
 
     override fun toString(): String = "TranscriptItemCache(items=${previous.size})"
 }
+
+/**
+ * The end of the transcript that scrolling follows: [newest] is the newest row other than the
+ * typing dots (compared by identity, so a streamed delta, a new instance, is a change), and
+ * whether the dots show.
+ */
+class TranscriptTail(val newest: TranscriptItem?, val typing: Boolean) {
+    override fun toString(): String = "TranscriptTail(newest=${newest?.key}, typing=$typing)"
+}
+
+/** [items]' [TranscriptTail]. */
+fun transcriptTail(items: List<TranscriptItem>): TranscriptTail =
+    TranscriptTail(items.lastOrNull { it !== TranscriptItem.Typing }, items.lastOrNull() === TranscriptItem.Typing)
+
+/** What the transcript does when its rows change. */
+enum class FollowAction {
+    /** Nothing at the end changed, or the change is not news (the dots alone while scrolled up). */
+    NONE,
+
+    /** Scroll to the newest row: it was in view, or the owner just sent a message. */
+    PIN,
+
+    /** Show the "New messages ↓" pill: the owner is reading further up. */
+    PILL,
+}
+
+/**
+ * How the transcript follows a change from [before] to [after], given whether it was at the
+ * bottom before the change. At the bottom, any change at the end (a new row, a streamed delta,
+ * the dots coming or going) keeps the newest row in view; the owner's own new message (an echo)
+ * scrolls to it from anywhere, as sending does in a chat; scrolled up, a new or grown newest row
+ * shows the pill instead, and the dots alone do nothing. The first rows ([before] null) need
+ * nothing: the list starts at the bottom.
+ */
+fun followAction(wasAtBottom: Boolean, before: TranscriptTail?, after: TranscriptTail): FollowAction {
+    if (before == null) return FollowAction.NONE
+    val newestChanged = before.newest !== after.newest
+    if (!newestChanged && before.typing == after.typing) return FollowAction.NONE
+    val newest = after.newest
+    val ownNewMessage = newestChanged && newest is TranscriptItem.Bubble && newest.fromUser && newest.key != before.newest?.key
+    return when {
+        wasAtBottom || ownNewMessage -> FollowAction.PIN
+        newestChanged -> FollowAction.PILL
+        else -> FollowAction.NONE
+    }
+}

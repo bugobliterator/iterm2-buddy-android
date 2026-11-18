@@ -26,6 +26,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -357,9 +358,10 @@ private fun ConversationTopActions(content: ConversationContent, actions: Conver
 }
 
 /**
- * The rows, newest at the bottom. The list is laid out from the bottom (reversed), so while it is
- * at the bottom new rows and a growing reply stay in view; scrolled up, it keeps its place by key
- * and a "New messages ↓" pill appears when the last row changes.
+ * The rows, newest at the bottom. The list is laid out from the bottom (reversed); [followAction]
+ * decides, from whether it was at the bottom before the rows changed, whether to keep the newest
+ * row in view (a row inserted at the bottom is otherwise kept off-screen by key anchoring) or to
+ * show the "New messages ↓" pill.
  */
 @Composable
 private fun Transcript(items: List<TranscriptItem>, images: ChatIconCache<ImageBitmap>, onMention: (LinkTarget) -> Unit) {
@@ -367,8 +369,25 @@ private fun Transcript(items: List<TranscriptItem>, images: ChatIconCache<ImageB
     val scope = rememberCoroutineScope()
     val atBottom by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0 } }
     var unseen by remember { mutableStateOf(false) }
-    val newest = items.lastOrNull()
-    LaunchedEffect(newest) { if (!atBottom) unseen = true }
+    val tail = remember(items) { transcriptTail(items) }
+    val previous = remember { arrayOfNulls<TranscriptTail>(1) }
+    // Read in composition, before the new rows are laid out: where the list was before the change.
+    val wasAtBottom = atBottom
+    val action = remember(tail) {
+        followAction(wasAtBottom, previous[0], tail).also { previous[0] = tail }
+    }
+    // Applied as the rows apply, before they are laid out, so the newest row never lands off-screen.
+    DisposableEffect(tail) {
+        when (action) {
+            FollowAction.PIN -> {
+                unseen = false
+                listState.requestScrollToItem(0)
+            }
+            FollowAction.PILL -> unseen = true
+            FollowAction.NONE -> Unit
+        }
+        onDispose { }
+    }
     LaunchedEffect(atBottom) { if (atBottom) unseen = false }
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(

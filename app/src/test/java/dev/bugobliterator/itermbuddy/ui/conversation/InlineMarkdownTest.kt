@@ -9,6 +9,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class InlineMarkdownTest {
+    private companion object {
+        /** The bound on [inlineMarkdownSteps] per character of input. */
+        const val STEPS_PER_CHARACTER = 12L
+    }
+
     private val stableID = "ptys_7K2M9Q4R8T1VH"
     private val otherStableID = "ptys_3HX6W0ZD5N2BT"
     private val workgroup = "wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F"
@@ -23,8 +28,9 @@ class InlineMarkdownTest {
     private fun agent(text: String, resolve: (String) -> MentionResolution? = resolutions::get): List<InlineRun> =
         inlineMarkdown(text, MentionParser.protectedMentions(text, atSignOptional = true), resolve)
 
+    /** The owner's text: protected as the agent's, but only "@"-signed mentions link. */
     private fun user(text: String, resolve: (String) -> MentionResolution? = resolutions::get): List<InlineRun> =
-        inlineMarkdown(text, MentionParser.protectedMentions(text, atSignOptional = false), resolve)
+        inlineMarkdown(text, MentionParser.protectedMentions(text, atSignOptional = true), resolve, atSignOptional = false)
 
     private fun plain(text: String) = InlineRun(text)
 
@@ -106,6 +112,12 @@ class InlineMarkdownTest {
             agent(text),
         )
         assertEquals(listOf(plain(text)), user(text))
+        // The owner's bare stable IDs are still kept whole through emphasis; "@"-signed ones link.
+        val two = "compare $stableID and $otherStableID, ask @$stableID"
+        assertEquals(
+            listOf(plain("compare $stableID and $otherStableID, ask "), InlineRun("Build shell", link = LinkTarget.Session(stableID, "Build shell"))),
+            user(two),
+        )
         assertEquals(
             listOf(plain("ask "), InlineRun("Build shell", link = LinkTarget.Session(stableID, "Build shell")), plain(" now")),
             plainRuns("ask @$stableID now", MentionParser.mentions("ask @$stableID now"), resolutions::get),
@@ -156,20 +168,76 @@ class InlineMarkdownTest {
     }
 
     @Test
-    fun hostileInputsStayText() {
-        // Shapes that make a naive inline parser quadratic: each is read in one linear pass.
-        // An unclosed double backtick before many single ones: its closer is looked for once.
-        val backticks = agent("``" + "a`b".repeat(20_000))
-        assertEquals("``", backticks.first().text.take(2))
-        val hostile = listOf(
-            "[".repeat(20_000) + "[a](https://x.example)".repeat(200),
-            "(http://.".repeat(10_000),
-            "*a _b ".repeat(10_000),
-            "https://x.example/" + ")".repeat(20_000),
+    fun hostileInputsStayLinear() {
+        // cmark's pathological shapes, and the link-destination ones, at about 1 MB each: the
+        // parser's steps stay within a small constant per character (counted, never timed).
+        val size = 1_000_000
+        fun fill(unit: String) = unit.repeat(size / unit.length)
+        val nested = size / 2
+        val shapes = mapOf(
+            "empty links unclosed" to fill("[]("),
+            "angle destinations unclosed" to fill("[](<"),
+            "paren titles unclosed" to fill("[](x ("),
+            "quote titles unclosed" to fill("[](x \""),
+            "destinations over the bound" to "[](" + "a".repeat(size),
+            "bracket and paren pattern" to fill("[ (]("),
+            "nested brackets" to "[".repeat(nested) + "a" + "]".repeat(nested),
+            "nested parens in a destination" to "[a](" + "(".repeat(nested) + ")".repeat(nested),
+            "link openers without closers" to fill("[a "),
+            "link closers without openers" to fill("a] "),
+            "nested strong and emphasis" to fill("*a **a "),
+            "emphasis closers without openers" to fill("a_ "),
+            "emphasis openers without closers" to fill("_a "),
+            "mismatched openers and closers" to fill("*a_ "),
+            "openers and closers multiple of three" to fill("a**b c* "),
+            "link openers and emphasis closers" to fill("[ a_"),
+            "unclosed backticks of every length" to buildString { var run = 1; while (length < size) { append("e"); append("`".repeat(run++)) } },
+            "unclosed double backtick" to "``" + fill("a`b"),
+            "autolink openers" to fill("<http:a"),
+            "bare urls after parens" to fill("(http://."),
+            "bare urls with unbalanced parens" to "https://x.example/" + ")".repeat(size),
         )
-        for (text in hostile) {
-            val runs = agent(text)
-            assertEquals(text.length.toString(), text.replace("[a](https://x.example)", "a"), runs.joinToString("") { it.text })
+        for ((name, text) in shapes) {
+            val steps = inlineMarkdownSteps(text, emptyList())
+            assertTrue("$name: ${steps / text.length} steps per character", steps <= STEPS_PER_CHARACTER * text.length)
+        }
+        // And they keep their text: a failed construct is shown as written.
+        for (text in listOf(fill("[]("), fill("[](<"), fill("[](x ("), "[".repeat(1000) + "a" + "]".repeat(1000), fill("(http://."))) {
+            assertEquals(text, agent(text).joinToString("") { it.text })
+        }
+    }
+
+    @Test
+    fun linksAndAutolinksFollowGfm() {
+        // `www.foo` links; a URL runs past a comma to whitespace, then sheds trailing punctuation.
+        assertEquals(listOf(InlineRun("www.foo", link = LinkTarget.Url("http://www.foo"))), agent("www.foo"))
+        assertEquals(
+            listOf(plain("see "), InlineRun("https://x.example/a,b", link = LinkTarget.Url("https://x.example/a,b")), plain(", ok")),
+            agent("see https://x.example/a,b, ok"),
+        )
+        assertEquals(listOf(InlineRun("www.x.example,more", link = LinkTarget.Url("http://www.x.example,more"))), agent("www.x.example,more"))
+        // A bare URL in a link's text takes the link's target, as on iOS.
+        assertEquals(
+            listOf(InlineRun("https://shown.example", link = LinkTarget.Url("https://target.example"))),
+            agent("[https://shown.example](https://target.example)"),
+        )
+        // A long or multi-line destination is text.
+        val long = "[a](https://x.example/" + "p".repeat(MAX_LINK_DESTINATION) + ")"
+        assertTrue(agent(long).none { it.link != null && it.text == "a" })
+        assertEquals(listOf(plain("[a](<https://x\n.example>)")), agent("[a](<https://x\n.example>)"))
+        // Nested parentheses in a destination, and an escaped one.
+        assertEquals(listOf(InlineRun("a", link = LinkTarget.Url("f(x)"))), agent("[a](f(x))"))
+        assertEquals(listOf(InlineRun("a", link = LinkTarget.Url("f\\(x"))), agent("[a](f\\(x)"))
+        assertEquals(listOf(InlineRun("a", link = LinkTarget.Url("u"))), agent("[a](u \"title\")"))
+    }
+
+    @Test
+    fun openableUrls() {
+        for (url in listOf("http://x.example", "https://x.example/a", "HTTPS://X.EXAMPLE", "mailto:a@x.example")) {
+            assertTrue(url, isOpenableUrl(url))
+        }
+        for (url in listOf("javascript:alert(1)", "intent://x#Intent;end", "file:///etc/hosts", "content://x", "tel:123", "src/main.kt", "")) {
+            assertFalse(url, isOpenableUrl(url))
         }
     }
 

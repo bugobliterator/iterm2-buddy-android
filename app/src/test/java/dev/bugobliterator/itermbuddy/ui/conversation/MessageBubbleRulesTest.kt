@@ -133,6 +133,12 @@ class MessageBubbleRulesTest {
     }
 
     @Test
+    fun warningIsIosOrangeForTheTheme() {
+        assertEquals(androidx.compose.ui.graphics.Color(0xFFFF9F0A), warningOrange(backgroundLuminance = 0.02f))
+        assertEquals(androidx.compose.ui.graphics.Color(0xFFFF9500), warningOrange(backgroundLuminance = 0.95f))
+    }
+
+    @Test
     fun cutCommandArgumentIsShownInFull() {
         val long = "find . -name '*.kt' -exec grep -l `whoami` {} +"
         val lines = card(MessageBody.ClassicCommand(CommandContent.ExecuteCommand(long), safe = true)).lines

@@ -193,6 +193,43 @@ class TranscriptItemsTest {
     }
 
     @Test
+    fun followingKeepsNewMessagesInViewOrShowsThePill() {
+        val cache = TranscriptItemCache()
+        val transcript = Transcript(conversation())
+        val idle = cache.items(transcript.messages(), typing = false, resolutions = emptyMap())
+        val first = transcriptTail(idle)
+        assertEquals(FollowAction.NONE, followAction(wasAtBottom = true, before = null, after = first))
+
+        // A message arriving while the agent is not WORKING (no dots to key on): followed at the
+        // bottom, a pill when scrolled up.
+        transcript.applyDelivery(message(MessageBody.Markdown("A watcher fired")), chat)
+        val arrived = transcriptTail(cache.items(transcript.messages(), typing = false, resolutions = emptyMap()))
+        assertEquals(FollowAction.PIN, followAction(wasAtBottom = true, before = first, after = arrived))
+        assertEquals(FollowAction.PILL, followAction(wasAtBottom = false, before = first, after = arrived))
+
+        // Deltas while scrolled up, during a turn (the dots are the last row): the pill, every time.
+        val working = transcriptTail(cache.items(transcript.messages(), typing = true, resolutions = emptyMap()))
+        assertEquals(FollowAction.NONE, followAction(wasAtBottom = false, before = arrived, after = working))
+        assertEquals(FollowAction.PIN, followAction(wasAtBottom = true, before = arrived, after = working))
+        var before = working
+        repeat(3) {
+            transcript.applyDelivery(message(MessageBody.Append(" more", transcript.messages().last().uniqueID)), chat)
+            val after = transcriptTail(cache.items(transcript.messages(), typing = true, resolutions = emptyMap()))
+            assertEquals(FollowAction.PILL, followAction(wasAtBottom = false, before = before, after = after))
+            assertEquals(FollowAction.PIN, followAction(wasAtBottom = true, before = before, after = after))
+            before = after
+        }
+        // Nothing at the end changed: nothing to do.
+        val same = transcriptTail(cache.items(transcript.messages(), typing = true, resolutions = emptyMap()))
+        assertEquals(FollowAction.NONE, followAction(wasAtBottom = true, before = before, after = same))
+
+        // The owner's own echo scrolls to it even from further up.
+        transcript.applyDelivery(message(MessageBody.PlainText("Thanks"), Participant.USER), chat)
+        val echo = transcriptTail(cache.items(transcript.messages(), typing = true, resolutions = emptyMap()))
+        assertEquals(FollowAction.PIN, followAction(wasAtBottom = false, before = same, after = echo))
+    }
+
+    @Test
     fun itemsHoldNoContentInToString() {
         val secret = "Sentinel deploy shell"
         val items = transcriptItems(
