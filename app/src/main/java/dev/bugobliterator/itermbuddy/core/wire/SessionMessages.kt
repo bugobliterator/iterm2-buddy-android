@@ -308,6 +308,15 @@ sealed interface PhoneMessage {
     data class FetchSessionScreenInfo(val sessionGuid: String) : PhoneMessage {
         override fun payload(): JsonObject = encodeFetchSessionScreenInfo(this)
     }
+
+    /**
+     * `fetchSessionContent(sessionGuid:firstLine:lineCount:)`, a request: the Mac renders the lines
+     * as one PNG and replies with [MacMessage.SessionContentMessage], or with a `badRequest` error
+     * when no requested line exists. The Mac clamps the range to the lines it has.
+     */
+    data class FetchSessionContent(val sessionGuid: String, val firstLine: Int, val lineCount: Int) : PhoneMessage {
+        override fun payload(): JsonObject = encodeFetchSessionContent(this)
+    }
 }
 
 /**
@@ -490,6 +499,12 @@ sealed interface MacMessage {
      * [PhoneMessage.FetchSessionScreenInfo]. A plain reply, not chat-scoped.
      */
     data class SessionScreenInfoMessage(val info: SessionScreenInfo) : MacMessage
+
+    /**
+     * `sessionContent(CompanionSessionContent)`: the reply to [PhoneMessage.FetchSessionContent].
+     * A plain reply, not chat-scoped.
+     */
+    data class SessionContentMessage(val content: SessionContent) : MacMessage
 
     /**
      * What a waiting request receives when its reply crossed to the chat sink as raw bytes

@@ -119,6 +119,18 @@ val chatMemoryTestName = "chatMemoryTest"
 // Heap-bound tests only: ui.live.LiveInputMemoryTest is about input state, not heap, and stays in testDebugUnitTest.
 val memoryTests = "dev.bugobliterator.itermbuddy.core.*MemoryTest"
 
+val realIterm2TestName = "realIterm2Test"
+// Against a real iTerm2 on a macOS runner (.github/workflows/real-iterm2.yml); only realIterm2Test runs them.
+val realIterm2Tests = "dev.bugobliterator.itermbuddy.realiterm2.*"
+// What the workflow hands those tests (ci/real-iterm2/README.md).
+val realIterm2Environment = listOf(
+    "REAL_ITERM2",
+    "REAL_ITERM2_PAIRING_FILE",
+    "REAL_ITERM2_RELAY_URL",
+    "REAL_ITERM2_CONNECT_TIMEOUT_SECONDS",
+    "REAL_ITERM2_REQUEST_TIMEOUT_SECONDS",
+)
+
 tasks.withType<Test>().configureEach {
     maxParallelForks = unitTestForks.get()
     systemProperty("fixtures.dir", rootProject.file("fixtures").path)
@@ -133,6 +145,7 @@ tasks.withType<Test>().configureEach {
         .withPropertyName("fixtures")
     // Memory tests assert a peak heap, so they run only in chatMemoryTest's bounded JVM.
     if (name != chatMemoryTestName) filter { excludeTestsMatching(memoryTests) }
+    if (name != realIterm2TestName) filter { excludeTestsMatching(realIterm2Tests) }
 }
 
 /**
@@ -152,3 +165,26 @@ val chatMemoryTest = tasks.register<Test>(chatMemoryTestName) {
 }
 
 tasks.named("check") { dependsOn(chatMemoryTest) }
+
+/**
+ * Runs `realiterm2.*` against a real iTerm2 that `ci/real-iterm2/` set up: only with
+ * `REAL_ITERM2=1`, and only from `.github/workflows/real-iterm2.yml` (the tests skip otherwise).
+ * Neither `check` nor `testDebugUnitTest` runs it. Never up to date: it tests a live Mac.
+ */
+tasks.register<Test>(realIterm2TestName) {
+    description = "Runs the real iTerm2 integration tests (needs REAL_ITERM2=1 and ci/real-iterm2)."
+    group = LifecycleBasePlugin.VERIFICATION_GROUP
+    val unitTests = tasks.getByName<Test>("testDebugUnitTest")
+    testClassesDirs = unitTests.testClassesDirs
+    classpath = unitTests.classpath
+    filter { includeTestsMatching(realIterm2Tests) }
+    realIterm2Environment.forEach { name ->
+        providers.environmentVariable(name).orNull?.let { environment(name, it) }
+    }
+    outputs.upToDateWhen { false }
+    testLogging {
+        events("passed", "skipped", "failed", "standardOut", "standardError")
+        showStandardStreams = true
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+}
