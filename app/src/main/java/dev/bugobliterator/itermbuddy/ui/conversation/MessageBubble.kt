@@ -17,6 +17,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
@@ -28,7 +29,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.font.FontFamily
@@ -40,6 +44,7 @@ import dev.bugobliterator.itermbuddy.core.chat.AttachmentKind
 import dev.bugobliterator.itermbuddy.core.chat.ChatMessage
 import dev.bugobliterator.itermbuddy.core.chat.ClientAction
 import dev.bugobliterator.itermbuddy.core.chat.CommandContent
+import dev.bugobliterator.itermbuddy.core.chat.EchoState
 import dev.bugobliterator.itermbuddy.core.chat.MentionParser
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolution
 import dev.bugobliterator.itermbuddy.core.chat.MessageBody
@@ -289,27 +294,69 @@ private class BubbleColors(val text: Color, val secondary: Color, val link: Colo
  * One transcript item: the owner's bubbles right in the accent colour, the agent's left, notices
  * centred and outlined, request cards left and outlined (`IOS/Views/MessageBubbleView.swift:19-38,
  * 181-197`). Text is selectable; a mention opens through [onMention]. Images decode through
- * [images] off the main thread.
+ * [images] off the main thread. A message sent from this phone shows "Sending…" under it until its
+ * echo comes back, or "Not delivered" with Retry and Delete ([onUnsent]).
  */
 @Composable
-fun MessageBubble(item: TranscriptItem, images: ChatIconCache<ImageBitmap>, onMention: (LinkTarget) -> Unit, modifier: Modifier = Modifier) {
+fun MessageBubble(
+    item: TranscriptItem,
+    images: ChatIconCache<ImageBitmap>,
+    onMention: (LinkTarget) -> Unit,
+    modifier: Modifier = Modifier,
+    onUnsent: (UnsentAction, String) -> Unit = { _, _ -> },
+) {
     when (item) {
-        is TranscriptItem.Bubble -> ChatBubble(item, images, onMention, modifier)
+        is TranscriptItem.Bubble -> ChatBubble(item, images, onMention, modifier, onUnsent)
         is TranscriptItem.Notice -> NoticeBubble(item, images, onMention, modifier)
         is TranscriptItem.RequestCard -> RequestCardView(item, onMention, modifier)
         TranscriptItem.Typing -> TypingIndicator(modifier)
     }
 }
 
+/** What the owner does with a message of theirs that was not delivered. */
+enum class UnsentAction { RETRY, DELETE }
+
 @Composable
-private fun ChatBubble(item: TranscriptItem.Bubble, images: ChatIconCache<ImageBitmap>, onMention: (LinkTarget) -> Unit, modifier: Modifier) {
+private fun ChatBubble(
+    item: TranscriptItem.Bubble,
+    images: ChatIconCache<ImageBitmap>,
+    onMention: (LinkTarget) -> Unit,
+    modifier: Modifier,
+    onUnsent: (UnsentAction, String) -> Unit,
+) {
+    Column(modifier = modifier.fillMaxWidth(), horizontalAlignment = if (item.fromUser) Alignment.End else Alignment.Start) {
+        BubbleBody(item, images, onMention)
+        when (item.echo) {
+            EchoState.SENDING -> Text(
+                "Sending…",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp, end = 4.dp),
+            )
+            EchoState.NOT_DELIVERED -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Not delivered",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
+                TextButton(onClick = { onUnsent(UnsentAction.RETRY, item.message.uniqueID) }) { Text("Retry") }
+                TextButton(onClick = { onUnsent(UnsentAction.DELETE, item.message.uniqueID) }) { Text("Delete") }
+            }
+            EchoState.DELIVERED, null -> Unit
+        }
+    }
+}
+
+@Composable
+private fun BubbleBody(item: TranscriptItem.Bubble, images: ChatIconCache<ImageBitmap>, onMention: (LinkTarget) -> Unit) {
     val scheme = MaterialTheme.colorScheme
     val colors = if (item.fromUser) {
         BubbleColors(scheme.onPrimary, scheme.onPrimary.copy(alpha = 0.75f), scheme.onPrimary, scheme.onPrimary.copy(alpha = 0.15f))
     } else {
         BubbleColors(scheme.onSurface, scheme.onSurfaceVariant, scheme.primary, scheme.onSurface.copy(alpha = 0.08f))
     }
-    Row(modifier = modifier.fillMaxWidth(), horizontalArrangement = if (item.fromUser) Arrangement.End else Arrangement.Start) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = if (item.fromUser) Arrangement.End else Arrangement.Start) {
         if (item.fromUser) Spacer(Modifier.width(48.dp))
         Surface(
             color = if (item.fromUser) scheme.primary else scheme.surfaceContainerHigh,

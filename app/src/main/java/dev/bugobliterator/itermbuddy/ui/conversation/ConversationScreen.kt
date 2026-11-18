@@ -53,7 +53,9 @@ import dev.bugobliterator.itermbuddy.core.chat.ChatRepository
 import dev.bugobliterator.itermbuddy.core.chat.ChatSummary
 import dev.bugobliterator.itermbuddy.core.chat.ConversationState
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolution
+import dev.bugobliterator.itermbuddy.core.chat.NotSendableReason
 import dev.bugobliterator.itermbuddy.core.chat.StableSessionId
+import dev.bugobliterator.itermbuddy.core.chat.warnsOfPendingRequest
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTree
 import dev.bugobliterator.itermbuddy.ui.chats.ChatIconCache
@@ -134,7 +136,9 @@ sealed interface ConversationBody {
  * The conversation screen's model. [title] is the chat's (iOS falls back to "Chat",
  * `IOS/Screens/ConversationView.swift:16-18`); [showsMute] from Mac revision 5 (`AM:2670-2672`);
  * [goToSession] per [goToSession]; [workgroups] the workgroups an orchestrator chat claims;
- * [sendable] from the repository, for the composer. [toString] shows no content.
+ * [sendable] and [whyNotSendable] from the repository, and [warnsOfPendingRequest]
+ * ([dev.bugobliterator.itermbuddy.core.chat.warnsOfPendingRequest]), for the composer. [toString]
+ * shows no content.
  */
 data class ConversationContent(
     val chatID: String,
@@ -145,10 +149,13 @@ data class ConversationContent(
     val goToSession: GoToSession?,
     val workgroups: List<WorkgroupLink>,
     val sendable: Boolean,
+    val whyNotSendable: NotSendableReason? = if (sendable) null else NotSendableReason.NOT_LOADED,
+    val warnsOfPendingRequest: Boolean = false,
 ) {
     override fun toString(): String =
         "ConversationContent(chatID=$chatID, title(len=${title.length}), body=$body, muted=$muted, showsMute=$showsMute, " +
-            "goToSession=$goToSession, workgroups=${workgroups.size}, sendable=$sendable)"
+            "goToSession=$goToSession, workgroups=${workgroups.size}, sendable=$sendable, whyNotSendable=$whyNotSendable, " +
+            "warnsOfPendingRequest=$warnsOfPendingRequest)"
 }
 
 /**
@@ -195,6 +202,10 @@ class ConversationPresenter {
             goToSession = goToSession(chat, tree, live),
             workgroups = workgroups,
             sendable = (state as? ConversationState.Shown)?.sendable == true,
+            whyNotSendable = (state as? ConversationState.Shown)?.whyNotSendable ?: NotSendableReason.NOT_LOADED.takeIf {
+                state !is ConversationState.Shown
+            },
+            warnsOfPendingRequest = state is ConversationState.Shown && warnsOfPendingRequest(activity, state.messages),
         )
     }
 
@@ -275,6 +286,12 @@ interface ConversationActions {
     fun openMention(target: LinkTarget)
 
     fun openWorkgroup(workgroup: WorkgroupLink)
+
+    /** Sends again a message of the owner's that was not delivered ([ChatRepository.retrySend]). */
+    fun retrySend(uniqueID: String)
+
+    /** Drops a message of the owner's that was not delivered ([ChatRepository.discardUnsent]). */
+    fun deleteUnsent(uniqueID: String)
 }
 
 /**
@@ -316,7 +333,12 @@ fun ConversationScreen(
                         Text(FAILED_CONVERSATION_TEXT, textAlign = TextAlign.Center)
                         if (body.retryable) Button(onClick = actions::retry) { Text("Try again") }
                     }
-                    is ConversationBody.Shown -> Transcript(body.items, images, actions::openMention)
+                    is ConversationBody.Shown -> Transcript(body.items, images, actions::openMention) { action, uniqueID ->
+                        when (action) {
+                            UnsentAction.RETRY -> actions.retrySend(uniqueID)
+                            UnsentAction.DELETE -> actions.deleteUnsent(uniqueID)
+                        }
+                    }
                 }
             }
             (content.body as? ConversationBody.Shown)?.banners?.forEach { Banner(it) }
@@ -364,7 +386,12 @@ private fun ConversationTopActions(content: ConversationContent, actions: Conver
  * show the "New messages ↓" pill.
  */
 @Composable
-private fun Transcript(items: List<TranscriptItem>, images: ChatIconCache<ImageBitmap>, onMention: (LinkTarget) -> Unit) {
+private fun Transcript(
+    items: List<TranscriptItem>,
+    images: ChatIconCache<ImageBitmap>,
+    onMention: (LinkTarget) -> Unit,
+    onUnsent: (UnsentAction, String) -> Unit,
+) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val atBottom by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0 } }
@@ -397,7 +424,7 @@ private fun Transcript(items: List<TranscriptItem>, images: ChatIconCache<ImageB
             contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom),
         ) {
-            items(items.asReversed(), key = { it.key }) { item -> MessageBubble(item, images, onMention) }
+            items(items.asReversed(), key = { it.key }) { item -> MessageBubble(item, images, onMention, onUnsent = onUnsent) }
         }
         if (unseen && !atBottom) {
             SmallFloatingActionButton(

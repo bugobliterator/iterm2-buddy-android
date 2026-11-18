@@ -4,6 +4,8 @@ import dev.bugobliterator.itermbuddy.core.RequestNotSentException
 import dev.bugobliterator.itermbuddy.core.stream.StreamLink
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
+import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -11,6 +13,7 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -50,6 +53,49 @@ sealed interface ChatListState {
  */
 enum class EchoState { SENDING, NOT_DELIVERED, DELIVERED }
 
+/** Why a chat takes no message now. */
+enum class NotSendableReason {
+    /** No link to the Mac. */
+    NOT_CONNECTED,
+
+    /** AI is turned off on the Mac, which drops a publish (`HB:2289-2293`). */
+    AI_UNAVAILABLE,
+
+    /** Missing from the Mac's list (`AM:2877-2900`); nothing new can be sent (`AM:3087-3091`). */
+    DELETED,
+
+    /** No history for the chat on this link yet: its echo could not come back (it comes through the subscription). */
+    NOT_LOADED,
+
+    /** The publish could not be written to the link. */
+    SEND_FAILED,
+
+    /** Retry named a message that is not one of this phone's sends marked not delivered. */
+    NOT_RETRYABLE,
+}
+
+/** What [ChatRepository.send] did. Carries no content. */
+sealed interface SendOutcome {
+    /** Published; its echo shows as [EchoState.SENDING]. The composer clears its draft. */
+    data object Sent : SendOutcome
+
+    /** Nothing but whitespace: nothing sent (`AM:3087-3091`). */
+    data object Empty : SendOutcome
+
+    /** Not sent, for [reason]; the composer keeps its draft. */
+    data class NotSendable(val reason: NotSendableReason) : SendOutcome
+}
+
+/**
+ * Whether the composer warns that sending cancels a pending request: the chat is
+ * [AgentState.WAITING] and its newest visible message [ChatMessage.isAbandonableRequest] (a
+ * classic command approval or an enable-orchestration request, `CS:192-237`, `CA:1289-1292`). An
+ * `executingCommand` notice after it is newer (the approved command already runs and is not
+ * killed), and select-session and workgroup-permission requests are not abandoned by typing.
+ */
+fun warnsOfPendingRequest(activity: AgentState?, messages: List<ChatMessage>): Boolean =
+    activity == AgentState.WAITING && messages.lastOrNull { !it.hidden }?.isAbandonableRequest == true
+
 /** One conversation as the conversation screen shows it. */
 sealed interface ConversationState {
     data object Loading : ConversationState
@@ -63,7 +109,7 @@ sealed interface ConversationState {
      * a history for this chat received on the current link.
      *
      * [echoes]: the messages in [messages] sent from this phone, by `uniqueID`, with where each
-     * stands.
+     * stands. [whyNotSendable]: null exactly when [sendable].
      *
      * Equality compares [version], the flags and [echoes] only, never the messages: the version
      * names the snapshot, so a republish of the same snapshot is equal at no cost.
@@ -75,16 +121,17 @@ sealed interface ConversationState {
         val deleted: Boolean,
         val sendable: Boolean,
         val echoes: Map<String, EchoState> = emptyMap(),
+        val whyNotSendable: NotSendableReason? = if (sendable) null else NotSendableReason.NOT_LOADED,
     ) : ConversationState {
         override fun equals(other: Any?): Boolean =
             other is Shown && other.version == version && other.stale == stale && other.deleted == deleted &&
-                other.sendable == sendable && other.echoes == echoes
+                other.sendable == sendable && other.echoes == echoes && other.whyNotSendable == whyNotSendable
 
-        override fun hashCode(): Int = listOf(version, stale, deleted, sendable, echoes).hashCode()
+        override fun hashCode(): Int = listOf(version, stale, deleted, sendable, echoes, whyNotSendable).hashCode()
 
         override fun toString(): String =
             "Shown(messages=${messages.size}, version=$version, stale=$stale, deleted=$deleted, sendable=$sendable, " +
-                "echoes=${echoes.size})"
+                "echoes=${echoes.size}, whyNotSendable=$whyNotSendable)"
     }
 
     /** The history could not be loaded; [retryable] offers Try again (false while AI is off). */
@@ -181,11 +228,24 @@ data class ChatTimeouts(
  * **Memory.** Transcripts are kept for open conversations and the `closedTranscripts` most
  * recently closed ([ChatBudgets]); attachment bytes under [ChatBudgets.attachments] per transcript.
  *
+ * **Sending** ([send], `AM:3087-3135`) needs a history for the chat on the current link: the echo
+ * comes back only through the subscription. The owner's message is published fire-and-forget on
+ * that link with a new uppercase `uniqueID` and a whole-millisecond date, and its optimistic echo
+ * appended at once, [EchoState.SENDING]. The Mac's `delivery` with that `uniqueID` replaces it
+ * (`HB:1812-1823`). It is [EchoState.NOT_DELIVERED] when the write fails, when no echo comes within
+ * [ChatTimeouts.echo] (the Mac swallows publish errors, `HB:1822`, and drops a publish while AI is
+ * off, `HB:2289-2293`), or when a history that replaces the transcript lacks it: it is then put
+ * back at the end of the new transcript. [retrySend] publishes a copy with a new `uniqueID` (the
+ * Mac appends without deduping, `CB:146-160`) in its place; [discardUnsent] drops it. A late echo
+ * of the original still upserts and shows as delivered.
+ *
  * [clear] (unpair) drops everything, ignores every input from links up to then, and clears the
  * [OversizedChats] and [seen] on the consumer, so no mark lands after the wipe.
  *
  * @param nowMillis a monotonic clock for timers and rate limits only; never compared with the Mac's times.
  * @param log diagnostics: chat IDs, counts, sizes, cases and exception classes only, never content.
+ * @param newUuid the `uniqueID` of each message sent (sent uppercase).
+ * @param wallClockMillis the phone's wall clock: a sent message's `sentDate`, nothing else.
  */
 class ChatRepository(
     private val link: StreamLink,
@@ -196,6 +256,8 @@ class ChatRepository(
     private val subscribeConcurrency: Int = 2,
     private val nowMillis: () -> Long,
     private val log: (String) -> Unit = {},
+    private val newUuid: () -> UUID = UUID::randomUUID,
+    private val wallClockMillis: () -> Long = System::currentTimeMillis,
 ) {
     init {
         require(subscribeConcurrency >= 1) { "subscribeConcurrency must be at least 1" }
@@ -356,6 +418,15 @@ class ChatRepository(
     /** Names the scheduled timer; a timer's post that is no longer current changes no schedule. */
     private var timerSerial = 0L
 
+    /** A message sent from this phone: its echo, where it stands, and when it is due back. */
+    private class Echo(val message: ChatMessage, val text: String, var state: EchoState, val dueAtMillis: Long) {
+        /** Taken out of the transcript by Retry or Delete; back in if its echo comes after all. */
+        var withdrawn = false
+    }
+
+    /** This phone's sends by chat, then by `uniqueID`, in sending order. */
+    private val echoes = HashMap<String, LinkedHashMap<String, Echo>>()
+
     /** Process-wide counter for [ConversationState.Shown.version]. */
     private var snapshotSerials = 0L
     private var cost = LinkCost(0, 0)
@@ -455,9 +526,155 @@ class ChatRepository(
      * An own message was published to [chatID] (the send action calls this): the first list value
      * past the chat's current `lastModified` is the owner's own bump, not news.
      */
-    internal fun noteOwnSend(chatID: String) = post {
+    internal fun noteOwnSend(chatID: String) = post { noteOwnSendNow(chatID) }
+
+    private fun noteOwnSendNow(chatID: String) {
         entryByID[chatID]?.let { sendMarks[chatID] = it.chat.lastModifiedMillis }
     }
+
+    /**
+     * Sends [draft] to [chatID] (`AM:3087-3135`): refused unless the chat is sendable (see
+     * [ConversationState.Shown.whyNotSendable]); [SendOutcome.Empty] when its text is only
+     * whitespace and newlines once trimmed; otherwise published with its echo appended, and
+     * [SendOutcome.Sent] once the publish is handed to the link ([NotSendableReason.SEND_FAILED],
+     * the echo not delivered, when it cannot be). Suspends the caller only, never the consumer.
+     */
+    suspend fun send(chatID: String, draft: MentionDraft): SendOutcome = onConsumer { result ->
+        val refused = whyNotSendable(chatID)
+        val text = draft.serialised().trim()
+        when {
+            refused != null -> result.complete(SendOutcome.NotSendable(refused))
+            text.isEmpty() -> result.complete(SendOutcome.Empty)
+            else -> publishNow(chatID, text, result)
+        }
+    }
+
+    /**
+     * Sends again a message of this phone's marked [EchoState.NOT_DELIVERED]: a copy with a new
+     * `uniqueID` takes its place at the end of the transcript.
+     */
+    suspend fun retrySend(chatID: String, uniqueID: String): SendOutcome = onConsumer { result ->
+        val echo = echoes[chatID]?.get(uniqueID.uppercase(Locale.ROOT))
+        val refused = whyNotSendable(chatID)
+        when {
+            echo == null || echo.state != EchoState.NOT_DELIVERED || echo.withdrawn ->
+                result.complete(SendOutcome.NotSendable(NotSendableReason.NOT_RETRYABLE))
+            refused != null -> result.complete(SendOutcome.NotSendable(refused))
+            else -> {
+                withdraw(chatID, echo)
+                publishNow(chatID, echo.text, result)
+            }
+        }
+    }
+
+    /** Drops a message of this phone's marked [EchoState.NOT_DELIVERED] from the transcript. */
+    fun discardUnsent(chatID: String, uniqueID: String) = post {
+        val echo = echoes[chatID]?.get(uniqueID.uppercase(Locale.ROOT))
+        if (echo != null && echo.state == EchoState.NOT_DELIVERED && !echo.withdrawn) withdraw(chatID, echo)
+    }
+
+    /** Runs [block] on the consumer and returns what it completes; a dead consumer sends nothing. */
+    private suspend fun onConsumer(block: (CompletableDeferred<SendOutcome>) -> Unit): SendOutcome {
+        val stopped = SendOutcome.NotSendable(NotSendableReason.NOT_CONNECTED)
+        if (inbox.stopped) return stopped
+        val result = CompletableDeferred<SendOutcome>()
+        post {
+            try {
+                block(result)
+            } catch (e: Exception) {
+                result.complete(SendOutcome.NotSendable(NotSendableReason.SEND_FAILED))
+                throw e
+            }
+        }
+        return result.await()
+    }
+
+    // Sending
+
+    /** Why [chatID] takes no message now, or null when it does. */
+    private fun whyNotSendable(chatID: String): NotSendableReason? {
+        val linkId = currentLink ?: return NotSendableReason.NOT_CONNECTED
+        if (!ai) return NotSendableReason.AI_UNAVAILABLE
+        if (isDeleted(chatID)) return NotSendableReason.DELETED
+        val conversation = conversations[chatID]
+        if (conversation?.transcript == null || conversation.historyLink != linkId) return NotSendableReason.NOT_LOADED
+        return null
+    }
+
+    /**
+     * Publishes [text] to [chatID], whose transcript is current ([whyNotSendable] said so): the
+     * user message iOS builds (`AM:3100-3118`), its echo appended, and the publish sent on the
+     * current link in its own coroutine, which completes [result].
+     */
+    private fun publishNow(chatID: String, text: String, result: CompletableDeferred<SendOutcome>) {
+        val linkId = checkNotNull(currentLink)
+        val transcript = checkNotNull(conversations[chatID]?.transcript)
+        val uniqueID = newUuid().toString().uppercase(Locale.ROOT)
+        val sentMillis = wallClockMillis()
+        val outgoing = UserTextMessage(chatID, text, sentMillis, uniqueID)
+        val echo = ChatMessage(chatID, Participant.USER, MessageBody.PlainText(text), sentMillis.toDouble(), uniqueID)
+        transcript.applyDelivery(echo, chatID)
+        echoes.getOrPut(chatID, ::LinkedHashMap)[uniqueID] =
+            Echo(echo, text, EchoState.SENDING, nowMillis() + timeouts.echo.inWholeMilliseconds)
+        noteOwnSendNow(chatID)
+        log("chat $chatID: sending $uniqueID")
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                link.send(PhoneMessage.Publish(outgoing), onLink = linkId)
+                result.complete(SendOutcome.Sent)
+            } catch (e: CancellationException) {
+                result.complete(SendOutcome.NotSendable(NotSendableReason.SEND_FAILED))
+                throw e
+            } catch (e: Exception) {
+                log("chat $chatID: $uniqueID was not sent: ${e.javaClass.simpleName}")
+                post { echoes[chatID]?.get(uniqueID)?.let { if (it.state == EchoState.SENDING) it.state = EchoState.NOT_DELIVERED } }
+                result.complete(SendOutcome.NotSendable(NotSendableReason.SEND_FAILED))
+            }
+        }
+    }
+
+    /** Takes [echo] out of [chatID]'s transcript (Retry, Delete); its late echo would bring it back. */
+    private fun withdraw(chatID: String, echo: Echo) {
+        echo.withdrawn = true
+        conversations[chatID]?.transcript?.withdraw(echo.message.uniqueID)
+    }
+
+    /** The Mac's echo of one of this phone's sends arrived (a delivery, or a history holding it). */
+    private fun echoed(chatID: String, uniqueID: String) {
+        val echo = echoes[chatID]?.get(uniqueID) ?: return
+        echo.state = EchoState.DELIVERED
+        echo.withdrawn = false
+    }
+
+    /**
+     * A history replaced [chatID]'s transcript (or arrived for a chat with none): sends it holds
+     * are delivered; the others not yet delivered are put back at its end, not delivered.
+     */
+    private fun echoesAfterHistory(chatID: String, history: List<ChatMessage>, transcript: Transcript?) {
+        val sent = echoes[chatID] ?: return
+        val held = history.mapTo(HashSet()) { it.uniqueID }
+        for ((uniqueID, echo) in sent) {
+            if (uniqueID in held) {
+                echoed(chatID, uniqueID)
+            } else if (echo.state != EchoState.DELIVERED && !echo.withdrawn && transcript != null) {
+                echo.state = EchoState.NOT_DELIVERED
+                transcript.applyDelivery(echo.message, chatID)
+            }
+        }
+    }
+
+    /** Marks the sends whose echo is overdue at [now] not delivered. */
+    private fun expireEchoes(now: Long) {
+        for (sent in echoes.values) {
+            for (echo in sent.values) {
+                if (echo.state == EchoState.SENDING && now >= echo.dueAtMillis) echo.state = EchoState.NOT_DELIVERED
+            }
+        }
+    }
+
+    /** When the next send still out is due, or null. */
+    private fun nextEchoDueMillis(): Long? =
+        echoes.values.asSequence().flatMap { it.values.asSequence() }.filter { it.state == EchoState.SENDING }.minOfOrNull { it.dueAtMillis }
 
     private fun post(block: () -> Unit) {
         inbox.post {
@@ -586,11 +803,13 @@ class ChatRepository(
         cost.histories++
         cost.bytes += frameBytes
         tracker.onHistory(chatID, history.messages.lastOrNull { !it.hidden }, isVisible(chatID))
-        conversations[chatID]?.let { conversation ->
+        val conversation = conversations[chatID]
+        if (conversation != null) {
             conversation.transcript = Transcript(history.messages, budgets.attachments)
             conversation.historyLink = linkId
             conversation.lostAppend = false
         }
+        echoesAfterHistory(chatID, history.messages, conversation?.transcript)
         planNeeded = true
         noteAllWantedLanded()
     }
@@ -598,7 +817,10 @@ class ChatRepository(
     private fun delivery(delivery: MacMessage.Delivery, linkId: Long) {
         val chatID = delivery.chatID
         val message = delivery.message
-        if (!message.hidden) newestDeliveryAuthor[chatID] = message.author
+        if (!message.hidden) {
+            newestDeliveryAuthor[chatID] = message.author
+            echoed(chatID, message.uniqueID)
+        }
         tracker.onDelivery(chatID, message)
         val conversation = conversations[chatID] ?: return
         val transcript = conversation.transcript ?: return
@@ -745,6 +967,7 @@ class ChatRepository(
         newestDeliveryAuthor -= chatID
         closed -= chatID
         conversations -= chatID
+        echoes -= chatID
     }
 
     /** `chatCreated`: inserted at the top only if missing (`AM:2587-2591`); with no list yet the next list brings it. */
@@ -956,11 +1179,20 @@ class ChatRepository(
                 val evicted = closed.first()
                 closed -= evicted
                 conversations -= evicted
+                dropSettledEchoes(evicted)
             }
         } else {
             conversations -= chatID
+            dropSettledEchoes(chatID)
         }
         planNeeded = true
+    }
+
+    /** [chatID]'s transcript is gone: its delivered and withdrawn sends need no tracking. Those not delivered are put back by the next history. */
+    private fun dropSettledEchoes(chatID: String) {
+        val sent = echoes[chatID] ?: return
+        sent.values.removeIf { it.state == EchoState.DELIVERED || it.withdrawn }
+        if (sent.isEmpty()) echoes -= chatID
     }
 
     private fun isVisible(chatID: String): Boolean = foreground && visibleChat == chatID
@@ -1011,6 +1243,7 @@ class ChatRepository(
         newestDeliveryAuthor.clear()
         sendMarks.clear()
         previousModified.clear()
+        echoes.clear()
         lastWanted = emptyList()
         ai = true
         aiFlow.value = true
@@ -1110,10 +1343,12 @@ class ChatRepository(
         val last = publishedAtMillis
         if (drained || last == null || now - last >= interval) publish(now) else scheduleAt(last + interval)
         tracker.nextDeadlineMillis()?.let(::scheduleAt)
+        nextEchoDueMillis()?.let(::scheduleAt)
     }
 
     private fun publish(now: Long) {
         publishedAtMillis = now
+        expireEchoes(now)
         aiFlow.value = ai
         val listed = entries
         listFlow.value = when {
@@ -1158,13 +1393,15 @@ class ChatRepository(
             }
             val linkId = currentLink
             val current = linkId != null && conversation.historyLink == linkId
-            val deleted = isDeleted(chatID)
+            val refused = whyNotSendable(chatID)
             return ConversationState.Shown(
                 messages = conversation.snapshot,
                 version = conversation.snapshotSerial,
                 stale = !current || conversation.lostAppend,
-                deleted = deleted,
-                sendable = current && ai && !deleted,
+                deleted = isDeleted(chatID),
+                sendable = refused == null,
+                echoes = shownEchoes(chatID),
+                whyNotSendable = refused,
             )
         }
         return when {
@@ -1172,6 +1409,14 @@ class ChatRepository(
             chatID in failedThisLink -> ConversationState.Failed(retryable = true)
             else -> ConversationState.Loading
         }
+    }
+
+    /** [chatID]'s sends in its transcript and where each stands, for [ConversationState.Shown.echoes]. */
+    private fun shownEchoes(chatID: String): Map<String, EchoState> {
+        val sent = echoes[chatID] ?: return emptyMap()
+        val shown = HashMap<String, EchoState>(sent.size * 2)
+        for ((uniqueID, echo) in sent) if (!echo.withdrawn) shown[uniqueID] = echo.state
+        return shown
     }
 
     /** Deleted only on an authoritative list's word (`AM:2877-2900`): an empty history never means it. */

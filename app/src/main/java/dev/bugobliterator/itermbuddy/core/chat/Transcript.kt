@@ -109,6 +109,23 @@ class Transcript(history: List<ChatMessage>, internal val budgets: AttachmentBud
         return removed
     }
 
+    /**
+     * Removes the first message with [uniqueID] (any case) without keeping a tombstone: a message
+     * sent from this phone and not delivered, withdrawn by Retry or Delete. If the Mac's echo of it
+     * comes after all, it is upserted again. Returns whether a message went.
+     */
+    fun withdraw(uniqueID: String): Boolean {
+        val upper = uniqueID.upper()
+        val index = indexByID[upper] ?: return false
+        if (open?.messageID == upper) open = null
+        keptImageBytes -= entries[index].keptImageBytes()
+        entries.removeAt(index)
+        indexByID.clear()
+        entries.forEachIndexed { at, message -> indexByID.putIfAbsent(message.uniqueID, at) }
+        changed(null)
+        return true
+    }
+
     override fun toString(): String =
         "Transcript(size=${entries.size}, version=$version, keptImageBytes=$keptImageBytes, " +
             "streaming=${if (open != null) 1 else 0}, removed=${removedIDs.size})"

@@ -20,6 +20,7 @@ import dev.bugobliterator.itermbuddy.store.InMemoryPairingStore
 import dev.bugobliterator.itermbuddy.store.PairingStage
 import dev.bugobliterator.itermbuddy.store.advancePairing
 import dev.bugobliterator.itermbuddy.store.beginFreshPairing
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
@@ -62,6 +63,10 @@ internal class ChatRig(
     budgets: ChatBudgets = ChatBudgets(),
     /** The phone's clock against the test scheduler's; the Mac's chat times are unrelated to it. */
     phoneClockOffsetMillis: Long = 0,
+    /** The `uniqueID`s the phone gives the messages it sends; seeded, so a run repeats. */
+    newUuid: () -> UUID = Random(SEED).let { random -> { UUID(random.nextLong(), random.nextLong()) } },
+    /** The phone's wall clock, for a sent message's `sentDate`. */
+    wallClockMillis: () -> Long = { MAC_TIME.toLong() + test.testScheduler.currentTime },
 ) {
     private val macKeys = newStaticKeyPair()
     private val code = PairingCode(macKeys.second, "chat-repository-test-pid", ORIGIN)
@@ -98,9 +103,24 @@ internal class ChatRig(
     /** Chats whose subscribes fail as if the envelope could not be written: the Mac never sees them. */
     val notSent: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    /** The client as the repository's link, except for [notSent]. */
+    /** When set, a `publish` fails as if its frame could not be written. */
+    @Volatile var failPublishes = false
+
+    /** When set, the Mac echoes each `publish` back as a `delivery` (`HB:1812-1823`). */
+    @Volatile var echoPublishes = false
+
+    /** The link each `publish` was sent on (`onLink`), in order. */
+    val publishLinks = CopyOnWriteArrayList<Long?>()
+
+    /** The client as the repository's link, except for [notSent] and [failPublishes]. */
     private val link = object : StreamLink {
-        override suspend fun send(message: PhoneMessage, onLink: Long?) = client.send(message, onLink)
+        override suspend fun send(message: PhoneMessage, onLink: Long?) {
+            if (message is PhoneMessage.Publish) {
+                publishLinks += onLink
+                if (failPublishes) throw RequestNotSentException("the frame could not be sent")
+            }
+            client.send(message, onLink)
+        }
 
         override suspend fun request(
             message: PhoneMessage,
@@ -125,6 +145,8 @@ internal class ChatRig(
         concurrency,
         nowMillis = { test.testScheduler.currentTime + phoneClockOffsetMillis },
         log = { logs += it },
+        newUuid = newUuid,
+        wallClockMillis = wallClockMillis,
     )
 
     val mac = FakeMac(relay, code, macKeys.first, test.backgroundScope)
@@ -162,7 +184,21 @@ internal class ChatRig(
     /** The most subscribes the Mac held unanswered at once. */
     val maxInFlight = AtomicInteger()
 
+    /** The bodies of the `publish` messages the Mac received, in order. */
+    fun publishes(): List<JsonObject> = mac.receivedBodies("publish")
+
+    /** Sends the Mac's echo of [publish] (a `publish` body): `delivery` of its message (`HB:1812-1823`). */
+    suspend fun echo(publish: JsonObject) {
+        val message = publish.getValue("message").jsonObject
+        val chatID = publish.getValue("toChatID")
+        val delivery = mapOf("chatID" to chatID, "message" to message, "partial" to JsonPrimitive(false))
+        mac.sendMessage(JsonObject(mapOf("delivery" to JsonObject(delivery))), null)
+    }
+
     init {
+        mac.onRequestScripted("publish") { envelope ->
+            if (echoPublishes) echo(envelope.getValue("payload").jsonObject.getValue("publish").jsonObject)
+        }
         val unconfined = UnconfinedTestDispatcher(test.testScheduler)
         test.backgroundScope.launch(unconfined) {
             client.state.collect { if (it is ClientState.Connected) connections.value++ }
