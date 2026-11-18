@@ -175,6 +175,21 @@ class ChatIconCacheTest {
     }
 
     @Test
+    fun loadWaitingAcrossClearGetsNothing() = runTest {
+        val decoder = FakeDecoder()
+        val cache = ChatIconCache(decoder, maxBytes = 1_000, decodeContext = StandardTestDispatcher(testScheduler))
+        // A row of the old pairing waits for its icon; the owner unpairs before the decode runs.
+        val waiting = async(start = CoroutineStart.UNDISPATCHED) { cache.load(png("robot", 10)) }
+        cache.clear()
+        advanceUntilIdle()
+        assertNull("the old pairing's icon is not handed out", waiting.await())
+        assertEquals("the decode was cancelled", 0, decoder.decoded.size)
+        assertNull(cache.cached(png("robot", 10).key))
+        // The cache still works for the next pairing.
+        assertEquals("robot", cache.load(png("robot", 10)))
+    }
+
+    @Test
     fun atMostTwoDecodesRunAtOnce() {
         val executor = Executors.newFixedThreadPool(4)
         val running = AtomicInteger()

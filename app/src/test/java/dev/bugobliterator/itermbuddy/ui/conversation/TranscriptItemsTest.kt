@@ -4,6 +4,7 @@ import dev.bugobliterator.itermbuddy.core.chat.AgentState
 import dev.bugobliterator.itermbuddy.core.chat.ChatMessage
 import dev.bugobliterator.itermbuddy.core.chat.ClientAction
 import dev.bugobliterator.itermbuddy.core.chat.CommandContent
+import dev.bugobliterator.itermbuddy.core.chat.EchoState
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolution
 import dev.bugobliterator.itermbuddy.core.chat.MessageBody
 import dev.bugobliterator.itermbuddy.core.chat.Participant
@@ -223,10 +224,68 @@ class TranscriptItemsTest {
         val same = transcriptTail(cache.items(transcript.messages(), typing = true, resolutions = emptyMap()))
         assertEquals(FollowAction.NONE, followAction(wasAtBottom = true, before = before, after = same))
 
-        // The owner's own echo scrolls to it even from further up.
-        transcript.applyDelivery(message(MessageBody.PlainText("Thanks"), Participant.USER), chat)
-        val echo = transcriptTail(cache.items(transcript.messages(), typing = true, resolutions = emptyMap()))
+        // The owner's own echo, sent from this phone, scrolls to it even from further up.
+        val sent = message(MessageBody.PlainText("Thanks"), Participant.USER)
+        transcript.applyDelivery(sent, chat)
+        val echo = transcriptTail(
+            cache.items(transcript.messages(), typing = true, resolutions = emptyMap(), echoes = mapOf(sent.uniqueID to EchoState.SENDING)),
+        )
         assertEquals(FollowAction.PIN, followAction(wasAtBottom = false, before = same, after = echo))
+    }
+
+    @Test
+    fun historyReplacementAndResolutionsDoNotShowThePill() {
+        val cache = TranscriptItemCache()
+        val messages = conversation() + message(MessageBody.Markdown("Ping @$stableID"))
+        val shown = transcriptTail(cache.items(messages, typing = false, resolutions = emptyMap()))
+
+        // A history replaces the transcript: the same messages as new instances. Nothing is news.
+        val replaced = messages.map { it.copy() }
+        val afterHistory = transcriptTail(cache.items(replaced, typing = false, resolutions = emptyMap()))
+        assertFalse("the newest row was rebuilt", shown.newest === afterHistory.newest)
+        assertEquals(FollowAction.NONE, followAction(wasAtBottom = false, before = shown, after = afterHistory))
+
+        // A mention in the newest message resolves: its row is rebuilt, its message is the same.
+        val resolved = transcriptTail(
+            cache.items(replaced, typing = false, resolutions = mapOf(stableID to MentionResolution(stableID, "Build shell", stableID, null))),
+        )
+        assertFalse("the newest row was rebuilt", afterHistory.newest === resolved.newest)
+        assertEquals(FollowAction.NONE, followAction(wasAtBottom = false, before = afterHistory, after = resolved))
+
+        // A streamed delta into the newest message is still news.
+        val grown = replaced.dropLast(1) + replaced.last().copy(body = MessageBody.Markdown("Ping @$stableID now"))
+        val afterDelta = transcriptTail(cache.items(grown, typing = false, resolutions = emptyMap()))
+        assertEquals(FollowAction.PILL, followAction(wasAtBottom = false, before = resolved, after = afterDelta))
+    }
+
+    @Test
+    fun onlyThisPhonesSendsPinFromAnywhere() {
+        val cache = TranscriptItemCache()
+        val transcript = Transcript(conversation())
+        val before = transcriptTail(cache.items(transcript.messages(), typing = false, resolutions = emptyMap()))
+
+        // The owner typed on the Mac: a user message, but not sent from here. Scrolled up, a pill.
+        transcript.applyDelivery(message(MessageBody.PlainText("Typed on the Mac"), Participant.USER), chat)
+        val macTyped = transcriptTail(cache.items(transcript.messages(), typing = false, resolutions = emptyMap()))
+        assertEquals(FollowAction.PILL, followAction(wasAtBottom = false, before = before, after = macTyped))
+
+        // Sent from this phone: its echo pins from anywhere, and the bubble carries its state.
+        val sent = message(MessageBody.PlainText("Sent from the phone"), Participant.USER)
+        transcript.applyDelivery(sent, chat)
+        val sending = transcriptTail(
+            cache.items(transcript.messages(), typing = false, resolutions = emptyMap(), echoes = mapOf(sent.uniqueID to EchoState.SENDING)),
+        )
+        assertEquals(FollowAction.PIN, followAction(wasAtBottom = false, before = macTyped, after = sending))
+        assertEquals(EchoState.SENDING, (sending.newest as TranscriptItem.Bubble).echo)
+
+        // The Mac's echo replaces it, delivered: its row changes state, but nothing is news.
+        transcript.applyDelivery(sent.copy(), chat)
+        val delivered = transcriptTail(
+            cache.items(transcript.messages(), typing = false, resolutions = emptyMap(), echoes = mapOf(sent.uniqueID to EchoState.DELIVERED)),
+        )
+        assertEquals(EchoState.DELIVERED, (delivered.newest as TranscriptItem.Bubble).echo)
+        assertEquals(FollowAction.NONE, followAction(wasAtBottom = false, before = sending, after = delivered))
+        assertEquals(null, (macTyped.newest as TranscriptItem.Bubble).echo)
     }
 
     @Test
