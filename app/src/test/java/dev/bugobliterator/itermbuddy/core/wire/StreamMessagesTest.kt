@@ -153,9 +153,6 @@ class StreamMessagesTest {
         sample.json.getValue("payload").jsonObject.getValue("error").jsonObject.getValue("_0").jsonObject,
     )
 
-    private fun unsupported(sample: Sample, case: String): MacMessage =
-        MacMessage.Unsupported(case, sample.json.getValue("payload").jsonObject)
-
     /** Every macToPhone sample by name, with the request ID and message it decodes to. */
     private val macMessages: Map<String, (Sample) -> Pair<Long?, MacMessage>> = mapOf(
         "session-tree-reply" to { _ -> 4L to MacMessage.SessionTreeMessage(expectedTree(withTail = true, withBrowser = true)) },
@@ -176,8 +173,13 @@ class StreamMessagesTest {
         "error-no-supported-codec" to { sample -> 5L to error(sample) },
         "error-unknown-session" to { sample -> 5L to error(sample) },
         "error-unknown-session-not-started" to { sample -> 5L to error(sample) },
-        "messages-removed" to { sample -> null to unsupported(sample, "messagesRemoved") },
-        "ai-availability-changed" to { sample -> null to unsupported(sample, "aiAvailabilityChanged") },
+        "messages-removed" to { _ ->
+            null to MacMessage.MessagesRemoved(
+                "5E0B7C1A-9D24-4F36-8A51-0C7E2D9B4F18",
+                listOf("A1C3E5F7-0B2D-4F6A-8C1E-3D5F7A9B0C2D", "B2D4F6A8-1C3E-4A7B-9D2F-4E6A8B0C1D3E"),
+            )
+        },
+        "ai-availability-changed" to { _ -> null to MacMessage.AiAvailabilityChanged(false) },
     )
 
     @Test
@@ -244,11 +246,10 @@ class StreamMessagesTest {
     }
 
     @Test
-    fun higherRevisionExtrasAreUnsupported() {
-        for (name in listOf("messages-removed", "ai-availability-changed")) {
-            val message = decodeEnvelope(sample(name).bytes).second
-            assertTrue("$name: got $message", message is MacMessage.Unsupported)
-        }
+    fun revisionThirteenChatEventsDecode() {
+        // Revision 13 claims messagesRemoved (12) and aiAvailabilityChanged (13); Agent Chat decodes both.
+        assertTrue(decodeEnvelope(sample("messages-removed").bytes).second is MacMessage.MessagesRemoved)
+        assertEquals(MacMessage.AiAvailabilityChanged(false), decodeEnvelope(sample("ai-availability-changed").bytes).second)
     }
 
     @Test
@@ -409,7 +410,7 @@ class StreamMessagesTest {
         val values = listOf<Any>(
             text, event, PhoneMessage.SendKey("ptys_X", event), PhoneMessage.PasteText("ptys_X", secret),
             summary, peer, pane, tab, window, tree, MacMessage.SessionTreeMessage(tree),
-            decodeEnvelope("""{"payload":{"messagesRemoved":{"chatID":"$secret","messageIDs":["$secret"]}}}""".toByteArray()).second,
+            decodeEnvelope("""{"payload":{"modalAlertAnswerRejected":{"alertID":"$secret"}}}""".toByteArray()).second,
         )
         for (value in values) {
             val printed = value.toString()
@@ -417,8 +418,11 @@ class StreamMessagesTest {
         }
         assertEquals("Text(len=14)", text.toString())
         assertEquals(
-            "Unsupported(case=messagesRemoved, keys=2)",
-            MacMessage.Unsupported("messagesRemoved", Json.parseToJsonElement("""{"messagesRemoved":{"a":"$secret","b":1}}""").jsonObject).toString(),
+            "Unsupported(case=modalAlertAnswerRejected, keys=2)",
+            MacMessage.Unsupported(
+                "modalAlertAnswerRejected",
+                Json.parseToJsonElement("""{"modalAlertAnswerRejected":{"a":"$secret","b":1}}""").jsonObject,
+            ).toString(),
         )
     }
 }

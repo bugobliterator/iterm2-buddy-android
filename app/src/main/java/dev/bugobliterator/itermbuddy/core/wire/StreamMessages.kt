@@ -169,7 +169,7 @@ internal fun decodeSessionTree(body: JsonElement): MacMessage {
 }
 
 /** Upstream's custom decode: `isBrowser` absent (a Mac before revision 15) reads false. */
-private fun decodeSessionSummary(summary: JsonObject): SessionSummary = SessionSummary(
+internal fun decodeSessionSummary(summary: JsonObject): SessionSummary = SessionSummary(
     guid = summary.string("session", "guid"),
     name = summary.string("session", "name"),
     subtitle = summary.string("session", "subtitle"),

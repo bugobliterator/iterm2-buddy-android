@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy.core.wire
 
+import dev.bugobliterator.itermbuddy.core.chat.AttachmentBudgets
 import java.nio.charset.CharacterCodingException
 import java.util.Base64
 import kotlinx.serialization.SerializationException
@@ -61,14 +62,19 @@ fun encodeEnvelope(message: PhoneMessage, requestID: Long?): ByteArray {
  *   default; present with the wrong type throws.
  * - Leniencies beyond upstream: a `streamEnded` reason that is unknown, missing or not a
  *   string decodes to `StreamEndReason.UNKNOWN`, so a stream end is never refused; an
- *   unknown `streamStarted` codec string decodes to `StreamCodec.UNKNOWN`.
+ *   unknown `streamStarted` codec string decodes to `StreamCodec.UNKNOWN`; an unknown
+ *   workgroup member state decodes to `SessionState.UNKNOWN`; a chat message whose content
+ *   body is corrupt keeps the frame, its content `Unreadable` (`ChatMessages.kt`).
+ * - A `history` or `delivery` keeps file attachment bytes within [attachmentBudgets].
+ * - An exception names keys and cases only, never a value, and never carries the JSON
+ *   parser's exception (its message quotes the input).
  *
  * JSON leniency: kotlinx accepts some non-standard values (unquoted literals such as
  * `abc`) in positions this decoder ignores, while a BOM or UTF-16 frame is rejected.
  *
  * @throws WireDecodeException for anything that is not such an envelope.
  */
-fun decodeEnvelope(bytes: ByteArray): Pair<Long?, MacMessage> {
+fun decodeEnvelope(bytes: ByteArray, attachmentBudgets: AttachmentBudgets = AttachmentBudgets()): Pair<Long?, MacMessage> {
     if (bytes.isNotEmpty() && bytes[0] == MEDIA_FRAME) {
         throw WireDecodeException("media frame")
     }
@@ -81,7 +87,7 @@ fun decodeEnvelope(bytes: ByteArray): Pair<Long?, MacMessage> {
     // Android deliberately throws on any payload without exactly one key.
     val case = payload.keys.singleOrNull()
         ?: throw WireDecodeException("payload must have exactly one key, has ${payload.size}")
-    return requestID to decodeMacCase(case, payload.getValue(case), payload)
+    return requestID to decodeMacCase(case, payload.getValue(case), payload, attachmentBudgets)
 }
 
 /**
@@ -146,8 +152,9 @@ private fun parseJson(bytes: ByteArray): JsonElement {
     }
     return try {
         Json.parseToJsonElement(text)
-    } catch (e: SerializationException) {
-        throw WireDecodeException("frame is not valid JSON", e)
+    } catch (_: SerializationException) {
+        // Not chained: the parser's message quotes the input, which can be chat or terminal content.
+        throw WireDecodeException("frame is not valid JSON")
     }
 }
 
@@ -165,7 +172,12 @@ private fun decodeRequestID(element: JsonElement?): Long? {
     return literal.toLongOrNull() ?: throw WireDecodeException("requestID is out of range (${literal.length} digits)")
 }
 
-private fun decodeMacCase(case: String, body: JsonElement, payload: JsonObject): MacMessage = when (case) {
+private fun decodeMacCase(
+    case: String,
+    body: JsonElement,
+    payload: JsonObject,
+    budgets: AttachmentBudgets,
+): MacMessage = when (case) {
     "hello" -> {
         val hello = body.asObject(case)
         hello.optional(case, "wantsNotificationPermission") { it.isBoolean() }
@@ -188,6 +200,18 @@ private fun decodeMacCase(case: String, body: JsonElement, payload: JsonObject):
     "macStatusChanged" -> decodeMacStatusChanged(body)
     "browserEditingChanged" -> decodeBrowserEditingChanged(body)
     "browserNavigationChanged" -> decodeBrowserNavigationChanged(body)
+    "chatsAndSessions" -> decodeChatsAndSessions(body)
+    "chatCreated" -> decodeChatCreated(body)
+    "history" -> decodeHistory(body, budgets)
+    "delivery" -> decodeDelivery(body, budgets)
+    "messagesRemoved" -> decodeMessagesRemoved(body)
+    "typingStatus" -> decodeTypingStatus(body)
+    "turnLifecycle" -> decodeTurnLifecycle(body)
+    "mentionsResolved" -> decodeMentionsResolved(body)
+    "workgroupInfo" -> decodeWorkgroupInfo(body)
+    "chatListChanged" -> decodeChatListChanged(body)
+    "aiAvailabilityChanged" -> decodeAiAvailabilityChanged(body)
+    "sessionScreenInfo" -> decodeSessionScreenInfo(body)
     "error" -> {
         val error = body.asObject(case)[UNLABELLED] as? JsonObject
             ?: throw WireDecodeException("error.$UNLABELLED is missing or not an object")

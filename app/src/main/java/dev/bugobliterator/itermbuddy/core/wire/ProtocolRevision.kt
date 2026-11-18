@@ -6,9 +6,14 @@ package dev.bugobliterator.itermbuddy.core.wire
  * Global Constraint (Sessions plan): revision 13 from the Stream Messages task, 15 from
  * the Browser Messages task; minimum peer stays 11, the Mac's floor
  * (`CompanionProtocolVersion.minimumPeer` at iTerm2 v3.7.7). 13 gets the Mac's
- * unsolicited `sessionTree` push. It also claims revision 12 (`messagesRemoved`, sent
- * only for a subscribed chat) and 13's typed `aiUnavailable` error; this app ignores
- * both, as unknown cases decode to `MacMessage.Unsupported`.
+ * unsolicited `sessionTree` push.
+ *
+ * Agent Chat needs nothing beyond 13, and this app decodes every chat message 13 claims:
+ * `turnLifecycle` events (8, `turnLifecycleRevision`), `messagesRemoved` for a subscribed chat
+ * and the `deleteMessages` it echoes (12, `messageDeletionRevision`), and `aiAvailable` in the
+ * hello reply, `aiAvailabilityChanged` and the typed `aiUnavailable` error (13,
+ * `aiDecouplingRevision`). Revisions 14 and 15 change no chat message. Chat features gate on the
+ * Mac's hello revision, not this one (mute at 5, Delete From Here at 12).
  *
  * 15 is v3.7.7's own revision. At 14 a v3.7.7 Mac adds `macStatus` to its hello reply and
  * sends `macStatusChanged` on each change (`MC/CompanionLink.swift:518-536, 559-572,
