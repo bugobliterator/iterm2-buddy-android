@@ -24,7 +24,7 @@ class ScrollbackTilesTest {
         HistoryTile(1, generation, first, lines, 0, 100_000, ByteArray(8))
 
     /** A holder whose decodes wait on a gate per tile; handles are "picture@line". */
-    private class Rig(val test: TestScope, budget: Long = 1_000_000, val decodable: Boolean = true) {
+    private class Rig(val test: TestScope, budget: Long = 1_000_000, val decodable: Boolean = true, val gated: Boolean = true) {
         val cache = DecodedTileCache<String>(budget)
         val gates = IdentityHashMap<HistoryTile, CompletableDeferred<Unit>>()
         val started = mutableListOf<Long>()
@@ -35,7 +35,7 @@ class ScrollbackTilesTest {
             measure = { 100L },
             decode = { tile ->
                 started += tile.firstAbsLine
-                gates.getOrPut(tile) { CompletableDeferred() }.await()
+                if (gated) gates.getOrPut(tile) { CompletableDeferred() }.await()
                 if (decodable) "picture@${tile.firstAbsLine}" else null
             },
         )
@@ -130,17 +130,71 @@ class ScrollbackTilesTest {
     }
 
     @Test
-    fun undecodableTileWaitsForWantedChange() = runTest {
+    fun undecodableTileWaitsForNewSlotsInRange() = runTest {
         val rig = Rig(this, decodable = false)
         val bad = tile(1000)
-        rig.tiles.update(mapOf(1000L to TileState.Ready(bad)), geometry, 1000L..1100L)
+        val tiles = mapOf(1000L to TileState.Ready(bad), 1050L to TileState.Loading)
+        rig.tiles.update(tiles, geometry, 1000L..1040L)
         rig.finish(bad)
-        rig.tiles.update(mapOf(1000L to TileState.Ready(bad)), geometry, 1000L..1100L)
+        // Scrolling a line or two keeps the same slots in range: no retry storm.
+        rig.tiles.update(tiles, geometry, 1001L..1041L)
+        rig.tiles.update(tiles, geometry, 1002L..1042L)
         runCurrent()
         assertEquals(1, rig.started.size)
-        rig.tiles.update(mapOf(1000L to TileState.Ready(bad)), geometry, 1000L..1101L)
+        // A new slot came into range: a re-drive.
+        rig.tiles.update(tiles, geometry, 1002L..1060L)
         runCurrent()
         assertEquals("asked again on a re-drive", 2, rig.started.size)
+    }
+
+    @Test
+    fun budgetBelowKeepRangeStillDecodesTheCentreAfterAScroll() = runTest {
+        // Room for two decoded tiles; seven slots in range.
+        val rig = Rig(this, budget = 200, gated = false)
+        val all = (0 until 7).map { tile(1000L + 50 * it) }
+        val tiles = all.associate { it.firstAbsLine to TileState.Ready(it) }
+        val wide = geometry.copy(totalLines = 400, liveTop = 1360)
+        rig.tiles.update(tiles, wide, 1000L..1349L)
+        runCurrent()
+        // Centre 1174: 1150 and 1200 decode; the rest find no room.
+        assertEquals(listOf("picture@1150", "picture@1200"), rig.drawn)
+        rig.tiles.displayed(rig.tiles.drawn.value.map { it.tile })
+        runCurrent()
+        // Scrolled down: 1250 is the centre now; both pictures are still in range and displayed, so no room yet.
+        rig.tiles.update(tiles, wide, 1150L..1349L)
+        runCurrent()
+        assertTrue(rig.drawn.none { it == "picture@1250" })
+        // The renderer now shows only 1200: 1150 (still in range, off screen) is evicted and 1250 decodes.
+        rig.tiles.displayed(rig.tiles.drawn.value.filter { it.slot == 1200L }.map { it.tile })
+        runCurrent()
+        assertTrue(rig.drawn.toString(), "picture@1250" in rig.drawn)
+        assertTrue("an evicted picture is not offered for drawing", "picture@1150" !in rig.drawn)
+        assertTrue(rig.cache.retainedBytes <= 200)
+    }
+
+    @Test
+    fun resetDropsEverythingAndRefreshDecodesAgain() = runTest {
+        val rig = Rig(this, gated = false)
+        val shown = tile(1000)
+        rig.tiles.update(mapOf(1000L to TileState.Ready(shown)), geometry, 1000L..1100L)
+        runCurrent()
+        rig.tiles.displayed(listOf(shown))
+        rig.tiles.reset()
+        assertEquals(emptyList<String>(), rig.drawn)
+        assertEquals(0, rig.cache.retainedCount)
+        rig.tiles.refresh()
+        runCurrent()
+        assertEquals(listOf("picture@1000"), rig.drawn)
+        assertEquals(2, rig.started.size)
+    }
+
+    @Test
+    fun visibleSlotsAreThoseWithALineOnScreen() {
+        val layout = ScrollbackLayout(firstAbsLine = 1000, liveTop = 3000, totalLines = 2040, rows = 40, lineHeightPx = 10f, altScreen = false)
+        // Document y 5000..6000: lines 1500..1600.
+        val slots = (1000L until 3000L step 50).toList()
+        assertEquals(setOf(1500L, 1550L, 1600L), visibleSlots(layout, DocumentView(5000f, 6000f, atLiveBottom = false), slots))
+        assertEquals(setOf(1450L, 1500L), visibleSlots(layout, DocumentView(4990f, 5400f, atLiveBottom = false), slots))
     }
 
     @Test

@@ -349,7 +349,10 @@ fun documentFit(fit: FitRect, historyHeightPx: Float): FitRect {
 /**
  * The image x under document x [docX]: `(docX − fit.left) × imageW / fit.width`, or null outside
  * the band's span (or for an empty fit or image). Tiles and the band share the span, so this
- * holds for any document y.
+ * holds for any document y, in the video's image space. Tiles are rendered without margins
+ * (`includeMargins: false`, `sources/Companion/CompanionHostBridge.swift:2145-2149`) while the
+ * video's image may have them: Selection must map a point over history into tile space (columns
+ * from the tile's own width), not through the video's cell geometry.
  */
 fun documentXToImageX(docX: Float, fit: FitRect, imageW: Int): Float? {
     if (fit.isEmpty || imageW <= 0) return null

@@ -29,6 +29,13 @@ fun wantedLines(layout: ScrollbackLayout, view: DocumentView): LongRange {
     return (first - viewport)..(last + viewport)
 }
 
+/** The [slots] (50-line history slots) with a line in [view]'s span of [layout]. */
+internal fun visibleSlots(layout: ScrollbackLayout, view: DocumentView, slots: Collection<Long>): Set<Long> {
+    val first = layout.absLineAt(minOf(view.topPx, view.bottomPx))
+    val last = layout.absLineAt(maxOf(view.topPx, view.bottomPx))
+    return slots.filterTo(HashSet()) { it <= last && it + HISTORY_SLOT_LINES - 1 >= first }
+}
+
 /** A decoded history tile to draw: [handle] (a bitmap) for [tile], in the slot [slot]. Holds no content in its string form. */
 class DrawnTile<T : Any>(val slot: Long, val tile: HistoryTile, val handle: T) {
     override fun toString(): String = "DrawnTile(slot=$slot, tile=$tile)"
@@ -36,22 +43,25 @@ class DrawnTile<T : Any>(val slot: Long, val tile: HistoryTile, val handle: T) {
 
 /**
  * The scrollback view's decoded tiles: which [TileState.Ready] tiles to decode, when, and which
- * pictures to draw ([drawn]), over a [DecodedTileCache] that owns the byte budget.
+ * pictures there are to draw ([drawn]), over a [DecodedTileCache] that owns the byte budget.
  *
  * - **Decoding.** Ready tiles whose lines overlap the wanted range are decoded nearest its centre
  *   first, at most two at once, on [decodeContext], each only through [DecodedTileCache.get] (the
  *   bitmap is allocated against its reservation). [measure] gives a tile's decoded size in bytes,
- *   null when it is not a decodable image. A tile that does not decode, or does not fit the budget,
- *   is tried again only after the wanted range changes.
+ *   null when it is not a decodable image. A tile that does not decode, or could never fit the
+ *   budget, is tried again only once the set of slots in the keep range changes. A tile that found
+ *   no room (everything else displayed or just decoded) is tried again after the renderer's next
+ *   [displayed] report, which may free room.
  * - **Keeping.** After every [update] the cache keeps only the current Ready tiles overlapping the
  *   wanted range ([DecodedTileCache.retainOnly]). A slot that is refetching (grown, or its
- *   selection changed) keeps showing its previous picture until the new one is decoded, as iOS
- *   keeps a tile's old image while it loads (`SessionView.swift:2518-2521`); a picture is dropped
- *   when its slot failed or left the wanted range, when it lies below the trimmed origin, and when
- *   the [HistoryGeometry.contentEpoch] or generation changes (iOS removes every tile view then,
- *   `SessionView.swift:2063-2082`).
- * - **Displayed.** The renderer reports what it draws with [displayed] every time it draws tiles,
- *   and [close] reports nothing displayed and drops every handle when the view leaves.
+ *   selection changed) keeps its previous picture until the new one is decoded, as iOS keeps a
+ *   tile's old image while it loads (`SessionView.swift:2518-2521`); a picture is dropped when the
+ *   cache no longer holds it (evicted for room), when its slot failed or left the wanted range,
+ *   when it lies below the trimmed origin, and when the [HistoryGeometry.contentEpoch] or
+ *   generation changes (iOS removes every tile view then, `SessionView.swift:2063-2082`).
+ * - **Displayed.** The renderer draws only the pictures it can see and reports exactly those with
+ *   [displayed] every time it draws tiles, so the rest can be evicted for room. [reset] (the app
+ *   stopped) and [close] (the view left) report nothing displayed and drop every handle.
  *
  * Call everything on [scope]'s thread (the main thread in the app); decodes hop to
  * [decodeContext] and back. Logs counts and lines, never tile content.
@@ -69,50 +79,92 @@ class ScrollbackTiles<T : Any>(
 
     private class NotDecodable : Exception("not a decodable image")
 
+    private sealed interface Outcome<out T> {
+        class Decoded<T>(val handle: T) : Outcome<T>
+
+        /** Not an image, or larger than the whole budget. */
+        data object Undecodable : Outcome<Nothing>
+
+        /** No room now. */
+        data object NoRoom : Outcome<Nothing>
+    }
+
     private val drawnFlow = MutableStateFlow<List<DrawnTile<T>>>(emptyList())
 
-    /** The pictures to draw, by slot. */
+    /** The pictures there are to draw, by slot; the renderer draws those it can see. */
     val drawn: StateFlow<List<DrawnTile<T>>> = drawnFlow.asStateFlow()
 
     private var tiles: Map<Long, TileState> = emptyMap()
     private var geometry: HistoryGeometry? = null
     private var wanted: LongRange = LongRange.EMPTY
+    private var keepSlots: Set<Long> = emptySet()
     private val pictures = HashMap<Long, Picture<T>>()
     private val decoding = IdentityHashMap<HistoryTile, Job>()
     private val skipped = IdentityHashMap<HistoryTile, Unit>()
+    private val starved = IdentityHashMap<HistoryTile, Unit>()
     private var closed = false
 
     /** The store's [tiles] and [geometry], and the [wanted] lines ([wantedLines]); called on every change of any. */
     fun update(tiles: Map<Long, TileState>, geometry: HistoryGeometry?, wanted: LongRange) {
         if (closed) return
-        if (wanted != this.wanted) skipped.clear()
         this.tiles = tiles
         this.geometry = geometry
         this.wanted = wanted
         pump()
     }
 
-    /** The tiles the renderer drew this time: never evicted while drawn. */
-    fun displayed(tiles: Collection<HistoryTile>) = cache.displayed(tiles)
+    /**
+     * The tiles the renderer drew this time, never evicted while drawn. Pictures the cache let go
+     * of are dropped, and decodes that found no room are tried again.
+     */
+    fun displayed(tiles: Collection<HistoryTile>) {
+        cache.displayed(tiles)
+        if (closed) return
+        if (starved.isNotEmpty()) {
+            starved.clear()
+            pump()
+        } else if (dropUnheld()) {
+            publish()
+        }
+    }
 
-    /** The view left: nothing displayed, every handle and decode dropped. */
-    fun close() {
-        closed = true
+    /** Decodes again what is wanted now, after a [reset]. */
+    fun refresh() {
+        if (!closed) pump()
+    }
+
+    /** The app stopped: nothing displayed, every handle and decode dropped; [refresh] or [update] starts again. */
+    fun reset() {
         decoding.values.forEach { it.cancel() }
         decoding.clear()
         pictures.clear()
+        skipped.clear()
+        starved.clear()
         drawnFlow.value = emptyList()
         cache.displayed(emptyList())
         cache.clear()
+    }
+
+    /** The view left: [reset], for good. */
+    fun close() {
+        closed = true
+        reset()
     }
 
     /** Lines a tile may start at and still overlap [wanted]: tiles hold at most [HISTORY_SLOT_LINES]. */
     private fun keepRange(): LongRange =
         if (wanted.isEmpty()) LongRange.EMPTY else (wanted.first - (HISTORY_SLOT_LINES - 1))..wanted.last
 
+    private fun dropUnheld(): Boolean = pictures.values.removeAll { !cache.holds(it.tile) }
+
     private fun pump() {
         val geometry = geometry
         val keep = keepRange()
+        val slots = tiles.keys.filterTo(HashSet()) { it in keep || (tiles[it] as? TileState.Ready)?.tile?.firstAbsLine in keep }
+        if (slots != keepSlots) {
+            keepSlots = slots
+            skipped.clear()
+        }
         val ready = if (geometry == null) {
             emptyList()
         } else {
@@ -127,10 +179,14 @@ class ScrollbackTiles<T : Any>(
                 picture.tile.firstAbsLine in keep && state != null && state != TileState.Failed
             if (!stays) iterator.remove()
         }
+        dropUnheld()
         val centre = if (wanted.isEmpty()) 0L else wanted.first + (wanted.last - wanted.first) / 2
         val candidates = tiles.entries
             .mapNotNull { (slot, state) -> (state as? TileState.Ready)?.tile?.let { slot to it } }
-            .filter { (slot, tile) -> tile in ready && pictures[slot]?.tile !== tile && !decoding.containsKey(tile) && !skipped.containsKey(tile) }
+            .filter { (slot, tile) ->
+                tile in ready && pictures[slot]?.tile !== tile && !decoding.containsKey(tile) &&
+                    !skipped.containsKey(tile) && !starved.containsKey(tile)
+            }
             .sortedBy { (_, tile) -> kotlin.math.abs(tile.firstAbsLine - centre) }
         for ((slot, tile) in candidates) {
             if (decoding.size >= maxDecodes) break
@@ -146,31 +202,40 @@ class ScrollbackTiles<T : Any>(
 
     private fun start(slot: Long, tile: HistoryTile) {
         decoding[tile] = scope.launch {
-            val handle = try {
+            val outcome: Outcome<T> = try {
                 withContext(decodeContext) {
-                    val bytes = measure(tile) ?: throw NotDecodable()
-                    cache.get(tile, bytes) { decode(tile) ?: throw NotDecodable() }
+                    val bytes = measure(tile)
+                    if (bytes == null || !cache.canEverHold(bytes)) {
+                        Outcome.Undecodable
+                    } else {
+                        cache.get(tile, bytes) { decode(tile) ?: throw NotDecodable() }?.let { Outcome.Decoded(it) } ?: Outcome.NoRoom
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 log("history tile ${tile.firstAbsLine}+${tile.lineCount} not drawn: ${e.javaClass.simpleName}")
-                null
+                Outcome.Undecodable
             }
             decoding.remove(tile)
             if (closed) return@launch
             val geometry = geometry
             val current = (tiles[slot] as? TileState.Ready)?.tile === tile
-            if (handle == null) {
-                skipped[tile] = Unit
-            } else if (current && geometry != null && sameContent(tile, geometry)) {
-                pictures[slot] = Picture(tile, handle, geometry.contentEpoch)
+            when (outcome) {
+                Outcome.Undecodable -> skipped[tile] = Unit
+                Outcome.NoRoom -> starved[tile] = Unit
+                is Outcome.Decoded -> if (current && geometry != null && sameContent(tile, geometry)) {
+                    pictures[slot] = Picture(tile, outcome.handle, geometry.contentEpoch)
+                }
             }
             pump()
         }
     }
 
     private fun publish() {
-        drawnFlow.value = pictures.entries.sortedBy { it.key }.map { (slot, picture) -> DrawnTile(slot, picture.tile, picture.handle) }
+        val next = pictures.entries.sortedBy { it.key }.map { (slot, picture) -> DrawnTile(slot, picture.tile, picture.handle) }
+        val now = drawnFlow.value
+        // Republish only a change, so a displayed report never makes the renderer draw again for nothing.
+        if (next.size != now.size || next.indices.any { next[it].slot != now[it].slot || next[it].handle !== now[it].handle }) drawnFlow.value = next
     }
 }

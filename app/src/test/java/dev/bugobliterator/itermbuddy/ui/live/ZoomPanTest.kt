@@ -520,4 +520,54 @@ class ZoomPanTest {
         assertEquals(-300f, past.state.offsetY, eps)
         assertEquals("only the drag past the edge wheels", 20f, past.pastEdgeY, eps)
     }
+
+    @Test
+    fun scrolledUpThenEmptiedThenRegrownEndsAtLive() {
+        val up = ZoomState(1f, 0f, 2000f)
+        val emptied = followDocument(up, bandFit, 1000f, 2000f, 3000f, 0f, topInset = 100f)
+        val regrown = followDocument(emptied, bandFit, 1000f, 2000f, 0f, 3000f, topInset = 100f)
+        assertTrue(documentView(regrown, bandFit, 3000f, 2000f).atLiveBottom)
+    }
+
+    @Test
+    fun scrolledUpThenShrunkThenGrownFollowsTheBottom() {
+        val up = ZoomState(1f, 0f, 2000f)
+        val shrunk = followDocument(up, bandFit, 1000f, 2000f, 3000f, 200f, topInset = 100f)
+        assertTrue(documentView(shrunk, bandFit, 200f, 2000f).atLiveBottom)
+        val grown = followDocument(shrunk, bandFit, 1000f, 2000f, 200f, 2500f, topInset = 100f)
+        assertTrue(documentView(grown, bandFit, 2500f, 2000f).atLiveBottom)
+    }
+
+    @Test
+    fun keyboardLiftsTheDocumentBottomAboveTheKeys() {
+        val doc = documentFit(bandFit, 3000f)
+        val bottom = scrollToLive(ZoomState.FIT, bandFit, 3000f, 1000f, 2000f, topInset = 100f)
+        // A 700 px keyboard and key bar: the band's bottom sits on its edge, history above it.
+        val lifted = liftForKeyboard(bottom, doc, 1000f, 2000f, fromInset = 0f, toInset = 700f, topInset = 100f)
+        assertEquals(1300f, lifted.offsetY + doc.top + doc.height, eps)
+        assertTrue(documentView(lifted, bandFit, 3000f, 2000f, bottomInset = 700f).atLiveBottom)
+        // Closed again: back at the bottom.
+        val closed = liftForKeyboard(lifted, doc, 1000f, 2000f, fromInset = 700f, toInset = 0f, topInset = 100f)
+        assertEquals(bottom, closed)
+        // Scrolled up over history, the keyboard leaves the lines being read where they are.
+        val up = ZoomState(1f, 0f, 2000f)
+        assertEquals(up, liftForKeyboard(up, doc, 1000f, 2000f, fromInset = 0f, toInset = 700f, topInset = 100f))
+    }
+
+    @Test
+    fun documentViewWithSideInsets() {
+        // Landscape 2400×1080, 100 px cutout each side, 80 px top bar, 40 px navigation bar.
+        val fit = visibleFitRect(1600, 800, 2400f, 1080f, topInset = 80f, bottomInset = 40f, leftInset = 100f, rightInset = 100f)
+        assertEquals(240f, fit.left, eps)
+        assertEquals(1920f, fit.width, eps)
+        assertEquals(960f, fit.height, eps)
+        val state = scrollToLive(ZoomState.FIT, fit, 4800f, 2400f, 1080f, bottomInset = 40f, topInset = 80f, leftInset = 100f, rightInset = 100f)
+        assertEquals("centred across inside the side insets", 0f, state.offsetX, eps)
+        val view = documentView(state, fit, 4800f, 1080f, bottomInset = 40f)
+        assertTrue(view.atLiveBottom)
+        // The band's bottom (document y 4800 + 960) is on the navigation bar, 40 px above the screen's bottom.
+        assertEquals(4800f + 960f + 40f, view.bottomPx, eps)
+        assertEquals(1000f, checkNotNull(documentXToImageX(240f + 1200f, fit, 1600)), eps)
+        assertNull("over the left cutout", documentXToImageX(120f, fit, 1600))
+    }
 }

@@ -90,6 +90,12 @@ class DecodedTileCache<T : Any>(
     /** How many handles are retained. */
     val retainedCount: Int get() = synchronized(lock) { retained.size }
 
+    /** Whether a decode of [bytes] could ever fit: no more than the whole budget. */
+    fun canEverHold(bytes: Long): Boolean = bytes <= budgetBytes
+
+    /** Whether [tile]'s handle is still retained (not evicted or dropped). */
+    fun holds(tile: HistoryTile): Boolean = synchronized(lock) { retained.containsKey(tile) }
+
     /**
      * The handle for [tile]: the retained one, or a new one from [decode] once [bytes] are
      * reserved (evicting the undisplayed handles farthest from the wanted range first). Null when
