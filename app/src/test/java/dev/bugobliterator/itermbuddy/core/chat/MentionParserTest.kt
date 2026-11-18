@@ -106,6 +106,7 @@ class MentionParserTest {
             assertEquals(name, expected.map { it.string("identifier") }, found.map { it.identifier })
             val replaced = found.map { mention -> spans.none { it.first < mention.end && mention.start <= it.last } }
             assertEquals(name, expected.map { it.getValue("protected").jsonPrimitive.boolean }, replaced)
+            assertEquals(name, found.filterIndexed { index, _ -> replaced[index] }, MentionParser.protectedMentions(text, indented))
             assertEquals(name, case.string("protectedText"), placeholderText(text, found.filterIndexed { index, _ -> replaced[index] }))
         }
     }
@@ -133,7 +134,7 @@ class MentionParserTest {
      */
     @Test
     fun spansFollowIcuWhitespaceAndLineEnds() {
-        for (space in listOf(' ', ' ', '\u000B', '\u0085')) {
+        for (space in listOf('\u00A0', '\u2003', '\u000B', '\u0085')) {
             val text = "https://e.example/a${space}ptys_7K2M9Q4R8T1VH"
             assertEquals(space.code.toString(16), listOf(0 until 19), MentionParser.protectedSpans(text))
         }
@@ -141,6 +142,30 @@ class MentionParserTest {
         val spans = MentionParser.protectedSpans(crText)
         val unprotected = MentionParser.mentions(crText).filter { mention -> spans.none { it.first < mention.end && mention.start <= it.last } }
         assertEquals(listOf("ptys_3HX6W0ZD5N2BT"), unprotected.map { it.identifier })
+    }
+
+    /**
+     * ICU's line starts include VT, FF, NEL and LS as well as a lone CR, for fences and indented
+     * lines alike; Java's `^` leaves out VT and FF. Checked against upstream's `protect` with
+     * Swift 6.2: the count is how many mentions it replaced.
+     */
+    @Test
+    fun linesStartAsIcuStartsThem() {
+        val id = "@ptys_7K2M9Q4R8T1VH"
+        val cases = mapOf(
+            "x\u000B```\n$id\n```" to 0,
+            "x\u000C```\n$id\n```" to 0,
+            "x\u0085```\n$id\n```" to 0,
+            "x\u2028```\n$id\n```" to 0,
+            "x\r```\n$id\n```" to 0,
+            "```\r\n$id\r\n```\r\n$id" to 1,
+            "```\n$id\u000B```\n$id" to 1,
+            "x\u000B    $id" to 0,
+            "x\u000C\t$id" to 0,
+        )
+        for ((text, replaced) in cases) {
+            assertEquals(text, replaced, MentionParser.protectedMentions(text, indentedCodeBlocks = true).size)
+        }
     }
 
     /**
@@ -153,30 +178,30 @@ class MentionParserTest {
      */
     @Test
     fun unicodeCaseFoldingMatchesSwift() {
-        assertEquals("ptys_7K2M9Q4R8T1VH", StableSessionId.canonical("ptys_7K2M9Q4R8T1VH"))
+        assertEquals("ptys_7K2M9Q4R8T1VH", StableSessionId.canonical("ptys_7\u212A2M9Q4R8T1VH"))
         assertEquals(
             listOf(Mention(4, 23, null, "ptys_7K2M9Q4R8T1VH")),
-            MentionParser.mentions("Ask @ptys_7K2M9Q4R8T1VH now"),
+            MentionParser.mentions("Ask @ptys_7\u212A2M9Q4R8T1VH now"),
         )
-        assertNull(StableSessionId.canonical("ptyſ_7K2M9Q4R8T1VH"))
+        assertNull(StableSessionId.canonical("pty\u017F_7K2M9Q4R8T1VH"))
         assertEquals(
-            listOf(Mention(4, 23, null, "ptyſ_7K2M9Q4R8T1VH")),
-            MentionParser.mentions("Ask @ptyſ_7K2M9Q4R8T1VH now"),
+            listOf(Mention(4, 23, null, "pty\u017F_7K2M9Q4R8T1VH")),
+            MentionParser.mentions("Ask @pty\u017F_7K2M9Q4R8T1VH now"),
         )
         assertEquals(
-            listOf(Mention(4, 31, "ſession:", "ptys_7K2M9Q4R8T1VH")),
-            MentionParser.mentions("Ask @ſession:ptys_7K2M9Q4R8T1VH now"),
+            listOf(Mention(4, 31, "\u017Fession:", "ptys_7K2M9Q4R8T1VH")),
+            MentionParser.mentions("Ask @\u017Fession:ptys_7K2M9Q4R8T1VH now"),
         )
-        assertEquals(emptyList<Mention>(), MentionParser.mentions("Ask @ptys_7K2M9Q4R8T1VHK now"))
-        assertEquals(listOf(Mention(4, 23, null, "ptys_7K2M9Q4R8T1VH")), MentionParser.mentions("Ask @ptys_7K2M9Q4R8T1VHé now"))
-        assertEquals(listOf(Mention(0, 19, null, "ptys_7K2M9Q4R8T1VH")), MentionParser.mentions("@ptys_7K2M9Q4R8T1VH́ x"))
+        assertEquals(emptyList<Mention>(), MentionParser.mentions("Ask @ptys_7K2M9Q4R8T1VH\u212A now"))
+        assertEquals(listOf(Mention(4, 23, null, "ptys_7K2M9Q4R8T1VH")), MentionParser.mentions("Ask @ptys_7K2M9Q4R8T1VH\u00E9 now"))
+        assertEquals(listOf(Mention(0, 19, null, "ptys_7K2M9Q4R8T1VH")), MentionParser.mentions("@ptys_7K2M9Q4R8T1VH\u0301 x"))
         assertEquals(
             emptyList<Mention>(),
-            MentionParser.mentions("éptys_7K2M9Q4R8T1VH ́ptys_7K2M9Q4R8T1VH", atSignOptional = true),
+            MentionParser.mentions("\u00E9ptys_7K2M9Q4R8T1VH \u0301ptys_7K2M9Q4R8T1VH", atSignOptional = true),
         )
-        assertNull(MentionParser.split("ptys_7K2M9Q4R8T1VH́"))
-        assertNull(StableSessionId.canonical("ptys_7K2M9Q4R8T1V́H"))
-        assertNull(StableSessionId.canonical("ptys_7K2M9Q4R8T1VＨ"))
+        assertNull(MentionParser.split("ptys_7K2M9Q4R8T1VH\u0301"))
+        assertNull(StableSessionId.canonical("ptys_7K2M9Q4R8T1V\u0301H"))
+        assertNull(StableSessionId.canonical("ptys_7K2M9Q4R8T1V\uFF28"))
     }
 
     @Test

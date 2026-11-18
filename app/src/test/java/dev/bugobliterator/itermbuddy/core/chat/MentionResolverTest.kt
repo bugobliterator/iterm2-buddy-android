@@ -4,7 +4,10 @@ import dev.bugobliterator.itermbuddy.core.CompanionRequestException
 import dev.bugobliterator.itermbuddy.core.stream.ScriptedStreamLink
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -191,6 +194,52 @@ class MentionResolverTest {
             MessageBody.Unsupported to emptyList(),
         )
         for ((body, expected) in texts) assertEquals(body.toString(), expected, mentionableTexts(body))
+    }
+
+    @Test
+    fun nameWithNothingToOpenIsDefunct() {
+        val named = mapOf(
+            stableID to MentionResolution(stableID, secretName, stableID, null),
+            workgroup to MentionResolution(workgroup, secretName, null, workgroup),
+            otherStableID to MentionResolution(otherStableID, secretName, null, null),
+        )
+        assertEquals(MentionDisplay.Named(named.getValue(stableID)), mentionDisplay(named, stableID))
+        assertEquals(MentionDisplay.Named(named.getValue(workgroup)), mentionDisplay(named, workgroup))
+        assertEquals(MentionDisplay.Defunct, mentionDisplay(named, otherStableID))
+    }
+
+    @Test
+    fun inFlightIsReleasedWhenTheScopeIsCancelledBeforeTheRequestStarts() = runTest {
+        val link = ScriptedStreamLink()
+        val scope = CoroutineScope(backgroundScope.coroutineContext + Job(backgroundScope.coroutineContext[Job]))
+        val resolver = MentionResolver(link, scope, {})
+        resolver.note(listOf("@$stableID"))
+        scope.cancel()
+        runCurrent()
+        assertTrue(resolver.toString(), resolver.toString().contains("inFlight=0"))
+    }
+
+    @Test
+    fun clearForgetsEverythingAndDropsLateAnswers() = runTest {
+        val rig = Rig(this)
+        rig.resolver.note(listOf("@$stableID @$otherStableID"))
+        runCurrent()
+        rig.nextRequest().reply.complete(MacMessage.MentionsResolved(listOf(hit(stableID), miss(otherStableID))))
+        runCurrent()
+        rig.resolver.note(listOf("@$workgroup"))
+        runCurrent()
+        val late = rig.nextRequest()
+
+        rig.resolver.clear()
+        assertEquals(emptyMap<String, MentionResolution>(), rig.resolver.resolutions.value)
+        late.reply.complete(MacMessage.MentionsResolved(listOf(hit(workgroup))))
+        runCurrent()
+        assertEquals(emptyMap<String, MentionResolution>(), rig.resolver.resolutions.value)
+
+        // Nothing is cached, gated or in flight: all three are asked for again.
+        rig.resolver.note(listOf("@$stableID @$otherStableID @$workgroup"))
+        runCurrent()
+        assertEquals(PhoneMessage.ResolveMentions(listOf(stableID, otherStableID, workgroup)), rig.nextRequest().message)
     }
 
     @Test

@@ -17,12 +17,18 @@ const val DEFUNCT_SESSION_TEXT = "[defunct session]"
 
 /** How a mention renders, given what the Mac has said about it. */
 sealed interface MentionDisplay {
-    /** The Mac named it: show [MentionResolution.displayName], tappable. */
+    /**
+     * The Mac named it and gave something to open: show [displayName], tappable, opening
+     * [MentionResolution.workgroupID]'s member list when set, else [MentionResolution.sessionGuid].
+     */
     data class Named(val resolution: MentionResolution) : MentionDisplay {
         val displayName: String get() = checkNotNull(resolution.displayName)
     }
 
-    /** The Mac answered that it does not resolve: show [DEFUNCT_SESSION_TEXT]. */
+    /**
+     * The Mac answered that it does not resolve, or named it with nothing to open: show
+     * [DEFUNCT_SESSION_TEXT], as iOS does (`MessageBubbleView.swift:147-165`).
+     */
     data object Defunct : MentionDisplay
 
     /** Not answered (yet): show the mention as written. */
@@ -32,7 +38,8 @@ sealed interface MentionDisplay {
 /** How the mention [identifier] renders with [resolutions] ([MentionResolver.resolutions]). */
 fun mentionDisplay(resolutions: Map<String, MentionResolution>, identifier: String): MentionDisplay {
     val resolution = resolutions[identifier] ?: return MentionDisplay.Raw
-    return if (resolution.displayName != null) MentionDisplay.Named(resolution) else MentionDisplay.Defunct
+    val opens = resolution.workgroupID != null || resolution.sessionGuid != null
+    return if (resolution.displayName != null && opens) MentionDisplay.Named(resolution) else MentionDisplay.Defunct
 }
 
 /**
@@ -66,7 +73,12 @@ fun mentionableTexts(body: MessageBody): List<String> = when (body) {
  * on, then notes the texts again (`AppModel.swift:2351, 2950`).
  *
  * Each request runs in its own coroutine in [scope], bounded by [requestTimeout] (the client's
- * rpc bound when null). Thread-safe. Logs counts and failure kinds only, never text or names.
+ * rpc bound when null). [scope] must outlive the resolver: a request whose scope is cancelled
+ * still releases its identifiers, but its answer is lost. Thread-safe.
+ * Logs counts and failure kinds only, never text or names.
+ *
+ * Scoped to the pairing, like the link it asks through: [clear] forgets everything, and the
+ * owner registers it with the unpair cleanups.
  */
 class MentionResolver(
     private val link: StreamLink,
@@ -78,6 +90,9 @@ class MentionResolver(
     private val resolutionsFlow = MutableStateFlow<Map<String, MentionResolution>>(emptyMap())
     private val inFlight = HashSet<String>()
     private val retryGate = HashSet<String>()
+
+    /** Bumped by [clear], so a request sent before it neither lands nor releases anything after. */
+    private var generation = 0L
 
     /**
      * What the Mac said about each identifier it answered: hits, and misses (null display name)
@@ -113,39 +128,55 @@ class MentionResolver(
         synchronized(lock) { retryGate.clear() }
     }
 
+    /**
+     * Forgets every resolution, the retry gate and the requests in flight (whose answers are then
+     * dropped): the pairing ended. Register it with the unpair cleanups.
+     */
+    fun clear() {
+        synchronized(lock) {
+            generation++
+            inFlight.clear()
+            retryGate.clear()
+            resolutionsFlow.value = emptyMap()
+        }
+    }
+
     private fun request(identifiers: Set<String>) {
+        var sentIn = 0L
         val batch = synchronized(lock) {
+            sentIn = generation
             val known = resolutionsFlow.value
             identifiers.filter { known[it]?.displayName == null && it !in inFlight && it !in retryGate }
                 .also { inFlight += it }
         }
         if (batch.isEmpty()) return
         log("Resolving ${batch.size} mention(s)")
-        scope.launch {
-            try {
-                val reply = try {
-                    link.request(PhoneMessage.ResolveMentions(batch), timeout = requestTimeout)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    log("Mention resolution failed: ${e::class.simpleName}")
-                    null
-                }
-                settle(batch, reply)
-            } finally {
-                synchronized(lock) { inFlight -= batch.toSet() }
+        val job = scope.launch {
+            val reply = try {
+                link.request(PhoneMessage.ResolveMentions(batch), timeout = requestTimeout)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("Mention resolution failed: ${e::class.simpleName}")
+                null
             }
+            settle(batch, reply, sentIn)
+        }
+        // Runs however the job ends, even cancelled before it started, so nothing stays in flight.
+        job.invokeOnCompletion {
+            synchronized(lock) { if (generation == sentIn) inFlight -= batch.toSet() }
         }
     }
 
-    private fun settle(batch: List<String>, reply: MacMessage?) {
+    private fun settle(batch: List<String>, reply: MacMessage?, sentIn: Long) {
         if (reply !is MacMessage.MentionsResolved) {
             if (reply != null) log("Mention resolution failed: ${reply::class.simpleName}")
-            synchronized(lock) { retryGate += batch }
+            synchronized(lock) { if (generation == sentIn) retryGate += batch }
             return
         }
         val byIdentifier = reply.resolutions.associateBy { it.identifier }
         synchronized(lock) {
+            if (generation != sentIn) return
             resolutionsFlow.update { current ->
                 val next = current.toMutableMap()
                 for (identifier in batch) {
