@@ -41,22 +41,23 @@ This is a Kotlin Android port of the iOS iTerm2 Buddy companion app, for the own
 | Pairing | Pairing Code and Room Name; SAS and Join Signature; Noise Channel; Wire Envelope and Session Messages; Relay Connection; Pairing Store; Companion Client | **Done.** Opus review per task; Mythos for Noise, Pairing Store and Companion Client. |
 | Pairing | Pairing Screens | **Code done**; whole-milestone Mythos review clean (no Critical). Waiting on the owner's on-device check (`docs/reports/pairing-on-device.md`). |
 
-## Next phase: Sessions (ready to implement)
+## Sessions: code done, on-device checks pending
 
-The Pairing milestone passed the owner's Pixel check (`docs/reports/pairing-on-device.md`). The owner chose **Sessions** before Agent Chat.
+All Sessions plan tasks are on `main` (through `e3bd4b2`), each reviewed by Opus and fixed until approved. The app advertises protocol revision 15.
 
 - Plan: `docs/superpowers/plans/2026-11-16-sessions.md`. Design: `docs/superpowers/specs/2026-11-16-sessions-design.md`. Protocol notes: `docs/superpowers/specs/2026-11-16-sessions-protocol-notes.md`.
-- Build order, with an owner on-device check at the end of each:
-  1. **Live Session:** session list, live HEVC view, zoom, typing, composer, Fit to phone.
-  2. **History and Selection.**
-  3. **Browser Sessions.**
-- Owner decisions:
-  - **Video:** the Mac sends HEVC only, decoded with MediaCodec.
-  - **Screen:** stays on while a live or browser view is open.
-  - **Fit to phone:** never undone, and offered only when `canResize == true`.
-  - **Composer:** sends with `pasteText`.
-- The plan went through five adversarial review rounds by Codex Astra and Gemini 4 Argon. Every disposition is in its "Review Dispositions" tables. The history-tile and decoder-recovery rules mirror the iOS client. Keep them that way unless a device test shows otherwise.
-- The Live Session device check decides one open item: whether the last frame of a burst shows on an idle screen without extra drain logic.
+- Owner on-device checks, in order (reports on `main`):
+  1. **Live Session:** `docs/reports/live-session-on-device.md`.
+  2. **History and Selection:** `docs/reports/history-and-selection-on-device.md`.
+  3. **Browser Sessions:** `docs/reports/browser-sessions-on-device.md`.
+- `/` and `*` in Claude Code: the phone sends them correctly. `*` (Shift characters) hits iTerm2's CSI-u injection under kitty flags (upstream). The opt-in adb trace is tag `IB.Input` (`adb shell setprop log.tag.IB.Input VERBOSE`; `SUPPRESS` to turn off); see the "Input trace" section of the Live Session report.
+- `PressGestureDeviceTest` (androidTest) needs the Pixel: `./gradlew connectedDebugAndroidTest --tests '*PressGestureDeviceTest*'`.
+- Known, accepted: rotation resets scrollback to live; Select All keeps the menu open; no selection handles or loupe; the Mac can leave a live selection if the stream drops mid-drag (iOS too); a multi-line paste in a browser page presses Return per line; no `macWatchdog` (revision 15 behaves as 13 with a blocked Mac, plus the banner).
+
+## Next phase: Agent Chat (plan approved, starts after the Live Session device check)
+
+- Plan: `docs/superpowers/plans/2026-11-18-agent-chat.md` (`e7104d7`), revised after a Mythos review (23 findings, all addressed). 16 tasks.
+- Owner decisions: watch all chats for Working/Waiting/Done; 8 MiB chat history cap ("too large" above it, not resubscribed for the process); port `markdownDescription` now and show the full command argument (Android addition); `fetchSessionScreenInfo` existence check for "Go to session"; switching tabs away from a live session closes the stream; Chats is the default tab when AI is available; two concurrent subscribes; AI off moves from the Chats root to Sessions, as iOS.
 
 ## Closed: Linux build of the harness
 
@@ -79,7 +80,10 @@ Notes from that task:
 
 - Work lands on `main` (fast-forward) once reviewed.
 - Per-task review is by an Opus subagent (read-only), in place of Codex Sol. Mythos is reserved for critical or large reviews.
-- Codex is not reachable from the cloud session (api.openai.com is blocked).
+- Codex is not used (owner, 2026-11-16).
+- After a clean review, the lead fast-forwards `main`. If `main` moved (the owner's Mac session pushes reports), rebase the session branch's own commits onto `origin/main`, fast-forward `main`, and `--force-with-lease` only the session branch.
+- Ask the owner questions with options. Name any extra network domains needed as a copyable list.
+- Terminal content never goes in logs or `toString` (lengths only), except the opt-in `IB.Input` trace.
 
 ## Cloud environment notes
 
@@ -107,4 +111,4 @@ Notes from that task:
 ## Needs the owner (on the Mac, not the cloud)
 
 - After Relay Service reports: quit iTerm2, then apply `defaults write com.googlecode.iterm2 CompanionRelayOrigin -string https://siddharths-macbook-pro.tailnet-99bb.ts.net` and `defaults write com.googlecode.iterm2 CompanionResolverURL -string ""`. Then check that iTerm2 parks on the relay.
-- The Pairing Screens on-device check with the Pixel over adb.
+- The Sessions on-device checks above, then tell the cloud session so Agent Chat can start.
