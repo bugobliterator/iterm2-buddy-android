@@ -32,18 +32,22 @@ sealed interface ChatInput {
     /**
      * A chat-scoped message decoded on the receive loop, or an unsolicited `error`. [requestID] is
      * as the Mac echoed it: a reply's request, null on a push. A reply reaches the sink whether or
-     * not its request still waits (a late `chatCreated` is still news).
+     * not its request still waits (a late `chatCreated` is still news). [frameBytes] is the size of
+     * the frame it was decoded from, which [ChatInbox] charges to its byte bound.
      */
-    data class Message(val linkId: Long, val requestID: Long?, val message: MacMessage) : ChatInput {
+    data class Message(val linkId: Long, val requestID: Long?, val message: MacMessage, val frameBytes: Int) : ChatInput {
         /** [MacMessage]s that carry chat content show counts and IDs only; this adds nothing more. */
-        override fun toString(): String = "Message(linkId=$linkId, requestID=$requestID, message=$message)"
+        override fun toString(): String =
+            "Message(linkId=$linkId, requestID=$requestID, message=$message, frameBytes=$frameBytes)"
     }
 
     /**
-     * A big-bodied chat frame ([dev.bugobliterator.itermbuddy.core.wire.RAW_CHAT_CASES]: `history`,
-     * `chatsAndSessions`, `chatListChanged`) as decrypted, never parsed on the receive loop. [case]
-     * is its payload's one key, read by `peekEnvelope`; [bytes] is the whole envelope, owned by
-     * this input (not copied). The consumer decodes it with [decode], off the loop.
+     * A big-bodied chat frame as decrypted, never parsed on the receive loop: a
+     * [dev.bugobliterator.itermbuddy.core.wire.RAW_CHAT_CASES] case (`history`, `chatsAndSessions`,
+     * `chatListChanged`), or a `delivery` over the session's raw delivery threshold (an
+     * `appendAttachment` with inline bytes, say). [case] is its payload's one key, read by
+     * `peekEnvelope`; [bytes] is the whole envelope, owned by this input (not copied). The consumer
+     * decodes it with [decode], off the loop.
      */
     class Payload(val linkId: Long, val requestID: Long?, val case: String, val bytes: ByteArray) : ChatInput {
         /** The envelope's size, for the inbox's byte bound. */
@@ -73,11 +77,20 @@ sealed interface ChatInput {
     }
 
     /**
-     * A `history` whose envelope is over the chat history cap (`maxHistoryBytes`, 8 MiB by
-     * default), judged by its length alone: it was never parsed and its bytes are gone. The
-     * subscription it answers is installed on the Mac all the same (`HB:1411-1427`).
+     * A frame that would have crossed as a [Payload] but is over the raw chat cap
+     * (`maxRawChatBytes`, 8 MiB by default), judged by its length after the linear, allocation-free
+     * peek and before any decoding: it was never parsed and its bytes are gone. [case] is its
+     * payload case; [chatID] is the body's top-level `chatID` when a second such scan finds one (a
+     * `history` or `delivery`; null for the list cases or when it cannot be read). A `history` too
+     * large still means its subscription is installed on the Mac (`HB:1411-1427`).
      */
-    data class HistoryTooLarge(val linkId: Long, val requestID: Long?, val sizeBytes: Int) : ChatInput
+    data class PayloadTooLarge(
+        val linkId: Long,
+        val case: String,
+        val chatID: String?,
+        val requestID: Long?,
+        val sizeBytes: Int,
+    ) : ChatInput
 }
 
 /** What [ChatInput.Payload.decode] made of a raw chat frame. */

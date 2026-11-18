@@ -28,6 +28,7 @@ import dev.bugobliterator.itermbuddy.core.wire.WireDecodeException
 import dev.bugobliterator.itermbuddy.core.wire.decodeEnvelope
 import dev.bugobliterator.itermbuddy.core.wire.decodePairingConfirmation
 import dev.bugobliterator.itermbuddy.core.wire.encodeEnvelope
+import dev.bugobliterator.itermbuddy.core.wire.peekChatID
 import dev.bugobliterator.itermbuddy.core.wire.peekEnvelope
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
@@ -149,10 +150,12 @@ internal enum class ConfirmationMode {
  * and payload case, by one allocation-free scan; a frame the peek rejects is dropped as one that
  * does not decode). Then:
  * - A chat case whose body can be big ([RAW_CHAT_CASES]: `history`, `chatsAndSessions`,
- *   `chatListChanged`) is never parsed here: it goes to [chatSink] as [ChatInput.Payload], the
- *   frame's own bytes; a `history` longer than [maxHistoryBytes] goes as
- *   [ChatInput.HistoryTooLarge] instead, judged by its length alone, its bytes dropped. Its
- *   waiting request, if any, then completes with [MacMessage.ChatPayloadTaken]. The peek can
+ *   `chatListChanged`), and a `delivery` longer than [rawDeliveryBytes] (an `appendAttachment`
+ *   with inline bytes can reach the Noise cap), is never parsed here: it goes to [chatSink] as
+ *   [ChatInput.Payload], the frame's own bytes, so a live stream's frames never wait behind its
+ *   decode. One longer than [maxRawChatBytes] goes as [ChatInput.PayloadTooLarge] instead, judged
+ *   by its length after the linear, allocation-free peek and never decoded, its bytes dropped.
+ *   Its waiting request, if any, then completes with [MacMessage.ChatPayloadTaken]. The peek can
  *   accept a frame [decodeEnvelope] would reject; the consumer finds that out when it decodes
  *   ([ChatInput.Payload.decode]) and reports it as the request's outcome.
  * - Any other frame is decoded ([decode]). A stream-scoped message ([isStreamScoped]) goes to
@@ -166,9 +169,10 @@ internal enum class ConfirmationMode {
  * sinks are fed under one lock, the same one [linkUp] holds while it announces the link, so stream
  * and chat inputs keep one wire order between them and each sink sees its LinkUp first. Inputs are
  * dropped (logged by kind or case only) when their sink is null or before [linkUp]. A chat reply
- * the chat sink did not take (none, dropped, stalled or threw) is never handed to its waiter,
- * which then fails at its bound or when the session ends: a request never reports a reply the
- * chat feature did not see.
+ * the chat sink did not take is never handed to its waiter: a request never reports a reply the
+ * chat feature did not see. When the session goes on (no chat sink, the link not up, the sink
+ * threw) the waiter fails at once with [CompanionRequestException]; when the sink stalled or
+ * failed the link, it fails as the session ends.
  *
  * Sink bounds (the same for either sink, which share them):
  * - One accept longer than [sinkStall], or one that throws a cancellation of its own while the
@@ -190,7 +194,8 @@ internal enum class ConfirmationMode {
  * @param sinkStall the longest one accept may take before the session ends.
  * @param arrivals the session-tree arrival counter; the client shares one across all its links.
  * @param chatSink where chat inputs go once the link is up; null drops them.
- * @param maxHistoryBytes the chat history cap: a longer `history` frame is never parsed.
+ * @param maxRawChatBytes the raw chat cap: a longer raw chat frame is never parsed.
+ * @param rawDeliveryBytes a `delivery` frame longer than this crosses raw, decoded by the consumer.
  * @param decode the envelope decoder for every frame that is not raw chat; tests count its calls.
  */
 internal class CompanionSession(
@@ -203,7 +208,8 @@ internal class CompanionSession(
     private val sinkStall: Duration = DEFAULT_SINK_STALL,
     private val arrivals: AtomicLong = AtomicLong(),
     private val chatSink: ChatSink? = null,
-    private val maxHistoryBytes: Int = DEFAULT_MAX_HISTORY_BYTES,
+    private val maxRawChatBytes: Int = DEFAULT_MAX_RAW_CHAT_BYTES,
+    private val rawDeliveryBytes: Int = DEFAULT_RAW_DELIVERY_BYTES,
     private val decode: (ByteArray) -> Pair<Long?, MacMessage> = { decodeEnvelope(it) },
 ) {
     private val sendLock = Mutex()
@@ -312,7 +318,7 @@ internal class CompanionSession(
                 slices++
                 withTimeoutOrNull(slice) { awaitReply(reply) }?.let { return it }
             }
-            if (slices > 0) log("no reply to request $id within $timeout and $slices extension slices behind a busy stream sink")
+            if (slices > 0) log("no reply to request $id within $timeout and $slices extension slices behind a busy sink")
             return null
         } finally {
             pending.remove(id)
@@ -473,7 +479,7 @@ internal class CompanionSession(
             log("dropped a frame that does not decode: ${e.message}")
             return
         }
-        if (peek.case in RAW_CHAT_CASES) {
+        if (peek.case in RAW_CHAT_CASES || (peek.case == DELIVERY_CASE && plaintext.size > rawDeliveryBytes)) {
             deliverRawChat(peek.case, peek.requestID, plaintext)
             return
         }
@@ -496,13 +502,13 @@ internal class CompanionSession(
         if (isChatScoped(peek.case)) {
             // As for stream messages: the sink first, then the waiter, and a reply nobody waits for
             // any more still reaches the sink (it is news: a late chatCreated, say).
-            val taken = deliverChat(message.javaClass.simpleName) { ChatInput.Message(it, requestID, message) }
-            if (taken && !endingForSink) requestID?.let { pending.remove(it) }?.complete(message)
+            val taken = deliverChat(message.javaClass.simpleName) { ChatInput.Message(it, requestID, message, plaintext.size) }
+            settleChatReply(requestID, taken, message)
             return
         }
         if (requestID == null && message is MacMessage.Error && chatSink != null) {
             // An unsolicited error is chat news too (a refused deleteChat, HB:458-470) as well as an event.
-            deliverChat("Error") { ChatInput.Message(it, null, message) }
+            deliverChat("Error") { ChatInput.Message(it, null, message, plaintext.size) }
         }
         if (requestID != null) {
             val waiter = pending.remove(requestID)
@@ -520,19 +526,36 @@ internal class CompanionSession(
     }
 
     /**
-     * A [RAW_CHAT_CASES] frame: to the chat sink unparsed ([ChatInput.Payload]), or, for a `history`
-     * over [maxHistoryBytes], as [ChatInput.HistoryTooLarge] with its bytes dropped. Its waiter
-     * completes with [MacMessage.ChatPayloadTaken] only once the sink took it. [case] is all that is
-     * logged.
+     * A raw chat frame: to the chat sink unparsed ([ChatInput.Payload]), or, over
+     * [maxRawChatBytes], as [ChatInput.PayloadTooLarge] with its bytes dropped. Its waiter completes
+     * with [MacMessage.ChatPayloadTaken] only once the sink took it. [case] and sizes are all that
+     * is logged.
      */
     private suspend fun deliverRawChat(case: String, requestID: Long?, plaintext: ByteArray) {
         val size = plaintext.size
-        val tooLarge = case == HISTORY_CASE && size > maxHistoryBytes
-        if (tooLarge) log("a history of $size bytes is over the chat history cap of $maxHistoryBytes; not parsed")
+        val tooLarge = size > maxRawChatBytes
+        // A second scan only for a frame too large to decode, before the lock: it names the chat.
+        val chatID = if (tooLarge) peekChatID(plaintext) else null
+        if (tooLarge) log("a $case of $size bytes is over the raw chat cap of $maxRawChatBytes; not parsed")
         val taken = deliverChat(case) { id ->
-            if (tooLarge) ChatInput.HistoryTooLarge(id, requestID, size) else ChatInput.Payload(id, requestID, case, plaintext)
+            if (tooLarge) ChatInput.PayloadTooLarge(id, case, chatID, requestID, size) else ChatInput.Payload(id, requestID, case, plaintext)
         }
-        if (taken && !endingForSink) requestID?.let { pending.remove(it) }?.complete(MacMessage.ChatPayloadTaken(case, size))
+        settleChatReply(requestID, taken, MacMessage.ChatPayloadTaken(case, size))
+    }
+
+    /**
+     * Completes the waiter for [requestID], if any, with [reply] when the chat sink [taken] it. When
+     * it did not and the session goes on, the waiter fails at once rather than wait out its bound;
+     * when the sink failed the link, it is left to fail as the session ends.
+     */
+    private fun settleChatReply(requestID: Long?, taken: Boolean, reply: MacMessage) {
+        if (requestID == null || endingForSink) return
+        val waiter = pending.remove(requestID) ?: return
+        if (taken) {
+            waiter.complete(reply)
+        } else {
+            waiter.completeExceptionally(CompanionRequestException("the chat sink did not take the reply"))
+        }
     }
 
     /** Hands one stream input to [sink]; see [deliverTo]. */
@@ -602,7 +625,7 @@ internal class CompanionSession(
         /** Slices of a request's bound it may wait on behind a busy sink: one more bound in all. */
         const val EXTENSION_SLICES = 10
 
-        const val HISTORY_CASE = "history"
+        const val DELIVERY_CASE = "delivery"
     }
 }
 
@@ -610,11 +633,19 @@ internal class CompanionSession(
 internal val DEFAULT_SINK_STALL: Duration = 30.seconds
 
 /**
- * The chat history cap (the client's `maxHistoryBytes`): a `history` frame longer than this, 8 MiB,
- * is never parsed and reaches the chat sink as [ChatInput.HistoryTooLarge]. Well under the 32 MiB
- * Noise cap; the tree decode's peak at this size fits the Pixel's heap (`HistoryMemoryTest`).
+ * The raw chat cap (the client's `maxRawChatBytes`): a raw chat frame (a `history`, the chat list,
+ * a big `delivery`) longer than this, 8 MiB, is never parsed and reaches the chat sink as
+ * [ChatInput.PayloadTooLarge]. Well under the 32 MiB Noise cap; the tree decode's peak at this size
+ * fits the Pixel's heap (`HistoryMemoryTest`).
  */
-const val DEFAULT_MAX_HISTORY_BYTES: Int = 8 shl 20
+const val DEFAULT_MAX_RAW_CHAT_BYTES: Int = 8 shl 20
+
+/**
+ * The client's `rawDeliveryBytes`: a `delivery` frame longer than this, 256 KiB, crosses to the
+ * chat sink raw and is decoded by its consumer, not on the receive loop; smaller ones (text deltas,
+ * typing) decode on the loop.
+ */
+const val DEFAULT_RAW_DELIVERY_BYTES: Int = 256 shl 10
 
 /** How a session ended: [relayClose] is the relay's close frame, null for anything else. */
 internal data class SessionEnd(val relayClose: RelayClose?)

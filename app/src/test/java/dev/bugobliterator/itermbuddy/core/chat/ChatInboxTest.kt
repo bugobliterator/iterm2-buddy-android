@@ -2,9 +2,15 @@ package dev.bugobliterator.itermbuddy.core.chat
 
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -17,7 +23,7 @@ import org.junit.Test
 class ChatInboxTest {
     private fun payload(index: Int, size: Int = 16) = ChatInput.Payload(1, index.toLong(), "history", ByteArray(size))
 
-    private fun delivery(index: Int) = ChatInput.Message(1, index.toLong(), MacMessage.Pong)
+    private fun delivery(index: Int) = ChatInput.Message(1, index.toLong(), MacMessage.Pong, 0)
 
     @Test
     fun historyAcceptReturnsWithoutDecoding() = runTest {
@@ -160,6 +166,66 @@ class ChatInboxTest {
         assertTrue(producer.isCompleted)
         assertEquals((0L until 100L).toList(), consumed.toList())
         assertTrue(inbox.highWater.get() <= 8)
+    }
+
+    /** A cancellation of consume's own (a timeout inside it) fails that input only; the consumer goes on. */
+    @Test
+    fun consumerSurvivesItsOwnTimeout() = runTest {
+        val logs = CopyOnWriteArrayList<String>()
+        val consumed = CopyOnWriteArrayList<ChatInput>()
+        val inbox = ChatInbox(backgroundScope, log = { logs += it }) { input ->
+            if (input is ChatInput.Payload) withTimeout(1.seconds) { awaitCancellation() }
+            consumed += input
+        }
+        inbox.accept(payload(0))
+        inbox.accept(delivery(1))
+        testScheduler.advanceTimeBy(2.seconds)
+        runCurrent()
+        assertEquals(listOf<ChatInput>(delivery(1)), consumed.toList())
+        assertEquals(listOf("chat consumer failed on Payload(history): TimeoutCancellationException"), logs.toList())
+        assertFalse(inbox.stopped)
+        inbox.accept(delivery(2))
+        runCurrent()
+        assertEquals(2, consumed.size)
+    }
+
+    /** Once the consumer's scope is cancelled, accept fails at once, also for one already waiting for room. */
+    @Test
+    fun deadConsumerFailsAcceptAtOnce() = runTest {
+        val job = Job()
+        val logs = CopyOnWriteArrayList<String>()
+        val inbox = ChatInbox(CoroutineScope(backgroundScope.coroutineContext + job), ChatBudgets(inboxItems = 1), log = { logs += it }) {
+            awaitCancellation()
+        }
+        inbox.accept(delivery(0))
+        runCurrent()
+        val waiting = async { runCatching { inbox.accept(delivery(1)) }.exceptionOrNull() }
+        runCurrent()
+        assertFalse(waiting.isCompleted)
+        job.cancel()
+        runCurrent()
+        assertTrue(inbox.stopped)
+        assertTrue("${waiting.await()}", waiting.await() is ChatInboxStoppedException)
+        val startedAt = testScheduler.currentTime
+        val failure = runCatching { inbox.accept(delivery(2)) }.exceptionOrNull()
+        assertTrue("$failure", failure is ChatInboxStoppedException)
+        assertEquals(startedAt, testScheduler.currentTime)
+        assertEquals("logged once", listOf("the chat consumer has stopped; refusing chat inputs"), logs.toList())
+    }
+
+    @Test
+    fun decodedMessagesChargeTheirFrameBytes() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val inbox = ChatInbox(backgroundScope, ChatBudgets(inboxItems = 10, inboxBytes = 100)) { gate.await() }
+        inbox.accept(ChatInput.Message(1, null, MacMessage.Pong, 60))
+        inbox.accept(ChatInput.PayloadTooLarge(1, "history", null, 12, 1 shl 30))
+        val over = launch { inbox.accept(ChatInput.Message(1, null, MacMessage.Pong, 41)) }
+        runCurrent()
+        assertEquals(60L, inbox.queuedBytes)
+        assertFalse("a decoded message's frame counts toward the byte bound", over.isCompleted)
+        gate.complete(Unit)
+        runCurrent()
+        assertTrue(over.isCompleted)
     }
 
     @Test

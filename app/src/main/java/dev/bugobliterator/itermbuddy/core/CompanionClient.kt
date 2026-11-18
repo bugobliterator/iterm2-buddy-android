@@ -184,8 +184,10 @@ sealed interface ClientState {
  * @param chatSink where chat-scoped messages and unsolicited errors go, in wire order, bracketed
  *   per link by [ChatInput.LinkUp] and [ChatInput.LinkDown] ([ChatInput]); with null they are
  *   dropped and logged by kind. They never reach [events] (an unsolicited `error` reaches both).
- * @param maxHistoryBytes the chat history cap: a longer `history` frame is never parsed and
- *   reaches [chatSink] as [ChatInput.HistoryTooLarge].
+ * @param maxRawChatBytes the raw chat cap: a longer `history`, chat list or raw `delivery` frame
+ *   is never parsed and reaches [chatSink] as [ChatInput.PayloadTooLarge].
+ * @param rawDeliveryBytes a `delivery` frame longer than this crosses to [chatSink] raw, decoded
+ *   by its consumer instead of on the receive loop.
  *
  * Links: each connection that reaches the connected step (7) is a link, numbered from 1. At step
  * 7 the link becomes current (so [send] and [request] with `onLink` reach it), then
@@ -209,8 +211,9 @@ class CompanionClient internal constructor(
     private val log: (String) -> Unit,
     private val streamSink: StreamSink? = null,
     private val chatSink: ChatSink? = null,
-    private val maxHistoryBytes: Int = DEFAULT_MAX_HISTORY_BYTES,
+    private val maxRawChatBytes: Int = DEFAULT_MAX_RAW_CHAT_BYTES,
     private val envelopeDecoder: (ByteArray) -> Pair<Long?, MacMessage> = { decodeEnvelope(it) },
+    private val rawDeliveryBytes: Int = DEFAULT_RAW_DELIVERY_BYTES,
 ) : StreamLink {
     constructor(
         store: PairingStore,
@@ -222,7 +225,8 @@ class CompanionClient internal constructor(
         log: (String) -> Unit = { Log.i(TAG, it) },
         streamSink: StreamSink? = null,
         chatSink: ChatSink? = null,
-        maxHistoryBytes: Int = DEFAULT_MAX_HISTORY_BYTES,
+        maxRawChatBytes: Int = DEFAULT_MAX_RAW_CHAT_BYTES,
+        rawDeliveryBytes: Int = DEFAULT_RAW_DELIVERY_BYTES,
     ) : this(
         store,
         OkHttpRelayTransport(
@@ -240,7 +244,8 @@ class CompanionClient internal constructor(
         log,
         streamSink,
         chatSink,
-        maxHistoryBytes,
+        maxRawChatBytes,
+        rawDeliveryBytes = rawDeliveryBytes,
     )
 
     private val stateFlow = MutableStateFlow<ClientState>(ClientState.Unpaired)
@@ -868,7 +873,8 @@ class CompanionClient internal constructor(
                         sinkStall = timeouts.sinkStall,
                         arrivals = treeArrivals,
                         chatSink = chatSink,
-                        maxHistoryBytes = maxHistoryBytes,
+                        maxRawChatBytes = maxRawChatBytes,
+                        rawDeliveryBytes = rawDeliveryBytes,
                         decode = envelopeDecoder,
                     )
                     self = live

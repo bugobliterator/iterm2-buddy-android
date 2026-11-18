@@ -1,17 +1,22 @@
 package dev.bugobliterator.itermbuddy.core.chat
 
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
- * The chat inbox's bound: [inboxItems] inputs **and** [inboxBytes] bytes of raw payload
- * ([ChatInput.Payload.size]), whichever fills first. Default 4096 items and 16 MiB.
+ * The chat inbox's bound: [inboxItems] inputs **and** [inboxBytes] bytes, whichever fills first.
+ * An input's bytes are its frame's size: [ChatInput.Payload.size] for a raw frame,
+ * [ChatInput.Message.frameBytes] for a decoded one, none for markers and
+ * [ChatInput.PayloadTooLarge] (whose bytes are gone). Default 4096 items and 16 MiB.
  */
 data class ChatBudgets(val inboxItems: Int = 4096, val inboxBytes: Long = DEFAULT_INBOX_BYTES)
 
@@ -19,16 +24,20 @@ data class ChatBudgets(val inboxItems: Int = 4096, val inboxBytes: Long = DEFAUL
  * The [ChatSink] the session's receive loop delivers to: [accept] only enqueues and returns, and
  * one consumer coroutine in [scope] calls [consume] for each input, in order.
  *
- * **Bound.** An input holds one of [ChatBudgets.inboxItems] slots and, for a [ChatInput.Payload],
- * its size in bytes, from when [accept] admits it until [consume] has returned for it. [accept]
+ * **Bound.** An input holds one of [ChatBudgets.inboxItems] slots and its frame's bytes (see
+ * [ChatBudgets]) from when [accept] admits it until [consume] has returned for it. [accept]
  * suspends while the inbox is full and never drops. An input is always admitted into an empty
- * inbox, so a payload over [ChatBudgets.inboxBytes] waits only for the inbox to drain; an input
- * with no payload bytes needs only a free slot.
+ * inbox, so one over [ChatBudgets.inboxBytes] waits only for the inbox to drain; an input with no
+ * bytes needs only a free slot. [post]ed work bypasses both bounds.
  *
  * **Consumer.** [consume] must never await a reply from the Mac (the receive loop that would read
  * it may be waiting on this inbox) and should not block: a request runs in its own coroutine and
- * [post]s its outcome back. An exception from [consume] is logged by its class and the input's
- * kind, and the consumer goes on with the next input.
+ * [post]s its outcome back. An exception from [consume], a `CancellationException` of its own
+ * included (a `withTimeout` inside it, say), is logged by its class and the input's kind, and the
+ * consumer goes on with the next input; only the cancellation of [scope] stops it. Once it has
+ * stopped, [accept] throws [ChatInboxStoppedException] at once (also to an accept already waiting
+ * for room), which the session treats as a sink failure that did not take the input, rather than
+ * waiting out its stall bound on every frame.
  *
  * @param log diagnostics: input kinds and exception classes only, never content.
  */
@@ -46,9 +55,11 @@ class ChatInbox(
     /** Work posted by the chat feature itself (a request's outcome): no slot, in order with the inputs. */
     private class Posted(val block: suspend () -> Unit) : Item
 
-    private data class Usage(val items: Int, val bytes: Long)
+    private data class Usage(val items: Int, val bytes: Long, val stopped: Boolean = false)
 
     private val usage = MutableStateFlow(Usage(0, 0))
+
+    private val stoppedLogged = AtomicBoolean()
 
     private val items = Channel<Item>(Channel.UNLIMITED)
 
@@ -62,7 +73,7 @@ class ChatInbox(
     internal val queuedBytes: Long get() = usage.value.bytes
 
     init {
-        scope.launch {
+        val consumer = scope.launch {
             for (item in items) {
                 try {
                     when (item) {
@@ -70,37 +81,61 @@ class ChatInbox(
                         is Posted -> item.block()
                     }
                 } catch (e: CancellationException) {
-                    throw e
+                    // The scope is being cancelled: stop. Otherwise consume threw a cancellation of
+                    // its own (a timeout inside it): one failed input, not a dead consumer.
+                    if (!currentCoroutineContext().isActive) throw e
+                    log("chat consumer failed on ${item.kind()}: ${e.javaClass.simpleName}")
                 } catch (e: Exception) {
                     log("chat consumer failed on ${item.kind()}: ${e.javaClass.simpleName}")
                 } finally {
-                    if (item is Incoming) usage.update { Usage(it.items - 1, it.bytes - item.bytes) }
+                    if (item is Incoming) usage.update { it.copy(items = it.items - 1, bytes = it.bytes - item.bytes) }
                 }
             }
         }
+        consumer.invokeOnCompletion { usage.update { it.copy(stopped = true) } }
     }
+
+    /** Whether the consumer has stopped (its scope was cancelled); [accept] then fails at once. */
+    val stopped: Boolean get() = usage.value.stopped
 
     /**
      * Enqueues [input] and returns; suspends while the inbox is full, never drops, never waits for
      * the Mac and never throws a cancellation of its own. Cancelled while suspended, nothing was
      * enqueued.
+     *
+     * Not safe for concurrent callers: the order between two accepts in flight at once is not
+     * defined. The session calls it only from its receive loop and its link markers, serialised
+     * under its ordering lock.
+     *
+     * @throws ChatInboxStoppedException when the consumer has stopped; nothing was enqueued.
      */
     override suspend fun accept(input: ChatInput) {
-        val bytes = if (input is ChatInput.Payload) input.size.toLong() else 0L
-        reserve(bytes)
+        val bytes = when (input) {
+            is ChatInput.Payload -> input.size.toLong()
+            is ChatInput.Message -> input.frameBytes.toLong()
+            else -> 0L
+        }
+        reserve(bytes, input)
         // No suspension between the reservation and the send: an UNLIMITED channel never refuses.
         items.trySend(Incoming(input, bytes))
     }
 
-    /** Runs [block] on the consumer after everything enqueued so far; takes no slot and never suspends the caller. */
+    /**
+     * Runs [block] on the consumer after everything enqueued so far. It bypasses the item and byte
+     * bounds (it takes no slot) and never suspends the caller; dropped once the consumer has stopped.
+     */
     fun post(block: suspend () -> Unit) {
         items.trySend(Posted(block))
     }
 
-    private suspend fun reserve(bytes: Long) {
+    private suspend fun reserve(bytes: Long, input: ChatInput) {
         while (true) {
-            val seen = usage.value.takeIf { fits(it, bytes) } ?: usage.first { fits(it, bytes) }
-            if (usage.compareAndSet(seen, Usage(seen.items + 1, seen.bytes + bytes))) {
+            val seen = usage.value.takeIf { it.stopped || fits(it, bytes) } ?: usage.first { it.stopped || fits(it, bytes) }
+            if (seen.stopped) {
+                if (stoppedLogged.compareAndSet(false, true)) log("the chat consumer has stopped; refusing chat inputs")
+                throw ChatInboxStoppedException(input.javaClass.simpleName)
+            }
+            if (usage.compareAndSet(seen, seen.copy(items = seen.items + 1, bytes = seen.bytes + bytes))) {
                 highWater.accumulateAndGet(seen.items + 1, ::maxOf)
                 return
             }
@@ -119,6 +154,9 @@ class ChatInbox(
         is Posted -> "posted work"
     }
 }
+
+/** [ChatInbox.accept] after the consumer stopped: the input, named by [kind] only, was not taken. */
+class ChatInboxStoppedException(kind: String) : IllegalStateException("the chat consumer has stopped; $kind not taken")
 
 /** Default for [ChatBudgets.inboxBytes]: 16 MiB. */
 const val DEFAULT_INBOX_BYTES: Long = 16L shl 20
