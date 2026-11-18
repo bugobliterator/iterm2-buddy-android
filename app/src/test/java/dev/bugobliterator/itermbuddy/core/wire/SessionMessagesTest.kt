@@ -234,7 +234,6 @@ class SessionMessagesTest {
             """{"requestID":1,"payload":{"hello":{"revision":15,"minimumPeer":null}}}""",
             """{"requestID":1,"payload":{"hello":{"revision":15,"minimumPeer":11,"aiAvailable":"yes"}}}""",
             """{"requestID":1,"payload":{"hello":{"revision":15,"minimumPeer":11,"wantsNotificationPermission":1}}}""",
-            """{"requestID":1,"payload":{"hello":{"revision":15,"minimumPeer":11,"macStatus":3}}}""",
             """{"requestID":1,"payload":{"hello":[]}}""",
             """{"requestID":3,"payload":{"pong":null}}""",
             """{"requestID":3,"payload":{"pong":1}}""",

@@ -29,6 +29,7 @@ import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.MacStatus
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.core.wire.ProtocolRevision
+import dev.bugobliterator.itermbuddy.core.wire.hasUndecodableMacStatus
 import dev.bugobliterator.itermbuddy.core.wire.macStatus
 import dev.bugobliterator.itermbuddy.store.PairingRecord
 import dev.bugobliterator.itermbuddy.store.PairingStage
@@ -263,6 +264,9 @@ class CompanionClient internal constructor(
 
     /** The connection whose status [macStatus] shows; events from any other are not applied. */
     private var macStatusSession: CompanionSession? = null
+
+    /** For tests: the connection [macStatus] belongs to now, as the token [emitEvent] takes. */
+    internal val macStatusOwner: Any? get() = synchronized(macStatusLock) { macStatusSession }
 
     /** Whether a [MacMessage.MacStatusChanged] has been applied for [macStatusSession] (it beats the seed). */
     private var macStatusChangeApplied = false
@@ -1019,6 +1023,8 @@ class CompanionClient internal constructor(
             // before LinkUp is sunk, so the sink can send on it; Connected follows.
             attempt = 0
             val revision = helloReply.revision.coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
+            // A status that does not decode is no status; only the key is logged, never its contents.
+            if (helloReply.hasUndecodableMacStatus()) log("ignored the hello's macStatus: it does not decode")
             seedMacStatus(live, helloReply.macStatus())
             val id = nextLinkId.getAndIncrement()
             linkId = id
@@ -1218,8 +1224,11 @@ class CompanionClient internal constructor(
         }
     }
 
-    /** An unsolicited message from [from]; a status change on the current connection updates [macStatus]. */
-    private fun emitEvent(message: MacMessage, from: CompanionSession?) {
+    /**
+     * An unsolicited message from the connection [from]; a status change on the current connection
+     * updates [macStatus]. Internal for tests, which pass a [macStatusOwner] token.
+     */
+    internal fun emitEvent(message: MacMessage, from: Any?) {
         if (message is MacMessage.MacStatusChanged) {
             synchronized(macStatusLock) {
                 if (from != null && from === macStatusSession) {

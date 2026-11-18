@@ -5,16 +5,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.DropdownMenu
@@ -109,13 +104,18 @@ data class HomeModel(
 )
 
 /**
- * The Mac alert banner's text for [status] (`CompanionClient.macStatus`): shown on Sessions and
- * over the live view while the Mac reports its main thread blocked or any alert showing; null
- * otherwise, and while there is no status (not connected, or a Mac older than revision 14). This
- * app does not answer alerts: the owner answers at the Mac.
+ * The Mac alert banner's text for [status] (`CompanionClient.macStatus`), shown on Sessions and
+ * under the live view's top bar; null when the Mac reports neither, and while there is no status
+ * (not connected, or a Mac older than revision 14). iOS's wording: with any alert showing, its
+ * pill's "Your Mac needs a response" (`IOS/App/iTerm2CompanionApp.swift:286`); blocked with
+ * none, its banner's text (`:296`). This app does not answer alerts: the owner answers at the Mac.
  */
-fun macAlertBanner(status: MacStatus?): String? =
-    if (status?.showsAlert == true) "iTerm2 is showing an alert on the Mac." else null
+fun macAlertBanner(status: MacStatus?): String? = when {
+    status == null -> null
+    status.alertCount > 0 -> "Your Mac needs a response"
+    status.mainBlocked -> "Your Mac is busy or showing a dialog that can\u2019t be answered from here"
+    else -> null
+}
 
 /**
  * The paired home: a [Scaffold] for [HomeTab][dev.bugobliterator.itermbuddy.ui.HomeTab]
@@ -163,37 +163,26 @@ fun HomeScaffold(model: HomeModel, actions: HomeActions, modifier: Modifier = Mo
 
 /**
  * The live view for [session]; a browser session shows its video with the browser note until
- * Browser View. The Mac alert banner ([macAlertBanner]) sits just below the live view's top bar.
+ * Browser View. The Mac alert banner ([macAlertBanner]) is a row of the live view's top bar.
  */
 @Composable
 private fun LiveSession(session: SessionSummary, title: String, model: HomeModel, actions: HomeActions, modifier: Modifier) {
-    Box(modifier = modifier.fillMaxSize()) {
-        LiveSessionScreen(
-            title = title,
-            session = session,
-            live = model.live,
-            activeStream = model.activeStream,
-            macRevision = (model.state as? ClientState.Connected)?.macRevision,
-            source = model.video,
-            debugBuild = model.debugBuild,
-            videoStatsShown = model.videoStatsShown,
-            actions = actions,
-        )
-        macAlertBanner(model.macStatus)?.let { text ->
-            MacAlertBannerRow(
-                text = text,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
-                    .padding(top = LIVE_TOP_BAR_HEIGHT),
-            )
-        }
-    }
+    LiveSessionScreen(
+        title = title,
+        session = session,
+        live = model.live,
+        activeStream = model.activeStream,
+        macRevision = (model.state as? ClientState.Connected)?.macRevision,
+        source = model.video,
+        debugBuild = model.debugBuild,
+        videoStatsShown = model.videoStatsShown,
+        actions = actions,
+        modifier = modifier,
+        macAlert = macAlertBanner(model.macStatus),
+    )
 }
 
-/** The live view's top bar row height (`LiveSessionScreen`'s `LiveTopBar`), which the banner sits below. */
-private val LIVE_TOP_BAR_HEIGHT = 48.dp
-
+/** The Mac alert banner on Sessions, under the connection banner. */
 @Composable
 private fun MacAlertBannerRow(text: String, modifier: Modifier = Modifier) {
     Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = modifier.fillMaxWidth()) {

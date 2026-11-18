@@ -1,6 +1,7 @@
 package dev.bugobliterator.itermbuddy.core.wire
 
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 
 /**
@@ -21,11 +22,20 @@ data class MacStatus(val mainBlocked: Boolean, val alertCount: Int) {
 
 /**
  * The `macStatus` of a `hello` reply: null when the Mac sent none (a phone below revision 14, or
- * a Mac older than 14), absent and `null` alike. [MacMessage.HelloReply]s from [decodeEnvelope]
- * have had it checked already; for one built by hand a malformed status throws
- * [WireDecodeException].
+ * a Mac older than 14), absent and `null` alike, and also when it does not decode. Lenient on
+ * purpose, unlike upstream (which fails the whole hello) and unlike [MacMessage.MacStatusChanged]
+ * (which stays strict): a bad status must not cost the connection. [hasUndecodableMacStatus]
+ * tells that last case apart, for a log line.
  */
-fun MacMessage.HelloReply.macStatus(): MacStatus? = raw.ifPresent("macStatus") { key -> decodeMacStatus(get(key)) }
+fun MacMessage.HelloReply.macStatus(): MacStatus? = try {
+    raw.ifPresent("macStatus") { key -> decodeMacStatus(get(key)) }
+} catch (_: WireDecodeException) {
+    null
+}
+
+/** Whether the hello carries a `macStatus` that [macStatus] read as null because it does not decode. */
+fun MacMessage.HelloReply.hasUndecodableMacStatus(): Boolean =
+    raw["macStatus"].let { it != null && it != JsonNull } && macStatus() == null
 
 /**
  * Upstream's lenient `CompanionMacStatus.init(from:)` (`CompanionMessages.swift:583-587`): an
