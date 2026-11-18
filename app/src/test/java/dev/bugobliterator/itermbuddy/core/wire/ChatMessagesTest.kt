@@ -558,6 +558,9 @@ class ChatMessagesTest {
             """{"payload":{"delivery":{"chatID":"c","partial":false,"message":{"author":"$secret"}}}}""",
             """{"payload":{"chatListChanged":{"chats":[{"chat":{"id":"x","title":"$secret"}}]}}}""",
             """{"payload":{"sessionScreenInfo":{"_0":{"guid":"g","name":"$secret","lineCount":1.5}}}}""",
+            // An icon that is not base64: the JDK decoder's message can quote the bad character.
+            """{"payload":{"chatCreated":{"entry":{"chat":{"id":"x","title":"t","creationDate":1,"lastModifiedDate":2,""" +
+                """"orchestrationEnabled":false,"claimedScopes":[],"icon":"${secret}!!"}}}}}""",
         )
         for (frame in frames) {
             val error = assertThrows(frame, WireDecodeException::class.java) { decodeEnvelope(frame.toByteArray()) }
@@ -594,5 +597,18 @@ class ChatMessagesTest {
         val entry = (decodeEnvelope(minimal.toByteArray()).second as MacMessage.ChatListChanged).chats.single()
         assertEquals(ChatListEntry(ChatSummary("x", "t", 1.0, 2.5, false, null, null, emptyList(), null), null, null), entry)
         assertNull(entry.chat.copyIcon())
+    }
+
+    @Test
+    fun chatWithoutPermissionsOrWatchersDecodes() {
+        // An Android leniency: upstream's synthesized Chat decode requires both; the phone reads neither.
+        val frame = """{"payload":{"chatCreated":{"entry":{"chat":{"id":"x","title":"t","creationDate":1,""" +
+            """"lastModifiedDate":2,"orchestrationEnabled":true,"claimedScopes":["wg-1"]},"muted":true}}},"requestID":10}"""
+        assertEquals(
+            10L to MacMessage.ChatCreated(
+                ChatListEntry(ChatSummary("x", "t", 1.0, 2.0, true, null, null, listOf("wg-1"), null), null, true),
+            ),
+            decodeEnvelope(frame.toByteArray()),
+        )
     }
 }

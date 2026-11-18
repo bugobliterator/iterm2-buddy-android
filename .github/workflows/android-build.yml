@@ -69,7 +69,7 @@ jobs:
 
       - name: Build and unit test
         run: >
-          ./gradlew testDebugUnitTest assembleDebug assembleDebugAndroidTest
+          ./gradlew testDebugUnitTest chatMemoryTest assembleDebug assembleDebugAndroidTest
           -PciVersionCode=${{ github.run_number }}
           -PciVersionName=0.1.0-${{ steps.meta.outputs.short-sha }}
 

@@ -26,15 +26,20 @@ class HistoryMemoryTest {
 
     @Test
     fun decodeAllocationIsLinearInSize() {
-        val small = historyFrame(MAX_HISTORY_BYTES / 8, MESSAGES / 8)
-        repeat(3) { decodeEnvelope(small) } // warm up, so class loading and JIT do not count
-        val smallPerByte = allocatedBy { decodeEnvelope(small) }.toDouble() / small.size
-        val large = historyFrame(MAX_HISTORY_BYTES, MESSAGES)
-        val largePerByte = allocatedBy { decodeEnvelope(large) }.toDouble() / large.size
+        // Each frame lives only inside its own call, so the small one is gone before the large one decodes.
+        val smallPerByte = allocatedPerInputByte(MAX_HISTORY_BYTES / 8, MESSAGES / 8, warmUps = 3)
+        val largePerByte = allocatedPerInputByte(MAX_HISTORY_BYTES, MESSAGES, warmUps = 0)
         assertTrue(
             "allocated bytes per input byte: $smallPerByte at 1 MiB, $largePerByte at 8 MiB",
             largePerByte < smallPerByte * 1.25 && smallPerByte < largePerByte * 1.25,
         )
+    }
+
+    /** Bytes allocated per input byte by one decode; [warmUps] decodes first, so class loading and JIT do not count. */
+    private fun allocatedPerInputByte(sizeBytes: Int, messages: Int, warmUps: Int): Double {
+        val frame = historyFrame(sizeBytes, messages)
+        repeat(warmUps) { decodeEnvelope(frame) }
+        return allocatedBy { decodeEnvelope(frame) }.toDouble() / frame.size
     }
 
     private fun allocatedBy(block: () -> Unit): Long {

@@ -64,7 +64,9 @@ fun encodeEnvelope(message: PhoneMessage, requestID: Long?): ByteArray {
  *   string decodes to `StreamEndReason.UNKNOWN`, so a stream end is never refused; an
  *   unknown `streamStarted` codec string decodes to `StreamCodec.UNKNOWN`; an unknown
  *   workgroup member state decodes to `SessionState.UNKNOWN`; a chat message whose content
- *   body is corrupt keeps the frame, its content `Unreadable` (`ChatMessages.kt`).
+ *   body is corrupt keeps the frame, its content `Unreadable`; a chat without `permissions`
+ *   or `watchers` decodes, although upstream's synthesized `Chat` decode requires both
+ *   (`Chat.swift:14-88`): the phone never reads them (`ChatMessages.kt`).
  * - A `history` or `delivery` keeps file attachment bytes within [attachmentBudgets].
  * - An exception names keys and cases only, never a value, and never carries the JSON
  *   parser's exception (its message quotes the input).
@@ -286,8 +288,9 @@ internal fun JsonObject.base64(case: String, key: String): ByteArray {
     if (text.length % 4 != 0) throw WireDecodeException("$case.$key is not padded base64")
     return try {
         Base64.getDecoder().decode(text)
-    } catch (e: IllegalArgumentException) {
-        throw WireDecodeException("$case.$key is not base64", e)
+    } catch (_: IllegalArgumentException) {
+        // Not chained: the decoder's message can quote the offending character.
+        throw WireDecodeException("$case.$key is not base64")
     }
 }
 
