@@ -299,6 +299,12 @@ class FakeMac(
      */
     val beforeHelloReply = CopyOnWriteArrayList<String>()
 
+    /**
+     * Fixture paths whose payloads are sent, with no request ID, just after each hello reply: a
+     * status change the Mac pushes before the phone's next request is answered.
+     */
+    val afterHelloReply = CopyOnWriteArrayList<String>()
+
     /** Sends the payload of the fixture at [path] (relative to `fixtures/`) with [requestID]. */
     suspend fun sendSample(path: String, requestID: Long?) {
         val current = checkNotNull(link) { "no link" }
@@ -571,6 +577,7 @@ class FakeMac(
             "hello" -> if (answering) {
                 for (path in beforeHelloReply) send(current, sampleEnvelope(path, null))
                 send(current, helloReply(requestID))
+                for (path in afterHelloReply) send(current, sampleEnvelope(path, null))
             }
             "relayRoomSecret" -> if (answering) {
                 if (unpairOnRoomSecret) {

@@ -198,6 +198,8 @@ interface LiveSessionActions {
  * @param config the image geometry: the shown state's config, else the active stream's when it
  *   is this session's (a too-large window keeps its config for Fit).
  * @param macRevision the Mac's hello revision, for the browser note; null when not connected.
+ * @param macAlert the Mac alert banner's text (`macAlertBanner`), shown as a row under the top
+ *   bar, inside its measured height, so the picture and Fit sit below it; null for none.
  */
 @Composable
 fun LiveSessionScreen(
@@ -211,9 +213,10 @@ fun LiveSessionScreen(
     videoStatsShown: Boolean,
     actions: LiveSessionActions,
     modifier: Modifier = Modifier,
+    macAlert: String? = null,
 ) {
     LiveSessionTheme {
-        LiveSessionContent(title, session, live, activeStream, macRevision, source, debugBuild, videoStatsShown, actions, modifier)
+        LiveSessionContent(title, session, live, activeStream, macRevision, source, debugBuild, videoStatsShown, actions, modifier, macAlert)
     }
 }
 
@@ -231,6 +234,7 @@ private fun LiveSessionContent(
     videoStatsShown: Boolean,
     actions: LiveSessionActions,
     modifier: Modifier,
+    macAlert: String?,
 ) {
     val config = shownConfig(session, live, activeStream)
     val target = inputTarget(session, live, activeStream)
@@ -493,6 +497,7 @@ private fun LiveSessionContent(
         LiveTopBar(
             title = title,
             onBack = actions::back,
+            banner = macAlert,
             modifier = Modifier.align(Alignment.TopCenter).onSizeChanged { topChrome = it.height },
         ) {
             if (offersInput) {
@@ -580,13 +585,46 @@ private fun LiveSessionContent(
 /**
  * The compact bar drawn over the top of the picture (iOS keeps its bars over a full-screen canvas):
  * a translucent scrim behind the status bar and a 48 dp row with ←, the title on one line
- * (ellipsized) and [actions] (⌨, ⋮). Its measured height is the canvas's top inset.
+ * (ellipsized) and [actions] (⌨, ⋮), then, when [banner] is set, the Mac alert row across the
+ * same width. Its measured height, banner included, is the canvas's top inset, so the banner
+ * never covers the picture or takes its touches.
  */
 @Composable
-private fun LiveTopBar(title: String, onBack: () -> Unit, modifier: Modifier, actions: @Composable RowScope.() -> Unit) {
+private fun LiveTopBar(
+    title: String,
+    onBack: () -> Unit,
+    banner: String?,
+    modifier: Modifier,
+    actions: @Composable RowScope.() -> Unit,
+) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        LiveTopBarRow(title, onBack, actions)
+        if (banner != null) LiveAlertBanner(banner)
+    }
+}
+
+/** The Mac alert row under the bar, in the live theme's colours, its text inside the side insets. */
+@Composable
+private fun LiveAlertBanner(text: String) {
+    val colors = MaterialTheme.colorScheme
+    Text(
+        text = text,
+        color = colors.onErrorContainer,
+        style = MaterialTheme.typography.bodySmall,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(colors.errorContainer)
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .semantics { liveRegion = LiveRegionMode.Polite },
+    )
+}
+
+@Composable
+private fun LiveTopBarRow(title: String, onBack: () -> Unit, actions: @Composable RowScope.() -> Unit) {
     val colors = MaterialTheme.colorScheme
     Row(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxWidth()
             .background(colors.surfaceContainer.copy(alpha = TOP_BAR_ALPHA))
             .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))

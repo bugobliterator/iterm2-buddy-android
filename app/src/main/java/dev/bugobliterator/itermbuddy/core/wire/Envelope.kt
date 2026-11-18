@@ -170,8 +170,8 @@ private fun decodeMacCase(case: String, body: JsonElement, payload: JsonObject):
         val hello = body.asObject(case)
         hello.optional(case, "wantsNotificationPermission") { it.isBoolean() }
         hello.optional(case, "aiAvailable") { it.isBoolean() }
-        // Checked here, so HelloReply.macStatus() never throws for a decoded reply.
-        hello.ifPresent("macStatus") { decodeMacStatus(get(it)) }
+        // `macStatus` is not checked here: one that does not decode reads as none
+        // (HelloReply.macStatus), so a bad status never costs the connection.
         MacMessage.HelloReply(hello.long(case, "revision"), hello.long(case, "minimumPeer"), hello)
     }
     "relayRoomSecretStored" -> MacMessage.RelayRoomSecretStored.also { body.asObject(case) }

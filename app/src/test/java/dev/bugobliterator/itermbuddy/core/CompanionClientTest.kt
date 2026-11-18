@@ -44,6 +44,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
@@ -1277,7 +1278,7 @@ class CompanionClientTest {
         val blocked = MacStatus(mainBlocked = true, alertCount = 1)
         assertEquals("seeded before Connected", blocked, atState.last { it.first is ClientState.Connected }.second)
         assertEquals(blocked, h.client.macStatus.value)
-        assertEquals("iTerm2 is showing an alert on the Mac.", macAlertBanner(h.client.macStatus.value))
+        assertEquals("Your Mac needs a response", macAlertBanner(h.client.macStatus.value))
 
         // The link drops: the status went with it, before the state left Connected.
         val connectedAt = atState.size
@@ -1291,6 +1292,72 @@ class CompanionClientTest {
         // A reconnect to a Mac with nothing showing (and no status in its hello) stays clear.
         h.awaitConnected(2)
         assertNull(h.client.macStatus.value)
+    }
+
+    @Test
+    fun undecodableHelloStatusStillConnectsWithNoStatus() = runTest {
+        val h = Harness(this)
+        val record = h.stored(PairingStage.REGISTERED)
+        h.macPinned(record)
+        h.mac.helloMacStatus = JsonObject(mapOf("mainBlocked" to JsonPrimitive(1)))
+        h.mac.start()
+        h.client.start()
+        h.awaitConnected()
+
+        assertNull(h.client.macStatus.value)
+        assertTrue(h.logs.joinToString("\n"), h.logs.any { "macStatus" in it && "does not decode" in it })
+        assertEquals(MacMessage.Pong, h.client.request(PhoneMessage.Ping))
+    }
+
+    @Test
+    fun statusClearedBeforeRegisterEndsClear() = runTest {
+        val h = Harness(this)
+        val record = h.stored(PairingStage.REGISTERED)
+        h.macPinned(record)
+        // The hello reports the alert; the Mac clears it right after, before the room secret and
+        // register steps are done, so before the hello's status is seeded.
+        h.mac.helloMacStatus = alertsStatus()
+        h.mac.afterHelloReply += "messages/browser-sessions/mac-status-changed-clear.json"
+        val atConnected = CopyOnWriteArrayList<MacStatus?>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            h.client.state.collect { if (it is ClientState.Connected) atConnected += h.client.macStatus.value }
+        }
+        h.mac.start()
+        h.client.start()
+        h.awaitConnected()
+
+        val clear = MacStatus(mainBlocked = false, alertCount = 0)
+        assertEquals(listOf<MacStatus?>(clear), atConnected.toList())
+        assertEquals(clear, h.client.macStatus.value)
+        assertNull(macAlertBanner(h.client.macStatus.value))
+    }
+
+    @Test
+    fun statusFromAClosedSessionLeavesTheNewOneAlone() = runTest {
+        val h = Harness(this)
+        val record = h.stored(PairingStage.REGISTERED)
+        h.macPinned(record)
+        h.mac.helloMacStatus = alertsStatus()
+        h.mac.start()
+        h.client.start()
+        h.awaitConnected()
+        val closed = checkNotNull(h.client.macStatusOwner)
+
+        // The next connection's hello reports nothing showing.
+        h.mac.helloMacStatus = JsonObject(mapOf("mainBlocked" to JsonPrimitive(false), "modalAlerts" to JsonArray(emptyList())))
+        h.mac.dropSocket()
+        h.awaitConnected(2)
+        val current = checkNotNull(h.client.macStatusOwner)
+        assertTrue("a new connection owns the status", current !== closed)
+        val clear = MacStatus(mainBlocked = false, alertCount = 0)
+        assertEquals(clear, h.client.macStatus.value)
+
+        // A late event from the closed connection is not applied; one from the current one is.
+        val blocked = MacMessage.MacStatusChanged(MacStatus(mainBlocked = true, alertCount = 1))
+        h.client.emitEvent(blocked, closed)
+        assertEquals(clear, h.client.macStatus.value)
+        h.client.emitEvent(blocked, current)
+        assertEquals(blocked.status, h.client.macStatus.value)
     }
 
     @Test
@@ -1338,7 +1405,7 @@ class CompanionClientTest {
         assertEquals(listOf("modalAlertAnswerRejected"), events.filterIsInstance<MacMessage.Unsupported>().map { it.case })
         assertEquals(2, events.size)
         assertEquals(MacStatus(mainBlocked = true, alertCount = 1), h.client.macStatus.value)
-        assertEquals("iTerm2 is showing an alert on the Mac.", macAlertBanner(h.client.macStatus.value))
+        assertEquals("Your Mac needs a response", macAlertBanner(h.client.macStatus.value))
         assertEquals(ClientState.Connected(FakeMac.MAC_REVISION), h.client.state.value)
         assertEquals(MacMessage.Pong, h.client.request(PhoneMessage.Ping))
 

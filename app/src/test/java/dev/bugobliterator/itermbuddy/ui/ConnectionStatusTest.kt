@@ -3,6 +3,8 @@ package dev.bugobliterator.itermbuddy.ui
 import com.google.mlkit.common.MlKitException
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.WaitReason
+import dev.bugobliterator.itermbuddy.core.wire.MacStatus
+import dev.bugobliterator.itermbuddy.ui.home.macAlertBanner
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -12,6 +14,20 @@ import java.io.IOException
 import java.util.Base64
 
 class ConnectionStatusTest {
+    @Test
+    fun macAlertBannerUsesIosWording() {
+        assertNull(macAlertBanner(null))
+        assertNull(macAlertBanner(MacStatus(mainBlocked = false, alertCount = 0)))
+        // iOS's pill (iTerm2CompanionApp.swift:286) whenever an alert shows, blocked or not.
+        assertEquals("Your Mac needs a response", macAlertBanner(MacStatus(mainBlocked = false, alertCount = 1)))
+        assertEquals("Your Mac needs a response", macAlertBanner(MacStatus(mainBlocked = true, alertCount = 2)))
+        // iOS's blocked banner (iTerm2CompanionApp.swift:296): busy with nothing to answer.
+        assertEquals(
+            "Your Mac is busy or showing a dialog that can\u2019t be answered from here",
+            macAlertBanner(MacStatus(mainBlocked = true, alertCount = 0)),
+        )
+    }
+
     @Test
     fun codeIsShownAsTwoGroupsOfThree() {
         assertEquals("482 913", formatPairingCode("482913"))

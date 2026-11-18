@@ -17,7 +17,10 @@ package dev.bugobliterator.itermbuddy.core.wire
  * `browserNavigationChanged` for a browser stream (`MC/CompanionHostBridge.swift:745-788`).
  * Nothing else it sends depends on the phone's revision beyond 13 (its other gates are at 2, 8,
  * 12 and 13), and its refusal of terminal input while its main thread is blocked does not
- * depend on it either (`MC/CompanionLink.swift:476-492`).
+ * depend on it either (`MC/CompanionLink.swift:476-492`). Its timing does: at 14 and above the
+ * Mac expedites its stall detection for a phone it sends status to, so input is refused about
+ * 0.3 s after an app-modal alert appears instead of 2 s (`MC/CompanionLink.swift:525-529,
+ * 566-571`; `MC/CompanionMainThreadMonitor.swift:50-55`).
  */
 object ProtocolRevision {
     const val REVISION = 15

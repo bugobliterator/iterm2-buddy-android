@@ -200,7 +200,8 @@ class BrowserMessagesTest {
         val nullStatus = """{"requestID":1,"payload":{"hello":{"revision":15,"minimumPeer":11,"macStatus":null}}}"""
         assertNull((decodeEnvelope(nullStatus.toByteArray()).second as MacMessage.HelloReply).macStatus())
 
-        // A malformed status fails the frame, hello or event, as upstream's decode does.
+        // A malformed status fails a macStatusChanged, as upstream's decode does; in a hello it
+        // reads as no status (a deliberate leniency: a bad status must not cost the connection).
         for (
             status in listOf(
                 """{"mainBlocked":1}""",
@@ -213,8 +214,16 @@ class BrowserMessagesTest {
             val event = """{"payload":{"macStatusChanged":{"status":$status}}}"""
             assertThrows(event, WireDecodeException::class.java) { decodeEnvelope(event.toByteArray()) }
             val hello = """{"requestID":1,"payload":{"hello":{"revision":15,"minimumPeer":11,"macStatus":$status}}}"""
-            assertThrows(hello, WireDecodeException::class.java) { decodeEnvelope(hello.toByteArray()) }
+            val reply = decodeEnvelope(hello.toByteArray()).second as MacMessage.HelloReply
+            assertNull(hello, reply.macStatus())
+            assertTrue(hello, reply.hasUndecodableMacStatus())
         }
+        for (status in listOf("3", "[]", "\"x\"")) {
+            val hello = """{"requestID":1,"payload":{"hello":{"revision":15,"minimumPeer":11,"macStatus":$status}}}"""
+            assertNull(hello, (decodeEnvelope(hello.toByteArray()).second as MacMessage.HelloReply).macStatus())
+        }
+        assertFalse(withAlerts.hasUndecodableMacStatus())
+        assertFalse(plain.hasUndecodableMacStatus())
         val missing = """{"payload":{"macStatusChanged":{}}}"""
         assertThrows(missing, WireDecodeException::class.java) { decodeEnvelope(missing.toByteArray()) }
 
@@ -259,6 +268,27 @@ class BrowserMessagesTest {
             "BrowserNavigationState(url=null, title=null, canGoBack=false, canGoForward=false, isLoading=false)",
             BrowserNavigationState(null, null, false, false, false).toString(),
         )
+    }
+
+    @Test
+    fun helloReplyToStringShowsOnlyKeys() {
+        val text = Fixtures.read("messages/session/hello-mac-with-alerts.json")
+        val reply = decodeEnvelope(sessionSample("hello-mac-with-alerts")).second as MacMessage.HelloReply
+        val printed = reply.toString()
+        assertEquals(
+            "HelloReply(revision=15, minimumPeer=11, keys=[aiAvailable, macStatus, minimumPeer, revision, wantsNotificationPermission])",
+            printed,
+        )
+        // Every alert string in the fixture is a sentinel: heading, body, buttons, inputs, GUIDs.
+        val sentinels = listOf(
+            "Close Session?", "A job is still running in this session.", "Do not ask again", "Show Details",
+            "6F1C2B3A-4D5E-4F60-8172-93A4B5C6D7E8", "w0t0p0:2B5D1E7A-0C9F-4E3B-A1D2-3C4B5A697887", "build", "Count",
+        )
+        for (sentinel in sentinels) {
+            assertTrue("the fixture has $sentinel", sentinel in text)
+            assertFalse("$sentinel in $printed", sentinel in printed)
+            assertFalse("$sentinel in the decoded pair", sentinel in decodeEnvelope(sessionSample("hello-mac-with-alerts")).toString())
+        }
     }
 
     @Test

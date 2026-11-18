@@ -224,7 +224,10 @@ sealed interface MacMessage {
      * (`macStatus` arrives only for a phone at revision 14 or later; read it with
      * [macStatus]). The revisions are [Long] to match Swift's 64-bit `Int`.
      */
-    data class HelloReply(val revision: Long, val minimumPeer: Long, val raw: JsonObject) : MacMessage
+    data class HelloReply(val revision: Long, val minimumPeer: Long, val raw: JsonObject) : MacMessage {
+        /** [raw] can carry alert headings, bodies and session GUIDs: only its keys are shown. */
+        override fun toString(): String = "HelloReply(revision=$revision, minimumPeer=$minimumPeer, keys=${raw.keys.sorted()})"
+    }
 
     data object RelayRoomSecretStored : MacMessage
 
