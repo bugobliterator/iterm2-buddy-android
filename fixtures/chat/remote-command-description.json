@@ -1,0 +1,1356 @@
+[
+  {
+    "functionName" : "is_at_prompt",
+    "markdownDescription" : "Checking if you’re at a shell prompt",
+    "name" : "isAtPrompt",
+    "permissionCategory" : "Check Terminal State",
+    "remoteCommand" : {
+      "content" : {
+        "isAtPrompt" : {
+          "_0" : {
+
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{}",
+              "id" : "call_is_at_prompt",
+              "name" : "is_at_prompt"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "execute_command",
+    "markdownDescription" : "Executing ``",
+    "name" : "executeCommand",
+    "permissionCategory" : "Run Commands",
+    "remoteCommand" : {
+      "content" : {
+        "executeCommand" : {
+          "_0" : {
+            "command" : ""
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"command\":\"\"}",
+              "id" : "call_execute_command",
+              "name" : "execute_command"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_last_exit_status",
+    "markdownDescription" : "Checking the exit status of the last command",
+    "name" : "getLastExitStatus",
+    "permissionCategory" : "Check Terminal State",
+    "remoteCommand" : {
+      "content" : {
+        "getLastExitStatus" : {
+          "_0" : {
+
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{}",
+              "id" : "call_get_last_exit_status",
+              "name" : "get_last_exit_status"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_command_history",
+    "markdownDescription" : "Reviewing the history of commands you have run in this session",
+    "name" : "getCommandHistory",
+    "permissionCategory" : "View Contents",
+    "remoteCommand" : {
+      "content" : {
+        "getCommandHistory" : {
+          "_0" : {
+            "limit" : 100
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"limit\":100}",
+              "id" : "call_get_command_history",
+              "name" : "get_command_history"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_last_command",
+    "markdownDescription" : "Viewing the last command you ran in this session",
+    "name" : "getLastCommand",
+    "permissionCategory" : "View Contents",
+    "remoteCommand" : {
+      "content" : {
+        "getLastCommand" : {
+          "_0" : {
+
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{}",
+              "id" : "call_get_last_command",
+              "name" : "get_last_command"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_command_before_cursor",
+    "markdownDescription" : "Reading your current command prompt",
+    "name" : "getCommandBeforeCursor",
+    "permissionCategory" : "View Contents",
+    "remoteCommand" : {
+      "content" : {
+        "getCommandBeforeCursor" : {
+          "_0" : {
+
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{}",
+              "id" : "call_get_command_before_cursor",
+              "name" : "get_command_before_cursor"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "search_command_history",
+    "markdownDescription" : "Searching the history of commands you have run in this session",
+    "name" : "searchCommandHistory",
+    "permissionCategory" : "View Contents",
+    "remoteCommand" : {
+      "content" : {
+        "searchCommandHistory" : {
+          "_0" : {
+            "query" : ""
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"query\":\"\"}",
+              "id" : "call_search_command_history",
+              "name" : "search_command_history"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_command_output",
+    "markdownDescription" : "Fetching the output of a previously run command",
+    "name" : "getCommandOutput",
+    "permissionCategory" : "View Contents",
+    "remoteCommand" : {
+      "content" : {
+        "getCommandOutput" : {
+          "_0" : {
+            "id" : ""
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"id\":\"\"}",
+              "id" : "call_get_command_output",
+              "name" : "get_command_output"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_screen_contents",
+    "markdownDescription" : "Reading the visible screen",
+    "name" : "getScreenContents",
+    "permissionCategory" : "View Contents",
+    "remoteCommand" : {
+      "content" : {
+        "getScreenContents" : {
+          "_0" : {
+            "lines" : 0
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"lines\":0}",
+              "id" : "call_get_screen_contents",
+              "name" : "get_screen_contents"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_terminal_size",
+    "markdownDescription" : "Querying the size of your terminal window",
+    "name" : "getTerminalSize",
+    "permissionCategory" : "Check Terminal State",
+    "remoteCommand" : {
+      "content" : {
+        "getTerminalSize" : {
+          "_0" : {
+
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{}",
+              "id" : "call_get_terminal_size",
+              "name" : "get_terminal_size"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_shell_type",
+    "markdownDescription" : "Determining which shell you use",
+    "name" : "getShellType",
+    "permissionCategory" : "Check Terminal State",
+    "remoteCommand" : {
+      "content" : {
+        "getShellType" : {
+          "_0" : {
+
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{}",
+              "id" : "call_get_shell_type",
+              "name" : "get_shell_type"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "detect_ssh_session",
+    "markdownDescription" : "Checking if you are using SSH",
+    "name" : "detectSSHSession",
+    "permissionCategory" : "Check Terminal State",
+    "remoteCommand" : {
+      "content" : {
+        "detectSSHSession" : {
+          "_0" : {
+
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{}",
+              "id" : "call_detect_ssh_session",
+              "name" : "detect_ssh_session"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_remote_hostname",
+    "markdownDescription" : "Getting the current host name of this terminal session",
+    "name" : "getRemoteHostname",
+    "permissionCategory" : "Check Terminal State",
+    "remoteCommand" : {
+      "content" : {
+        "getRemoteHostname" : {
+          "_0" : {
+
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{}",
+              "id" : "call_get_remote_hostname",
+              "name" : "get_remote_hostname"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_user_identity",
+    "markdownDescription" : "Checking your username",
+    "name" : "getUserIdentity",
+    "permissionCategory" : "Check Terminal State",
+    "remoteCommand" : {
+      "content" : {
+        "getUserIdentity" : {
+          "_0" : {
+
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{}",
+              "id" : "call_get_user_identity",
+              "name" : "get_user_identity"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_current_directory",
+    "markdownDescription" : "Discovering your current directory",
+    "name" : "getCurrentDirectory",
+    "permissionCategory" : "Check Terminal State",
+    "remoteCommand" : {
+      "content" : {
+        "getCurrentDirectory" : {
+          "_0" : {
+
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{}",
+              "id" : "call_get_current_directory",
+              "name" : "get_current_directory"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "set_clipboard",
+    "markdownDescription" : "Pasting to the clipboard",
+    "name" : "setClipboard",
+    "permissionCategory" : "Write to the Clipboard",
+    "remoteCommand" : {
+      "content" : {
+        "setClipboard" : {
+          "_0" : {
+            "text" : ""
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"text\":\"\"}",
+              "id" : "call_set_clipboard",
+              "name" : "set_clipboard"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "insert_text_at_cursor",
+    "markdownDescription" : "Typing `` into the current session",
+    "name" : "insertTextAtCursor",
+    "permissionCategory" : "Control Terminal",
+    "remoteCommand" : {
+      "content" : {
+        "insertTextAtCursor" : {
+          "_0" : {
+            "text" : ""
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"text\":\"\"}",
+              "id" : "call_insert_text_at_cursor",
+              "name" : "insert_text_at_cursor"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "delete_current_line",
+    "markdownDescription" : "Erasing the current command line",
+    "name" : "deleteCurrentLine",
+    "permissionCategory" : "Control Terminal",
+    "remoteCommand" : {
+      "content" : {
+        "deleteCurrentLine" : {
+          "_0" : {
+
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{}",
+              "id" : "call_delete_current_line",
+              "name" : "delete_current_line"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_man_page",
+    "markdownDescription" : "Checking the manpage for ``",
+    "name" : "getManPage",
+    "permissionCategory" : "View Manpages",
+    "remoteCommand" : {
+      "content" : {
+        "getManPage" : {
+          "_0" : {
+            "cmd" : ""
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"cmd\":\"\"}",
+              "id" : "call_get_man_page",
+              "name" : "get_man_page"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "create_file",
+    "markdownDescription" : "Creating ",
+    "name" : "createFile",
+    "permissionCategory" : "Write to the File System",
+    "remoteCommand" : {
+      "content" : {
+        "createFile" : {
+          "_0" : {
+            "content" : "",
+            "filename" : ""
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"content\":\"\",\"filename\":\"\"}",
+              "id" : "call_create_file",
+              "name" : "create_file"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "find_on_page",
+    "markdownDescription" : "Search in browser for ",
+    "name" : "searchBrowser",
+    "permissionCategory" : "Act in Web Browser",
+    "remoteCommand" : {
+      "content" : {
+        "searchBrowser" : {
+          "_0" : {
+            "query" : ""
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"query\":\"\"}",
+              "id" : "call_find_on_page",
+              "name" : "find_on_page"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "load_url",
+    "markdownDescription" : "Navigate to ",
+    "name" : "loadURL",
+    "permissionCategory" : "Act in Web Browser",
+    "remoteCommand" : {
+      "content" : {
+        "loadURL" : {
+          "_0" : {
+            "url" : ""
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"url\":\"\"}",
+              "id" : "call_load_url",
+              "name" : "load_url"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "web_search_in_browser",
+    "markdownDescription" : "Search the web for “”",
+    "name" : "webSearch",
+    "permissionCategory" : "Act in Web Browser",
+    "remoteCommand" : {
+      "content" : {
+        "webSearch" : {
+          "_0" : {
+            "query" : ""
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"query\":\"\"}",
+              "id" : "call_web_search_in_browser",
+              "name" : "web_search_in_browser"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_current_url",
+    "markdownDescription" : "Get the current URL",
+    "name" : "getURL",
+    "permissionCategory" : "Act in Web Browser",
+    "remoteCommand" : {
+      "content" : {
+        "getURL" : {
+          "_0" : {
+
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{}",
+              "id" : "call_get_current_url",
+              "name" : "get_current_url"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "read_web_page_section",
+    "markdownDescription" : "View the current web page",
+    "name" : "readWebPage",
+    "permissionCategory" : "Act in Web Browser",
+    "remoteCommand" : {
+      "content" : {
+        "readWebPage" : {
+          "_0" : {
+            "numberOfLines" : 0,
+            "startingLineNumber" : 0
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"numberOfLines\":0,\"startingLineNumber\":0}",
+              "id" : "call_read_web_page_section",
+              "name" : "read_web_page_section"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "restart_session",
+    "markdownDescription" : "Restarting this session",
+    "name" : "restartSession",
+    "permissionCategory" : "Control Terminal",
+    "remoteCommand" : {
+      "content" : {
+        "restartSession" : {
+          "_0" : {
+
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{}",
+              "id" : "call_restart_session",
+              "name" : "restart_session"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "execute_command",
+    "markdownDescription" : "Executing `make -j8 test TESTS=widget_resiz`",
+    "name" : "executeCommand-exactly-32-characters",
+    "permissionCategory" : "Run Commands",
+    "remoteCommand" : {
+      "content" : {
+        "executeCommand" : {
+          "_0" : {
+            "command" : "make -j8 test TESTS=widget_resiz"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"command\":\"make -j8 test TESTS=widget_resiz\"}",
+              "id" : "call_execute_command",
+              "name" : "execute_command"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "insert_text_at_cursor",
+    "markdownDescription" : "Typing `make -j8 test TESTS=widget_resiz` into the current session",
+    "name" : "insertTextAtCursor-exactly-32-characters",
+    "permissionCategory" : "Control Terminal",
+    "remoteCommand" : {
+      "content" : {
+        "insertTextAtCursor" : {
+          "_0" : {
+            "text" : "make -j8 test TESTS=widget_resiz"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"text\":\"make -j8 test TESTS=widget_resiz\"}",
+              "id" : "call_insert_text_at_cursor",
+              "name" : "insert_text_at_cursor"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_man_page",
+    "markdownDescription" : "Checking the manpage for `make -j8 test TESTS=widget_resiz`",
+    "name" : "getManPage-exactly-32-characters",
+    "permissionCategory" : "View Manpages",
+    "remoteCommand" : {
+      "content" : {
+        "getManPage" : {
+          "_0" : {
+            "cmd" : "make -j8 test TESTS=widget_resiz"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"cmd\":\"make -j8 test TESTS=widget_resiz\"}",
+              "id" : "call_get_man_page",
+              "name" : "get_man_page"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "execute_command",
+    "markdownDescription" : "Executing `make -j8 test TESTS=widget_resi…`",
+    "name" : "executeCommand-exactly-33-characters",
+    "permissionCategory" : "Run Commands",
+    "remoteCommand" : {
+      "content" : {
+        "executeCommand" : {
+          "_0" : {
+            "command" : "make -j8 test TESTS=widget_resize"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"command\":\"make -j8 test TESTS=widget_resize\"}",
+              "id" : "call_execute_command",
+              "name" : "execute_command"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "insert_text_at_cursor",
+    "markdownDescription" : "Typing `make -j8 test TESTS=widget_resi…` into the current session",
+    "name" : "insertTextAtCursor-exactly-33-characters",
+    "permissionCategory" : "Control Terminal",
+    "remoteCommand" : {
+      "content" : {
+        "insertTextAtCursor" : {
+          "_0" : {
+            "text" : "make -j8 test TESTS=widget_resize"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"text\":\"make -j8 test TESTS=widget_resize\"}",
+              "id" : "call_insert_text_at_cursor",
+              "name" : "insert_text_at_cursor"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_man_page",
+    "markdownDescription" : "Checking the manpage for `make -j8 test TESTS=widget_resi…`",
+    "name" : "getManPage-exactly-33-characters",
+    "permissionCategory" : "View Manpages",
+    "remoteCommand" : {
+      "content" : {
+        "getManPage" : {
+          "_0" : {
+            "cmd" : "make -j8 test TESTS=widget_resize"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"cmd\":\"make -j8 test TESTS=widget_resize\"}",
+              "id" : "call_get_man_page",
+              "name" : "get_man_page"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "execute_command",
+    "markdownDescription" : "Executing `echo \\`date\\` and \\`whoami\\``",
+    "name" : "executeCommand-backticks",
+    "permissionCategory" : "Run Commands",
+    "remoteCommand" : {
+      "content" : {
+        "executeCommand" : {
+          "_0" : {
+            "command" : "echo `date` and `whoami`"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"command\":\"echo `date` and `whoami`\"}",
+              "id" : "call_execute_command",
+              "name" : "execute_command"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "insert_text_at_cursor",
+    "markdownDescription" : "Typing `echo \\`date\\` and \\`whoami\\`` into the current session",
+    "name" : "insertTextAtCursor-backticks",
+    "permissionCategory" : "Control Terminal",
+    "remoteCommand" : {
+      "content" : {
+        "insertTextAtCursor" : {
+          "_0" : {
+            "text" : "echo `date` and `whoami`"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"text\":\"echo `date` and `whoami`\"}",
+              "id" : "call_insert_text_at_cursor",
+              "name" : "insert_text_at_cursor"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_man_page",
+    "markdownDescription" : "Checking the manpage for `echo \\`date\\` and \\`whoami\\``",
+    "name" : "getManPage-backticks",
+    "permissionCategory" : "View Manpages",
+    "remoteCommand" : {
+      "content" : {
+        "getManPage" : {
+          "_0" : {
+            "cmd" : "echo `date` and `whoami`"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"cmd\":\"echo `date` and `whoami`\"}",
+              "id" : "call_get_man_page",
+              "name" : "get_man_page"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "execute_command",
+    "markdownDescription" : "Executing `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\…`",
+    "name" : "executeCommand-backtick-at-the-cut",
+    "permissionCategory" : "Run Commands",
+    "remoteCommand" : {
+      "content" : {
+        "executeCommand" : {
+          "_0" : {
+            "command" : "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`b`"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"command\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`b`\"}",
+              "id" : "call_execute_command",
+              "name" : "execute_command"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "insert_text_at_cursor",
+    "markdownDescription" : "Typing `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\…` into the current session",
+    "name" : "insertTextAtCursor-backtick-at-the-cut",
+    "permissionCategory" : "Control Terminal",
+    "remoteCommand" : {
+      "content" : {
+        "insertTextAtCursor" : {
+          "_0" : {
+            "text" : "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`b`"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"text\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`b`\"}",
+              "id" : "call_insert_text_at_cursor",
+              "name" : "insert_text_at_cursor"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_man_page",
+    "markdownDescription" : "Checking the manpage for `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\…`",
+    "name" : "getManPage-backtick-at-the-cut",
+    "permissionCategory" : "View Manpages",
+    "remoteCommand" : {
+      "content" : {
+        "getManPage" : {
+          "_0" : {
+            "cmd" : "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`b`"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"cmd\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`b`\"}",
+              "id" : "call_get_man_page",
+              "name" : "get_man_page"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "execute_command",
+    "markdownDescription" : "Executing `make -j8 test TESTS=widget_resi👨‍👩‍👧`",
+    "name" : "executeCommand-emoji-at-character-32",
+    "permissionCategory" : "Run Commands",
+    "remoteCommand" : {
+      "content" : {
+        "executeCommand" : {
+          "_0" : {
+            "command" : "make -j8 test TESTS=widget_resi👨‍👩‍👧"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"command\":\"make -j8 test TESTS=widget_resi👨‍👩‍👧\"}",
+              "id" : "call_execute_command",
+              "name" : "execute_command"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "insert_text_at_cursor",
+    "markdownDescription" : "Typing `make -j8 test TESTS=widget_resi👨‍👩‍👧` into the current session",
+    "name" : "insertTextAtCursor-emoji-at-character-32",
+    "permissionCategory" : "Control Terminal",
+    "remoteCommand" : {
+      "content" : {
+        "insertTextAtCursor" : {
+          "_0" : {
+            "text" : "make -j8 test TESTS=widget_resi👨‍👩‍👧"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"text\":\"make -j8 test TESTS=widget_resi👨‍👩‍👧\"}",
+              "id" : "call_insert_text_at_cursor",
+              "name" : "insert_text_at_cursor"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_man_page",
+    "markdownDescription" : "Checking the manpage for `make -j8 test TESTS=widget_resi👨‍👩‍👧`",
+    "name" : "getManPage-emoji-at-character-32",
+    "permissionCategory" : "View Manpages",
+    "remoteCommand" : {
+      "content" : {
+        "getManPage" : {
+          "_0" : {
+            "cmd" : "make -j8 test TESTS=widget_resi👨‍👩‍👧"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"cmd\":\"make -j8 test TESTS=widget_resi👨‍👩‍👧\"}",
+              "id" : "call_get_man_page",
+              "name" : "get_man_page"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "execute_command",
+    "markdownDescription" : "Executing `make -j8 test TESTS=widget_resi…`",
+    "name" : "executeCommand-emoji-cut-at-character-32",
+    "permissionCategory" : "Run Commands",
+    "remoteCommand" : {
+      "content" : {
+        "executeCommand" : {
+          "_0" : {
+            "command" : "make -j8 test TESTS=widget_resi👨‍👩‍👧!"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"command\":\"make -j8 test TESTS=widget_resi👨‍👩‍👧!\"}",
+              "id" : "call_execute_command",
+              "name" : "execute_command"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "insert_text_at_cursor",
+    "markdownDescription" : "Typing `make -j8 test TESTS=widget_resi…` into the current session",
+    "name" : "insertTextAtCursor-emoji-cut-at-character-32",
+    "permissionCategory" : "Control Terminal",
+    "remoteCommand" : {
+      "content" : {
+        "insertTextAtCursor" : {
+          "_0" : {
+            "text" : "make -j8 test TESTS=widget_resi👨‍👩‍👧!"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"text\":\"make -j8 test TESTS=widget_resi👨‍👩‍👧!\"}",
+              "id" : "call_insert_text_at_cursor",
+              "name" : "insert_text_at_cursor"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_man_page",
+    "markdownDescription" : "Checking the manpage for `make -j8 test TESTS=widget_resi…`",
+    "name" : "getManPage-emoji-cut-at-character-32",
+    "permissionCategory" : "View Manpages",
+    "remoteCommand" : {
+      "content" : {
+        "getManPage" : {
+          "_0" : {
+            "cmd" : "make -j8 test TESTS=widget_resi👨‍👩‍👧!"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"cmd\":\"make -j8 test TESTS=widget_resi👨‍👩‍👧!\"}",
+              "id" : "call_get_man_page",
+              "name" : "get_man_page"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "create_file",
+    "markdownDescription" : "Creating notes/widget.md",
+    "name" : "createFile-named",
+    "permissionCategory" : "Write to the File System",
+    "remoteCommand" : {
+      "content" : {
+        "createFile" : {
+          "_0" : {
+            "content" : "# Widget\n",
+            "filename" : "notes/widget.md"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"content\":\"# Widget\\n\",\"filename\":\"notes/widget.md\"}",
+              "id" : "call_create_file",
+              "name" : "create_file"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "find_on_page",
+    "markdownDescription" : "Search in browser for resize event",
+    "name" : "searchBrowser-query",
+    "permissionCategory" : "Act in Web Browser",
+    "remoteCommand" : {
+      "content" : {
+        "searchBrowser" : {
+          "_0" : {
+            "query" : "resize event"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"query\":\"resize event\"}",
+              "id" : "call_find_on_page",
+              "name" : "find_on_page"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "load_url",
+    "markdownDescription" : "Navigate to https://iterm2.com/documentation.html",
+    "name" : "loadURL-https",
+    "permissionCategory" : "Act in Web Browser",
+    "remoteCommand" : {
+      "content" : {
+        "loadURL" : {
+          "_0" : {
+            "url" : "https://iterm2.com/documentation.html"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"url\":\"https://iterm2.com/documentation.html\"}",
+              "id" : "call_load_url",
+              "name" : "load_url"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "web_search_in_browser",
+    "markdownDescription" : "Search the web for “widget resize flake”",
+    "name" : "webSearch-query",
+    "permissionCategory" : "Act in Web Browser",
+    "remoteCommand" : {
+      "content" : {
+        "webSearch" : {
+          "_0" : {
+            "query" : "widget resize flake"
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"query\":\"widget resize flake\"}",
+              "id" : "call_web_search_in_browser",
+              "name" : "web_search_in_browser"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "get_command_history",
+    "markdownDescription" : "Reviewing the history of commands you have run in this session",
+    "name" : "getCommandHistory-limit",
+    "permissionCategory" : "View Contents",
+    "remoteCommand" : {
+      "content" : {
+        "getCommandHistory" : {
+          "_0" : {
+            "limit" : 20
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"limit\":20}",
+              "id" : "call_get_command_history",
+              "name" : "get_command_history"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  },
+  {
+    "functionName" : "read_web_page_section",
+    "markdownDescription" : "View the current web page",
+    "name" : "readWebPage-lines",
+    "permissionCategory" : "Act in Web Browser",
+    "remoteCommand" : {
+      "content" : {
+        "readWebPage" : {
+          "_0" : {
+            "numberOfLines" : 40,
+            "startingLineNumber" : 10
+          }
+        }
+      },
+      "llmMessage" : {
+        "body" : {
+          "functionCall" : {
+            "_0" : {
+              "arguments" : "{\"numberOfLines\":40,\"startingLineNumber\":10}",
+              "id" : "call_read_web_page_section",
+              "name" : "read_web_page_section"
+            }
+          }
+        },
+        "role" : "assistant"
+      }
+    }
+  }
+]

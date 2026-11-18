@@ -1,0 +1,178 @@
+[
+  {
+    "displayString" : "Searching the web…",
+    "name" : "web-search-started",
+    "statusUpdate" : {
+      "webSearchStarted" : {
+
+      }
+    }
+  },
+  {
+    "displayString" : "Finished searching the web for widget resize flake.",
+    "name" : "web-search-finished-with-query",
+    "statusUpdate" : {
+      "webSearchFinished" : {
+        "_0" : "widget resize flake"
+      }
+    }
+  },
+  {
+    "displayString" : "Finished searching the web.",
+    "name" : "web-search-finished-without-query",
+    "statusUpdate" : {
+      "webSearchFinished" : {
+
+      }
+    }
+  },
+  {
+    "displayString" : "Executing code…",
+    "name" : "code-interpreter-started",
+    "statusUpdate" : {
+      "codeInterpreterStarted" : {
+
+      }
+    }
+  },
+  {
+    "displayString" : "Finished executing code",
+    "name" : "code-interpreter-finished",
+    "statusUpdate" : {
+      "codeInterpreterFinished" : {
+
+      }
+    }
+  },
+  {
+    "displayString" : "Comparing the two runs.",
+    "name" : "reasoning-summary",
+    "statusUpdate" : {
+      "reasoningSummaryUpdate" : {
+        "_0" : "Comparing the two runs."
+      }
+    }
+  },
+  {
+    "displayString" : "Searching the web…\nExecuting code…",
+    "name" : "multipart-of-short-updates-keeps-all",
+    "statusUpdate" : {
+      "multipart" : {
+        "_0" : [
+          {
+            "webSearchStarted" : {
+
+            }
+          },
+          {
+            "codeInterpreterStarted" : {
+
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "displayString" : "Finished searching the web for flake.\nExecuting code…",
+    "name" : "multipart-keeps-from-last-long-update",
+    "statusUpdate" : {
+      "multipart" : {
+        "_0" : [
+          {
+            "reasoningSummaryUpdate" : {
+              "_0" : "First thought."
+            }
+          },
+          {
+            "webSearchStarted" : {
+
+            }
+          },
+          {
+            "webSearchFinished" : {
+              "_0" : "flake"
+            }
+          },
+          {
+            "codeInterpreterStarted" : {
+
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "displayString" : "New.\nSearching the web…",
+    "name" : "multipart-last-reasoning-wins",
+    "statusUpdate" : {
+      "multipart" : {
+        "_0" : [
+          {
+            "reasoningSummaryUpdate" : {
+              "_0" : "Old."
+            }
+          },
+          {
+            "codeInterpreterFinished" : {
+
+            }
+          },
+          {
+            "reasoningSummaryUpdate" : {
+              "_0" : "New."
+            }
+          },
+          {
+            "webSearchStarted" : {
+
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "displayString" : "Finished searching the web.\nExecuting code…",
+    "name" : "nested-multipart-is-flattened",
+    "statusUpdate" : {
+      "multipart" : {
+        "_0" : [
+          {
+            "multipart" : {
+              "_0" : [
+                {
+                  "webSearchStarted" : {
+
+                  }
+                },
+                {
+                  "webSearchFinished" : {
+
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "codeInterpreterStarted" : {
+
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "displayString" : "",
+    "name" : "empty-multipart",
+    "statusUpdate" : {
+      "multipart" : {
+        "_0" : [
+
+        ]
+      }
+    }
+  }
+]

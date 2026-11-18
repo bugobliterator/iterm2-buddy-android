@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: Optional(13), payload: WireFixtures.CompanionClientMessage.resolveMentions(identifiers: [\"ptys_8M3B5X1QJ7TW1\", \"session:1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E\", \"wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F\", \"F0E1D2C3-B4A5-4968-8776-A5B4C3D2E1F0\"]))",
+  "json" : {"payload":{"resolveMentions":{"identifiers":["ptys_8M3B5X1QJ7TW1","session:1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E","wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F","F0E1D2C3-B4A5-4968-8776-A5B4C3D2E1F0"]}},"requestID":13}
+}

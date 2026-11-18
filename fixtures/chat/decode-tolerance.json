@@ -1,0 +1,264 @@
+[
+  {
+    "json" : "{\"payload\":{\"delivery\":{\"chatID\":\"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E\",\"message\":{\"author\":\"agent\",\"chatID\":\"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E\",\"content\":{\"voiceNote\":{\"_0\":\"Running the tests\"}},\"sentDate\":1795000501000,\"uniqueID\":\"11111111-2222-4333-8444-000000000501\"},\"partial\":false}}}",
+    "name" : "delivery-future-content-case",
+    "upstream" : "decodes",
+    "upstreamValue" : {
+      "payload" : {
+        "delivery" : {
+          "chatID" : "6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E",
+          "message" : {
+            "author" : "agent",
+            "chatID" : "6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E",
+            "content" : {
+              "unsupported" : {
+
+              }
+            },
+            "sentDate" : 1795000501000,
+            "uniqueID" : "11111111-2222-4333-8444-000000000501"
+          },
+          "partial" : false
+        }
+      }
+    }
+  },
+  {
+    "json" : "{\"payload\":{\"delivery\":{\"chatID\":\"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E\",\"message\":{\"author\":\"agent\",\"chatID\":\"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E\",\"content\":{\"clientLocal\":{\"_0\":{\"action\":{\"shareScreen\":{\"_0\":\"Linked this chat to zsh.\"}}}}},\"sentDate\":1795000510000,\"uniqueID\":\"11111111-2222-4333-8444-000000000510\"},\"partial\":false}}}",
+    "name" : "delivery-future-client-local-action",
+    "upstream" : "decodes",
+    "upstreamValue" : {
+      "payload" : {
+        "delivery" : {
+          "chatID" : "9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E",
+          "message" : {
+            "author" : "agent",
+            "chatID" : "9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E",
+            "content" : {
+              "unsupported" : {
+
+              }
+            },
+            "sentDate" : 1795000510000,
+            "uniqueID" : "11111111-2222-4333-8444-000000000510"
+          },
+          "partial" : false
+        }
+      }
+    }
+  },
+  {
+    "json" : "{\"payload\":{\"turnLifecycle\":{\"chatID\":\"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E\",\"event\":\"paused\"}}}",
+    "name" : "turn-lifecycle-future-event",
+    "upstream" : "decodes",
+    "upstreamValue" : {
+      "payload" : {
+        "turnLifecycle" : {
+          "chatID" : "6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E",
+          "event" : "unknownFuture"
+        }
+      }
+    }
+  },
+  {
+    "json" : "{\"payload\":{\"chatsAndSessions\":{\"chats\":[{\"chat\":{\"claimedScopes\":[\"wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F\",\"session:ptys_8M3B5X1QJ7TW1\"],\"creationDate\":1794960000000,\"icon\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAADUlEQVR4AQECAP3\\/AAAAAgABfgUN0gAAAABJRU5ErkJggg==\",\"id\":\"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E\",\"lastModifiedDate\":1795000400000,\"modelName\":\"example-model\",\"orchestrationEnabled\":true,\"permissions\":\"\",\"title\":\"Widget release checklist\",\"watchers\":[{\"mode\":\"tabStatus\",\"notifyUser\":true,\"registeredAt\":1795000100000,\"roleID\":\"implementer\",\"roleName\":\"Implementer\",\"sessionGUID\":\"ptys_7K2M9Q4R8T1VH\",\"targetState\":\"idle\",\"watcherID\":\"watch-tests-idle\",\"workgroupID\":\"wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F\",\"workgroupName\":\"Widget Review\"}]},\"snippet\":\"All three tests pass now.\"},{\"chat\":{\"claimedScopes\":[],\"creationDate\":1794960060000,\"id\":\"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E\",\"lastModifiedDate\":1795000300000,\"modelName\":\"example-model\",\"orchestrationEnabled\":false,\"permissions\":\"\",\"terminalSessionGuid\":\"C3D4E5F6-0718-4293-A4B5-C6D7E8F90A1B\",\"title\":\"Fix flaky widget test\",\"watchers\":[]},\"snippet\":\"The flaky test is widget_resize_test: it reads the window size before the resize notification lands, so on a slow runner it sees the old 80 columns. I moved the assertion after the notification and a…\"},{\"chat\":{\"claimedScopes\":[],\"creationDate\":1794960120000,\"id\":\"D4E5F6A7-B8C9-4DAE-8F01-23456789ABCD\",\"lastModifiedDate\":1794960120000,\"modelName\":\"example-model\",\"orchestrationEnabled\":false,\"permissions\":\"\",\"terminalSessionGuid\":\"ptys_1F5Y7R3MQ9KD4\",\"title\":\"New Chat\",\"watchers\":[]}}],\"sessions\":[{\"guid\":\"ptys_7K2M9Q4R8T1VH\",\"isBrowser\":false,\"name\":\"zsh\",\"subtitle\":\"~\\/src\\/widget\"},{\"guid\":\"ptys_3HX6W0ZD5N2BT\",\"isBrowser\":false,\"name\":\"Code Review\",\"subtitle\":\"reviewing widget.c\"},{\"guid\":\"ptys_9PJ4C8EGA6S0J\",\"isBrowser\":false,\"name\":\"tail\",\"subtitle\":\"tail -f build.log\"},{\"guid\":\"ptys_1F5Y7R3MQ9KD4\",\"isBrowser\":false,\"name\":\"claude\",\"subtitle\":\"planning\"},{\"guid\":\"ptys_6V0T2B8NW4HEQ\",\"isBrowser\":false,\"name\":\"claude\",\"subtitle\":\"\"},{\"guid\":\"ptys_8M3B5X1QJ7TW1\",\"isBrowser\":false,\"name\":\"vim\",\"subtitle\":\"notes.md\"},{\"guid\":\"ptys_4Q8S1D6KZ3MAC\",\"isBrowser\":true,\"name\":\"Widget Docs\",\"subtitle\":\"\"}]}},\"requestID\":9}",
+    "name" : "chats-and-sessions-without-muted",
+    "upstream" : "decodes",
+    "upstreamValue" : {
+      "payload" : {
+        "chatsAndSessions" : {
+          "chats" : [
+            {
+              "chat" : {
+                "claimedScopes" : [
+                  "wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F",
+                  "session:ptys_8M3B5X1QJ7TW1"
+                ],
+                "creationDate" : 1794960000000,
+                "icon" : "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAADUlEQVR4AQECAP3/AAAAAgABfgUN0gAAAABJRU5ErkJggg==",
+                "id" : "6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E",
+                "lastModifiedDate" : 1795000400000,
+                "modelName" : "example-model",
+                "orchestrationEnabled" : true,
+                "permissions" : "",
+                "title" : "Widget release checklist",
+                "watchers" : [
+                  {
+                    "mode" : "tabStatus",
+                    "notifyUser" : true,
+                    "registeredAt" : 1795000100000,
+                    "roleID" : "implementer",
+                    "roleName" : "Implementer",
+                    "sessionGUID" : "ptys_7K2M9Q4R8T1VH",
+                    "targetState" : "idle",
+                    "watcherID" : "watch-tests-idle",
+                    "workgroupID" : "wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F",
+                    "workgroupName" : "Widget Review"
+                  }
+                ]
+              },
+              "snippet" : "All three tests pass now."
+            },
+            {
+              "chat" : {
+                "claimedScopes" : [
+
+                ],
+                "creationDate" : 1794960060000,
+                "id" : "9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E",
+                "lastModifiedDate" : 1795000300000,
+                "modelName" : "example-model",
+                "orchestrationEnabled" : false,
+                "permissions" : "",
+                "terminalSessionGuid" : "C3D4E5F6-0718-4293-A4B5-C6D7E8F90A1B",
+                "title" : "Fix flaky widget test",
+                "watchers" : [
+
+                ]
+              },
+              "snippet" : "The flaky test is widget_resize_test: it reads the window size before the resize notification lands, so on a slow runner it sees the old 80 columns. I moved the assertion after the notification and a…"
+            },
+            {
+              "chat" : {
+                "claimedScopes" : [
+
+                ],
+                "creationDate" : 1794960120000,
+                "id" : "D4E5F6A7-B8C9-4DAE-8F01-23456789ABCD",
+                "lastModifiedDate" : 1794960120000,
+                "modelName" : "example-model",
+                "orchestrationEnabled" : false,
+                "permissions" : "",
+                "terminalSessionGuid" : "ptys_1F5Y7R3MQ9KD4",
+                "title" : "New Chat",
+                "watchers" : [
+
+                ]
+              }
+            }
+          ],
+          "sessions" : [
+            {
+              "guid" : "ptys_7K2M9Q4R8T1VH",
+              "isBrowser" : false,
+              "name" : "zsh",
+              "subtitle" : "~/src/widget"
+            },
+            {
+              "guid" : "ptys_3HX6W0ZD5N2BT",
+              "isBrowser" : false,
+              "name" : "Code Review",
+              "subtitle" : "reviewing widget.c"
+            },
+            {
+              "guid" : "ptys_9PJ4C8EGA6S0J",
+              "isBrowser" : false,
+              "name" : "tail",
+              "subtitle" : "tail -f build.log"
+            },
+            {
+              "guid" : "ptys_1F5Y7R3MQ9KD4",
+              "isBrowser" : false,
+              "name" : "claude",
+              "subtitle" : "planning"
+            },
+            {
+              "guid" : "ptys_6V0T2B8NW4HEQ",
+              "isBrowser" : false,
+              "name" : "claude",
+              "subtitle" : ""
+            },
+            {
+              "guid" : "ptys_8M3B5X1QJ7TW1",
+              "isBrowser" : false,
+              "name" : "vim",
+              "subtitle" : "notes.md"
+            },
+            {
+              "guid" : "ptys_4Q8S1D6KZ3MAC",
+              "isBrowser" : true,
+              "name" : "Widget Docs",
+              "subtitle" : ""
+            }
+          ]
+        }
+      },
+      "requestID" : 9
+    }
+  },
+  {
+    "android" : "aiAvailable reads as true",
+    "json" : "{\"payload\":{\"hello\":{\"minimumPeer\":11,\"revision\":12,\"wantsNotificationPermission\":false}},\"requestID\":1}",
+    "name" : "hello-without-ai-available",
+    "upstream" : "decodes",
+    "upstreamValue" : {
+      "payload" : {
+        "hello" : {
+          "minimumPeer" : 11,
+          "revision" : 12,
+          "wantsNotificationPermission" : false
+        }
+      },
+      "requestID" : 1
+    }
+  },
+  {
+    "android" : "the member's state reads as UNKNOWN",
+    "json" : "{\"payload\":{\"workgroupInfo\":{\"_0\":{\"members\":[{\"roleName\":\"Implementer\",\"sessionGuid\":\"ptys_7K2M9Q4R8T1VH\",\"sessionName\":\"zsh\",\"state\":\"sleeping\"},{\"detailText\":\"widget.c, 3 of 7 hunks\",\"roleName\":\"Code Review\",\"sessionGuid\":\"ptys_3HX6W0ZD5N2BT\",\"sessionName\":\"Code Review\",\"state\":\"working\",\"statusText\":\"Reviewing\"},{\"roleName\":\"Planner\",\"sessionGuid\":\"ptys_1F5Y7R3MQ9KD4\",\"sessionName\":\"claude\",\"state\":\"waiting\",\"statusText\":\"Needs input\"},{\"roleName\":\"Tester\",\"sessionGuid\":\"ptys_6V0T2B8NW4HEQ\",\"sessionName\":\"claude\",\"state\":\"unknown\"},{\"roleName\":\"docs-writer\",\"state\":\"unknown\"}],\"name\":\"Widget Review\",\"workgroupID\":\"wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F\"}}},\"requestID\":14}",
+    "name" : "workgroup-info-future-state",
+    "upstream" : "rejects",
+    "upstreamError" : "dataCorrupted at payload.workgroupInfo._0.members[0].state"
+  },
+  {
+    "android" : "the frame is kept; the second message's content is Unreadable",
+    "json" : "{\"payload\":{\"history\":{\"chatID\":\"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E\",\"maxSeq\":2,\"messages\":[{\"author\":\"agent\",\"chatID\":\"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E\",\"content\":{\"markdown\":{\"_0\":\"First reply\"}},\"sentDate\":1795000700000,\"uniqueID\":\"11111111-2222-4333-8444-000000000700\"},{\"author\":\"agent\",\"chatID\":\"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E\",\"content\":{\"markdown\":{\"_0\":42}},\"sentDate\":1795000701000,\"uniqueID\":\"11111111-2222-4333-8444-000000000701\"}]}},\"requestID\":12}",
+    "name" : "history-with-corrupt-markdown-body",
+    "upstream" : "rejects",
+    "upstreamError" : "typeMismatch at payload.history.messages[1].content.markdown._0"
+  },
+  {
+    "json" : "{\"payload\":{\"history\":{\"chatID\":\"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E\",\"maxSeq\":2,\"messages\":[{\"author\":\"agent\",\"chatID\":\"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E\",\"content\":{\"markdown\":{\"_0\":\"First reply\"}},\"sentDate\":1795000700000,\"uniqueID\":\"11111111-2222-4333-8444-000000000700\"},{\"author\":\"agent\",\"chatID\":\"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E\",\"content\":{\"voiceNote\":{\"_0\":\"Second reply\"}},\"sentDate\":1795000701000,\"uniqueID\":\"11111111-2222-4333-8444-000000000701\"}]}},\"requestID\":12}",
+    "name" : "history-with-future-content-case",
+    "upstream" : "decodes",
+    "upstreamValue" : {
+      "payload" : {
+        "history" : {
+          "chatID" : "9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E",
+          "maxSeq" : 2,
+          "messages" : [
+            {
+              "author" : "agent",
+              "chatID" : "9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E",
+              "content" : {
+                "markdown" : {
+                  "_0" : "First reply"
+                }
+              },
+              "sentDate" : 1795000700000,
+              "uniqueID" : "11111111-2222-4333-8444-000000000700"
+            },
+            {
+              "author" : "agent",
+              "chatID" : "9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E",
+              "content" : {
+                "unsupported" : {
+
+                }
+              },
+              "sentDate" : 1795000701000,
+              "uniqueID" : "11111111-2222-4333-8444-000000000701"
+            }
+          ]
+        }
+      },
+      "requestID" : 12
+    }
+  },
+  {
+    "android" : "the message is kept; its content is Unreadable",
+    "json" : "{\"payload\":{\"delivery\":{\"chatID\":\"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E\",\"message\":{\"author\":\"agent\",\"chatID\":\"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E\",\"content\":{\"remoteCommandRequest\":{\"_0\":{\"content\":{\"openPullRequest\":{\"_0\":{\"command\":\"make test\"}}},\"llmMessage\":{\"body\":{\"functionCall\":{\"_0\":{\"arguments\":\"{\\\"command\\\":\\\"make test\\\"}\",\"id\":\"call_execute_make_test\",\"name\":\"execute_command\"}}},\"role\":\"assistant\"}},\"safe\":false}},\"sentDate\":1795000505000,\"uniqueID\":\"11111111-2222-4333-8444-000000000505\"},\"partial\":false}}}",
+    "name" : "delivery-remote-command-future-tool",
+    "upstream" : "rejects",
+    "upstreamError" : "typeMismatch at payload.delivery.message.content.remoteCommandRequest._0.content"
+  }
+]

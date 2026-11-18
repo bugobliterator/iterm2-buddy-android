@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: Optional(12), payload: WireFixtures.CompanionHostMessage.error(CompanionProtocol.CompanionError(code: CompanionProtocol.CompanionError.Code.aiUnavailable, message: \"AI features are turned off on the paired Mac.\")))",
+  "json" : {"payload":{"error":{"_0":{"code":"aiUnavailable","message":"AI features are turned off on the paired Mac."}}},"requestID":12}
+}

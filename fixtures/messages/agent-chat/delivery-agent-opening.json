@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.delivery(message: WireFixtures.Message(chatID: \"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E\", author: WireFixtures.Participant.agent, content: WireFixtures.Message.Content.markdown(\"Running the tests\"), sentDate: 2026-11-18 11:15:01 +0000, uniqueID: 11111111-2222-4333-8444-000000000501, inResponseTo: nil, responseID: nil, agentReasoning: nil, firstBlobRef: nil, configuration: nil), chatID: \"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E\", partial: false))",
+  "json" : {"payload":{"delivery":{"chatID":"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E","message":{"author":"agent","chatID":"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E","content":{"markdown":{"_0":"Running the tests"}},"sentDate":1795000501000,"uniqueID":"11111111-2222-4333-8444-000000000501"},"partial":false}}}
+}

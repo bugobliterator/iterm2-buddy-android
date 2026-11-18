@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.delivery(message: WireFixtures.Message(chatID: \"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E\", author: WireFixtures.Participant.user, content: WireFixtures.Message.Content.plainText(\"Ask @ptys_3HX6W0ZD5N2BT to review src/widget.c\\nthen ship it 🚀 — naïve café\", context: nil), sentDate: 2026-11-18 11:15:00 +0000, uniqueID: 11111111-2222-4333-8444-000000000500, inResponseTo: nil, responseID: nil, agentReasoning: nil, firstBlobRef: nil, configuration: nil), chatID: \"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E\", partial: false))",
+  "json" : {"payload":{"delivery":{"chatID":"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E","message":{"author":"user","chatID":"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E","content":{"plainText":{"_0":"Ask @ptys_3HX6W0ZD5N2BT to review src\/widget.c\nthen ship it 🚀 — naïve café"}},"sentDate":1795000500000,"uniqueID":"11111111-2222-4333-8444-000000000500"},"partial":false}}}
+}

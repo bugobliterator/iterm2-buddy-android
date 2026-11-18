@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: nil, payload: WireFixtures.CompanionClientMessage.setChatMuted(chatID: \"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E\", muted: false))",
+  "json" : {"payload":{"setChatMuted":{"chatID":"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E","muted":false}}}
+}

@@ -1,0 +1,444 @@
+{
+  "cases" : [
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 4,
+          "prefix" : null,
+          "token" : "ptys_7K2M9Q4R8T1VH"
+        }
+      ],
+      "name" : "stable-id",
+      "text" : "Ask @ptys_7K2M9Q4R8T1VH to run the tests."
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E",
+          "length" : 37,
+          "location" : 4,
+          "prefix" : null,
+          "token" : "1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E"
+        }
+      ],
+      "name" : "legacy-uuid",
+      "text" : "Ask @1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E to run the tests."
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "session:1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E",
+          "length" : 45,
+          "location" : 6,
+          "prefix" : "session:",
+          "token" : "1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E"
+        }
+      ],
+      "name" : "session-prefix-uuid",
+      "text" : "Watch @session:1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E for me."
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "session:ptys_7K2M9Q4R8T1VH",
+          "length" : 27,
+          "location" : 6,
+          "prefix" : "session:",
+          "token" : "ptys_7K2M9Q4R8T1VH"
+        }
+      ],
+      "name" : "session-prefix-stable-id",
+      "text" : "Watch @session:ptys_7K2M9Q4R8T1VH for me."
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F",
+          "length" : 40,
+          "location" : 5,
+          "prefix" : "wg-",
+          "token" : "5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F"
+        }
+      ],
+      "name" : "workgroup",
+      "text" : "Tell @wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F to start."
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "session:ptys_7K2M9Q4R8T1VH",
+          "length" : 27,
+          "location" : 0,
+          "prefix" : "session:",
+          "token" : "ptys_7K2M9Q4R8T1VH"
+        },
+        {
+          "identifier" : "wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F",
+          "length" : 40,
+          "location" : 32,
+          "prefix" : "wg-",
+          "token" : "5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F"
+        }
+      ],
+      "name" : "uppercase-prefixes-are-lowercased",
+      "text" : "@SESSION:ptys_7K2M9Q4R8T1VH and @WG-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F"
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 4,
+          "prefix" : null,
+          "token" : "ptys_7K2M9Q4R8T1VH"
+        }
+      ],
+      "name" : "uppercase-stable-id-prefix",
+      "text" : "Ask @PTYS_7K2M9Q4R8T1VH now."
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 4,
+          "prefix" : null,
+          "token" : "ptys_7K2M9Q4R8T1VH"
+        }
+      ],
+      "name" : "lowercase-stable-id-is-folded",
+      "text" : "Ask @ptys_7k2m9q4r8t1vh now."
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+
+      ],
+      "name" : "crockford-confusable-l-for-one",
+      "text" : "Ask @ptys_7K2M9Q4R8TlVH now."
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+
+      ],
+      "name" : "crockford-confusable-o-for-zero",
+      "text" : "Ask @ptys_3HX6WOZD5N2BT now."
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "1d2c3b4a-5968-4776-a5b4-c3d2e1f00f1e",
+          "length" : 37,
+          "location" : 4,
+          "prefix" : null,
+          "token" : "1d2c3b4a-5968-4776-a5b4-c3d2e1f00f1e"
+        }
+      ],
+      "name" : "lowercase-uuid-is-verbatim",
+      "text" : "Ask @1d2c3b4a-5968-4776-a5b4-c3d2e1f00f1e now."
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1V0",
+          "length" : 19,
+          "location" : 4,
+          "prefix" : null,
+          "token" : "ptys_7K2M9Q4R8T1V0"
+        }
+      ],
+      "name" : "bad-check-character-with-at-sign",
+      "text" : "Ask @ptys_7K2M9Q4R8T1V0 now."
+    },
+    {
+      "atSignOptional" : true,
+      "mentions" : [
+
+      ],
+      "name" : "bad-check-character-bare",
+      "text" : "Ask ptys_7K2M9Q4R8T1V0 now."
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+
+      ],
+      "name" : "bare-stable-id-without-option",
+      "text" : "Ask ptys_7K2M9Q4R8T1VH to run the tests."
+    },
+    {
+      "atSignOptional" : true,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 18,
+          "location" : 4,
+          "prefix" : null,
+          "token" : "ptys_7K2M9Q4R8T1VH"
+        }
+      ],
+      "name" : "bare-stable-id-with-option",
+      "text" : "Ask ptys_7K2M9Q4R8T1VH to run the tests."
+    },
+    {
+      "atSignOptional" : true,
+      "mentions" : [
+
+      ],
+      "name" : "bare-uuid-is-never-a-mention",
+      "text" : "Session 1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E finished."
+    },
+    {
+      "atSignOptional" : true,
+      "mentions" : [
+
+      ],
+      "name" : "bare-session-prefix-needs-at-sign",
+      "text" : "Watch session:ptys_7K2M9Q4R8T1VH now."
+    },
+    {
+      "atSignOptional" : true,
+      "mentions" : [
+
+      ],
+      "name" : "bare-glued-left-boundary",
+      "text" : "abcptys_7K2M9Q4R8T1VH and x_ptys_3HX6W0ZD5N2BT and -ptys_8M3B5X1QJ7TW1"
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 1,
+          "prefix" : null,
+          "token" : "ptys_7K2M9Q4R8T1VH"
+        }
+      ],
+      "name" : "at-sign-glued-left-is-fine",
+      "text" : "x@ptys_7K2M9Q4R8T1VH"
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+
+      ],
+      "name" : "trailing-hyphen-x-is-no-match",
+      "text" : "Ask @ptys_7K2M9Q4R8T1VH-x now."
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+
+      ],
+      "name" : "trailing-alphanumeric-is-no-match",
+      "text" : "Ask @ptys_7K2M9Q4R8T1VHZ and @1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E0 now."
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 1,
+          "prefix" : null,
+          "token" : "ptys_7K2M9Q4R8T1VH"
+        },
+        {
+          "identifier" : "ptys_3HX6W0ZD5N2BT",
+          "length" : 19,
+          "location" : 23,
+          "prefix" : null,
+          "token" : "ptys_3HX6W0ZD5N2BT"
+        },
+        {
+          "identifier" : "ptys_8M3B5X1QJ7TW1",
+          "length" : 19,
+          "location" : 44,
+          "prefix" : null,
+          "token" : "ptys_8M3B5X1QJ7TW1"
+        }
+      ],
+      "name" : "trailing-punctuation",
+      "text" : "(@ptys_7K2M9Q4R8T1VH), @ptys_3HX6W0ZD5N2BT. @ptys_8M3B5X1QJ7TW1!"
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 2,
+          "prefix" : null,
+          "token" : "ptys_7K2M9Q4R8T1VH"
+        },
+        {
+          "identifier" : "wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F",
+          "length" : 40,
+          "location" : 27,
+          "prefix" : "wg-",
+          "token" : "5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F"
+        }
+      ],
+      "name" : "next-to-emoji",
+      "text" : "🚀@ptys_7K2M9Q4R8T1VH 👋🏽 @wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F✅"
+    },
+    {
+      "atSignOptional" : true,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 18,
+          "location" : 2,
+          "prefix" : null,
+          "token" : "ptys_7K2M9Q4R8T1VH"
+        }
+      ],
+      "name" : "bare-after-emoji",
+      "text" : "🚀ptys_7K2M9Q4R8T1VH done"
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 0,
+          "prefix" : null,
+          "token" : "ptys_7K2M9Q4R8T1VH"
+        },
+        {
+          "identifier" : "ptys_3HX6W0ZD5N2BT",
+          "length" : 19,
+          "location" : 24,
+          "prefix" : null,
+          "token" : "ptys_3HX6W0ZD5N2BT"
+        }
+      ],
+      "name" : "two-stable-ids-in-one-paragraph",
+      "text" : "@ptys_7K2M9Q4R8T1VH and @ptys_3HX6W0ZD5N2BT should pair up."
+    },
+    {
+      "atSignOptional" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 5,
+          "prefix" : null,
+          "token" : "ptys_7K2M9Q4R8T1VH"
+        },
+        {
+          "identifier" : "ptys_3HX6W0ZD5N2BT",
+          "length" : 19,
+          "location" : 46,
+          "prefix" : null,
+          "token" : "ptys_3HX6W0ZD5N2BT"
+        }
+      ],
+      "name" : "mention-in-code-span",
+      "text" : "Run `@ptys_7K2M9Q4R8T1VH` literally, then ask @ptys_3HX6W0ZD5N2BT."
+    },
+    {
+      "atSignOptional" : true,
+      "mentions" : [
+
+      ],
+      "name" : "no-mentions",
+      "text" : "Nothing to see here: @ alone, @session: and @wg- too."
+    }
+  ],
+  "split" : [
+    {
+      "identifier" : "ptys_7K2M9Q4R8T1VH",
+      "name" : "stable-id",
+      "prefix" : null,
+      "token" : "ptys_7K2M9Q4R8T1VH"
+    },
+    {
+      "identifier" : "ptys_7k2m9q4r8t1vh",
+      "name" : "lowercase-stable-id",
+      "prefix" : null,
+      "token" : "ptys_7K2M9Q4R8T1VH"
+    },
+    {
+      "identifier" : "1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E",
+      "name" : "legacy-uuid",
+      "prefix" : null,
+      "token" : "1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E"
+    },
+    {
+      "identifier" : "session:1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E",
+      "name" : "session-prefix-uuid",
+      "prefix" : "session:",
+      "token" : "1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E"
+    },
+    {
+      "identifier" : "session:ptys_7K2M9Q4R8T1VH",
+      "name" : "session-prefix-stable-id",
+      "prefix" : "session:",
+      "token" : "ptys_7K2M9Q4R8T1VH"
+    },
+    {
+      "identifier" : "wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F",
+      "name" : "workgroup",
+      "prefix" : "wg-",
+      "token" : "5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F"
+    },
+    {
+      "identifier" : "WG-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F",
+      "name" : "uppercase-workgroup-prefix",
+      "prefix" : "wg-",
+      "token" : "5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F"
+    },
+    {
+      "identifier" : "ptys_7K2M9Q4R8T1V0",
+      "name" : "bad-check-character",
+      "prefix" : null,
+      "token" : "ptys_7K2M9Q4R8T1V0"
+    },
+    {
+      "identifier" : "ptys_7K2M9Q4R8TlVH",
+      "invalid" : true,
+      "name" : "crockford-confusable"
+    },
+    {
+      "identifier" : "@ptys_7K2M9Q4R8T1VH",
+      "invalid" : true,
+      "name" : "with-at-sign"
+    },
+    {
+      "identifier" : "ptys_7K2M9Q4R8T1VH now",
+      "invalid" : true,
+      "name" : "trailing-text"
+    },
+    {
+      "identifier" : " ptys_7K2M9Q4R8T1VH",
+      "invalid" : true,
+      "name" : "leading-space"
+    },
+    {
+      "identifier" : "tab:1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E",
+      "invalid" : true,
+      "name" : "unknown-prefix"
+    },
+    {
+      "identifier" : "",
+      "invalid" : true,
+      "name" : "empty"
+    }
+  ]
+}

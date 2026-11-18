@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: Optional(11), payload: WireFixtures.CompanionHostMessage.chatCreated(entry: WireFixtures.CompanionChatListEntry(chat: WireFixtures.Chat(id: \"7E6D5C4B-3A29-4817-B6F5-E4D3C2B1A090\", title: \"New Chat\", creationDate: 2026-11-18 11:16:50 +0000, lastModifiedDate: 2026-11-18 11:16:50 +0000, orchestrationEnabled: false, terminalSessionGuid: Optional(\"ptys_7K2M9Q4R8T1VH\"), browserSessionGuid: nil, permissions: \"\", vectorStore: nil, modelName: Optional(\"example-model\"), modelVendor: nil, blobProtocol: nil, claimedScopes: [], watchers: [], icon: nil), snippet: nil, muted: Optional(false))))",
+  "json" : {"payload":{"chatCreated":{"entry":{"chat":{"claimedScopes":[],"creationDate":1795000610000,"id":"7E6D5C4B-3A29-4817-B6F5-E4D3C2B1A090","lastModifiedDate":1795000610000,"modelName":"example-model","orchestrationEnabled":false,"permissions":"","terminalSessionGuid":"ptys_7K2M9Q4R8T1VH","title":"New Chat","watchers":[]},"muted":false}}},"requestID":11}
+}
