@@ -68,12 +68,14 @@ class OversizedChats {
 
     /**
      * A link ended on a frame over the Noise cap with [unanswered] subscribes out: one is the
-     * culprit; several become suspects. None names nothing (the frame was something else).
+     * culprit; several become suspects. None names nothing (the frame was something else). With
+     * [listOut] (the chat list request was unanswered too) the list may be the culprit, so even a
+     * single unanswered chat only becomes a suspect.
      */
-    internal fun linkEndedOversized(unanswered: Set<String>) {
-        when (unanswered.size) {
-            0 -> Unit
-            1 -> foundTooLarge(unanswered.single())
+    internal fun linkEndedOversized(unanswered: Set<String>, listOut: Boolean = false) {
+        when {
+            unanswered.isEmpty() -> Unit
+            unanswered.size == 1 && !listOut -> foundTooLarge(unanswered.single())
             else -> suspectChats += unanswered
         }
     }
@@ -240,15 +242,16 @@ class ChatSubscriptions(private val oversized: OversizedChats) {
 
     /**
      * A `History` for [chatID] landed on this link, or a history `PayloadTooLarge` ([tooLarge]),
-     * which also makes it too large for the process. It answers the chat's oldest timed-out request,
-     * if any (a late history whose ticket the caller could not settle). The chat stays unanswered
-     * while a request for it is still in flight (a Try again), or another timed-out one remains:
-     * this history may be the older request's, and the other's reply can still end a link.
+     * which also makes it too large for the process. The caller settles the reply's own ticket
+     * first when it can map the reply's request ID; when it cannot ([consumeLateTicket]), the
+     * history answers the chat's oldest timed-out request. The chat stays unanswered while a
+     * request for it is still in flight (a Try again), or another timed-out one remains: this
+     * history may be the older request's, and the other's reply can still end a link.
      */
-    fun subscribed(chatID: String, tooLarge: Boolean = false) {
+    fun subscribed(chatID: String, tooLarge: Boolean = false, consumeLateTicket: Boolean = false) {
         attempted += chatID
         subscribed += chatID
-        if (requests.values.none { it == chatID }) {
+        if (consumeLateTicket && requests.values.none { it == chatID }) {
             late.entries.firstOrNull { it.value == chatID }?.let { late.remove(it.key) }
         }
         answered(chatID)
@@ -328,9 +331,10 @@ class ChatSubscriptions(private val oversized: OversizedChats) {
 
     /**
      * The link ended; this instance is done. On a frame over the Noise cap ([messageTooLarge]),
-     * the unanswered chats name the culprit or become suspects in [oversized].
+     * the unanswered chats name the culprit or become suspects in [oversized]; with [listOut] (the
+     * chat list request was unanswered too) they only become suspects, even one alone.
      */
-    fun linkEnded(messageTooLarge: Boolean) {
-        if (messageTooLarge) oversized.linkEndedOversized(unanswered.toSet())
+    fun linkEnded(messageTooLarge: Boolean, listOut: Boolean = false) {
+        if (messageTooLarge) oversized.linkEndedOversized(unanswered.toSet(), listOut)
     }
 }

@@ -5,6 +5,8 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamLink
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -139,8 +141,11 @@ data class ChatTimeouts(
  * subscription still feeds its live state); a link ended by a frame over the Noise cap names the
  * one unanswered subscribe as too large, or makes the unanswered ones suspects, retried first and
  * alone ([OversizedChats], [ChatSubscriptions]). Only [retry] subscribes a too-large chat again,
- * or the chat leaving the list and coming back. A link ended that way while only the list request
- * was out marks the list too large for the process: it is not fetched again until [refresh].
+ * or the chat leaving the list and coming back. The list request is unanswered until its reply
+ * lands through the sink (a timeout does not answer it). A link ended that way with only the list
+ * unanswered marks the list too large for the process: it is not fetched again until [refresh].
+ * With subscribes unanswered too, the list and those chats (even one alone) become suspects, and
+ * the next link fetches the list first and alone.
  *
  * **Unread.** A chat is unread when the Mac's `lastModified` is past the owner's mark
  * ([ChatSeenStore], Mac values only, never phone time), or its turn ended unseen (Done). A chat's
@@ -246,6 +251,21 @@ class ChatRepository(
      * out, so the list is too large to read. Not fetched again until [refresh] or [clear].
      */
     private var listTooLarge = false
+
+    /**
+     * The list request on this link was sent and its reply has not landed through the sink (nor
+     * did it fail with an error or never get sent). Unlike [listInFlight], a timeout does not
+     * clear it: a frame over the Noise cap can take longer than [ChatTimeouts.list] to arrive.
+     */
+    private var listUnanswered = false
+
+    /**
+     * Process-wide: the list was unanswered, beside unanswered subscribes, when a link ended on a
+     * frame over the Noise cap, so it may be the culprit. The next link requests it first and
+     * alone (no subscribe is planned while it is unanswered); landing clears this, ending a link
+     * alone latches [listTooLarge].
+     */
+    private var listSuspect = false
 
     /** Bumped by every list applied, so a failed request does not hide a list that landed meanwhile. */
     private var listGeneration = 0L
@@ -435,15 +455,22 @@ class ChatRepository(
 
     private fun endLink(messageTooLarge: Boolean) {
         val linkId = currentLink ?: return
-        if (messageTooLarge && listInFlight && subscriptions.outstanding.isEmpty()) {
+        val listOut = messageTooLarge && listUnanswered
+        if (listOut && subscriptions.outstanding.isEmpty()) {
             // Only the list was out: it is what ended the link. Fetching it on every link would
             // end every link (and the live view with it).
             listTooLarge = true
+            listSuspect = false
             listFailed = true
             log("chat link $linkId ended on a frame over the Noise cap with only the list out: the list is too large")
+        } else if (listOut) {
+            // The list or a subscribe: the list goes first and alone on the next link.
+            listSuspect = true
+            log("chat link $linkId ended on a frame over the Noise cap with the list out: the list is a suspect")
         }
+        listUnanswered = false
         val before = oversized.tooLarge
-        subscriptions.linkEnded(messageTooLarge)
+        subscriptions.linkEnded(messageTooLarge, listOut)
         val named = oversized.tooLarge - before
         if (messageTooLarge) {
             log("chat link $linkId ended on a frame over the Noise cap: too large ${named.joinToString()}; suspects ${oversized.suspects.size}")
@@ -472,7 +499,10 @@ class ChatRepository(
                 // AM:4336-4345: from the open transcript and the cache alike; unknown IDs are ignored.
                 conversations[message.chatID]?.transcript?.removeAll(message.messageIDs.toSet())
             }
-            is MacMessage.ChatsAndSessions -> applyList(message.chats)
+            is MacMessage.ChatsAndSessions -> {
+                listAnswered()
+                applyList(message.chats)
+            }
             is MacMessage.ChatListChanged -> applyList(message.chats)
             is MacMessage.ChatCreated -> chatCreated(message.entry)
             is MacMessage.AiAvailabilityChanged -> if (message.available) aiOn() else aiOff()
@@ -483,10 +513,11 @@ class ChatRepository(
 
     private fun history(history: MacMessage.History, requestID: Long?, linkId: Long, frameBytes: Int) {
         val chatID = history.chatID
-        requestID?.let(subscribeTickets::get)?.let { subscriptions.settled(it, SubscribeOutcome.ANSWERED) }
+        val ticket = requestID?.let(subscribeTickets::get)
+        ticket?.let { subscriptions.settled(it, SubscribeOutcome.ANSWERED) }
         // A history in flight when AI went off: the Mac has dropped that subscription again
         // (HB:2250-2269), so it is not subscribed, and is planned again when AI is back.
-        if (ai) subscriptions.subscribed(chatID)
+        if (ai) subscriptions.subscribed(chatID, consumeLateTicket = ticket == null)
         failedThisLink -= chatID
         cost.histories++
         cost.bytes += frameBytes
@@ -540,7 +571,11 @@ class ChatRepository(
                     return
                 }
                 log("chat $chatID history of ${input.sizeBytes} bytes is over the chat cap: too large")
-                if (ai) subscriptions.subscribed(chatID, tooLarge = true) else oversized.foundTooLarge(chatID)
+                if (ai) {
+                    subscriptions.subscribed(chatID, tooLarge = true, consumeLateTicket = ticket == null)
+                } else {
+                    oversized.foundTooLarge(chatID)
+                }
                 failedThisLink -= chatID
                 cost.histories++
                 cost.bytes += input.sizeBytes
@@ -559,6 +594,7 @@ class ChatRepository(
             }
             else -> {
                 log("a ${input.case} of ${input.sizeBytes} bytes is over the chat cap")
+                if (input.case == LIST_REPLY_CASE) listAnswered()
                 listFailed = true
             }
         }
@@ -576,7 +612,10 @@ class ChatRepository(
                 planNeeded = true
             }
             failure.case == "delivery" -> if (chatID != null) lostAppend(chatID)
-            failure.case == "chatsAndSessions" || failure.case == "chatListChanged" -> listFailed = true
+            failure.case == LIST_REPLY_CASE || failure.case == "chatListChanged" -> {
+                if (failure.case == LIST_REPLY_CASE) listAnswered()
+                listFailed = true
+            }
         }
     }
 
@@ -655,6 +694,23 @@ class ChatRepository(
         planNeeded = true
     }
 
+    /**
+     * The list reply arrived whole through the sink (decoded, undecodable or over the chat cap):
+     * the list did not end a link.
+     */
+    private fun listAnswered() {
+        listUnanswered = false
+        if (listSuspect) {
+            listSuspect = false
+            log("the chat list answered: no longer a suspect")
+        }
+        planNeeded = true
+    }
+
+    /**
+     * Fetches the list on the current link. Accepted, as on iOS: a request sent just before the
+     * Mac's `aiAvailabilityChanged(false)` can come back refused or empty; that is handled as AI off.
+     */
     private fun requestList() {
         val linkId = currentLink ?: return
         if (listInFlight) return
@@ -664,6 +720,7 @@ class ChatRepository(
             return
         }
         listInFlight = true
+        listUnanswered = true
         listFailed = false
         val generation = listGeneration
         launchRequest(PhoneMessage.ListChatsAndSessions, linkId, timeouts.list, onSent = {}) { outcome ->
@@ -672,14 +729,25 @@ class ChatRepository(
                 is Outcome.Replied -> when (val reply = outcome.reply) {
                     is MacMessage.ChatPayloadTaken -> Unit
                     is MacMessage.Error -> if (reply.isAiUnavailable) {
+                        listUnanswered = false
+                        planNeeded = true
                         aiOff()
                     } else {
                         log("the chat list request was refused: ${reply.code}")
+                        listUnanswered = false
+                        planNeeded = true
                         listFailed = true
                     }
                     else -> log("unexpected reply to the chat list request: ${reply.javaClass.simpleName}")
                 }
-                is Outcome.Failed, is Outcome.NotSent -> {
+                is Outcome.NotSent -> {
+                    log("the chat list request failed: $outcome")
+                    listUnanswered = false
+                    planNeeded = true
+                    if (listGeneration == generation) listFailed = true
+                }
+                // A timeout leaves the list unanswered: its reply may still be arriving.
+                is Outcome.Failed -> {
                     log("the chat list request failed: $outcome")
                     if (listGeneration == generation) listFailed = true
                 }
@@ -691,6 +759,8 @@ class ChatRepository(
 
     private fun plan() {
         val linkId = currentLink ?: return
+        // A suspect list goes first and alone: nothing else is out until it is answered.
+        if (listSuspect && listUnanswered) return
         val wanted = subscriptions.wanted(open.keys.toList(), entries.takeIf { listOnThisLink })
         lastWanted = wanted
         val plan = subscriptions.plan(wanted, subscribeConcurrency, ai)
@@ -848,6 +918,8 @@ class ChatRepository(
         listFailed = false
         listInFlight = false
         listTooLarge = false
+        listUnanswered = false
+        listSuspect = false
         subscribeTickets.clear()
         failedThisLink.clear()
         open.clear()
@@ -902,6 +974,11 @@ class ChatRepository(
         onSent: (Long) -> Unit,
         done: (Outcome) -> Unit,
     ) {
+        // An outcome reached before the launch returns (a request refused at once, say "not
+        // connected" while the link's LinkDown is already queued) is settled here, on the
+        // consumer, before anything queued behind; a later one is posted.
+        val handoff = AtomicInteger(LAUNCHING)
+        val early = AtomicReference<Outcome?>(null)
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             val outcome = try {
                 Outcome.Replied(
@@ -917,7 +994,12 @@ class ChatRepository(
             } catch (e: Exception) {
                 Outcome.Failed(e.javaClass.simpleName)
             }
-            post { if (currentLink == linkId) done(outcome) }
+            early.set(outcome)
+            if (!handoff.compareAndSet(LAUNCHING, FINISHED_EARLY)) post { if (currentLink == linkId) done(outcome) }
+        }
+        if (!handoff.compareAndSet(LAUNCHING, LAUNCHED)) {
+            val outcome = checkNotNull(early.get())
+            if (currentLink == linkId) done(outcome)
         }
     }
 
@@ -937,7 +1019,10 @@ class ChatRepository(
     // Publishing
 
     private fun afterStep(drained: Boolean) {
-        if (planNeeded) {
+        // A request refused at once settles during plan() and may free a slot: plan again. Each
+        // pass starts or settles something, so this ends (a chat is not planned twice on a link).
+        var passes = 0
+        while (planNeeded && passes++ < MAX_PLAN_PASSES) {
             planNeeded = false
             plan()
         }
@@ -1039,5 +1124,16 @@ class ChatRepository(
             "This chat was deleted on your Mac. You can keep reading it until you leave, but nothing new can be sent."
     }
 }
+
+/** [ChatRepository]'s request hand-off: the launch has not returned yet / has / the request finished first. */
+private const val LAUNCHING = 0
+private const val LAUNCHED = 1
+private const val FINISHED_EARLY = 2
+
+/** A bound on [ChatRepository]'s plan passes per step; a leftover plan runs at the next step. */
+private const val MAX_PLAN_PASSES = 64
+
+/** The payload case of the `listChatsAndSessions` reply. */
+private const val LIST_REPLY_CASE = "chatsAndSessions"
 
 private val MacMessage.Error.isAiUnavailable: Boolean get() = code == "aiUnavailable"
