@@ -8,6 +8,8 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import dev.bugobliterator.itermbuddy.core.CompanionClient
 import dev.bugobliterator.itermbuddy.core.CompanionRequestException
+import dev.bugobliterator.itermbuddy.core.chat.ChatRepository
+import dev.bugobliterator.itermbuddy.core.chat.FileChatSeenStore
 import dev.bugobliterator.itermbuddy.core.input.InputSender
 import dev.bugobliterator.itermbuddy.core.input.InputTrace
 import dev.bugobliterator.itermbuddy.core.input.isInputTarget
@@ -47,15 +49,16 @@ import kotlin.time.Duration.Companion.seconds
  * dark mode) and keeps its connection across it. The client runs in an app-lifetime scope; the
  * Notifications plan moves its ownership to a foreground service.
  *
- * It also owns the rest of the app-scoped sessions graph, built by [wireSessions] (the same
- * function the tests use): the [StreamController] (the client's stream sink, sending through the
- * client), the [HevcVideoOutput] it decodes into, the [SessionTreeRepository], and the
+ * It also owns the rest of the app-scoped home graph, built by [wireHome] (the same function the
+ * tests use): the [StreamController] (the client's stream sink, sending through the client), the
+ * [HevcVideoOutput] it decodes into, the [SessionTreeRepository], the [ChatRepository] (the
+ * client's chat sink, with its seen marks in [FileChatSeenStore]), and the
  * [SessionNavigator][dev.bugobliterator.itermbuddy.ui.SessionNavigator] that alone opens and
- * closes streams. Every unpair resets the navigator (stopping the stream) and clears the tree.
- * [ProcessLifecycleOwner] drives the controller: `ON_STOP` (the last activity stopped: lock,
- * home, app switch) pauses it and `ON_START` resumes it and kicks a reconnect
- * ([CompanionClient.reconnectNow]); it is debounced over configuration changes, so rotation
- * neither pauses nor resumes.
+ * closes streams. Every unpair resets the navigator (stopping the stream) and clears the tree and
+ * the chats. [ProcessLifecycleOwner] drives the controller and the chats: `ON_STOP` (the last
+ * activity stopped: lock, home, app switch) pauses the controller and makes no conversation
+ * visible, and `ON_START` resumes both and kicks a reconnect ([CompanionClient.reconnectNow]); it
+ * is debounced over configuration changes, so rotation neither pauses nor resumes.
  *
  * [input] is the one ordered path for keys and pastes: app-scoped, so a key typed just before the
  * activity is recreated is still sent, and it sends only while its target is the controller's
@@ -81,21 +84,21 @@ class CompanionApp : Application() {
         SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e -> Log.e(TAG, "uncaught in app scope", e) },
     )
 
-    /** The sessions graph; see the class comment. */
-    lateinit var sessions: SessionsGraph
+    /** The home graph (sessions and chats); see the class comment. */
+    lateinit var home: HomeGraph
         private set
 
     /** The live view's decoder output; process-lifetime, never closed (see the class comment). */
     lateinit var video: HevcVideoOutput
         private set
 
-    val client: CompanionClient get() = sessions.client
+    val client: CompanionClient get() = home.client
 
     /** The composer's per-session drafts, in memory only; emptied on unpair by the graph. */
-    val drafts: ComposerDrafts get() = sessions.drafts
+    val drafts: ComposerDrafts get() = home.drafts
 
     /** Each session's sticky modifiers, tray and keyboard-restore flag; emptied on unpair by the graph. */
-    val inputMemories: LiveInputMemories get() = sessions.inputMemories
+    val inputMemories: LiveInputMemories get() = home.inputMemories
 
     /** Keys and pastes for the live session; see the class comment. */
     lateinit var input: InputSender
@@ -145,7 +148,7 @@ class CompanionApp : Application() {
      * GUID and the grid only.
      */
     fun fitToPhone(sessionGuid: String, viewportWidthPx: Int, viewportHeightPx: Int) {
-        val stream = sessions.controller.activeStream.value
+        val stream = home.controller.activeStream.value
         if (stream == null || stream.sessionGuid != sessionGuid) {
             Log.i(STREAM_TAG, "fit to phone for $sessionGuid skipped: not the active stream")
             return
@@ -169,34 +172,47 @@ class CompanionApp : Application() {
             sink = { Log.v(InputTrace.TAG, it) },
         )
         video = HevcVideoOutput(MediaCodecCatalog())
-        sessions = wireSessions(
+        home = wireHome(
             scope,
-            newClient = { sink -> CompanionClient(KeystorePairingStore(this), OkHttpClient(), scope, streamSink = sink) },
+            newClient = { sink, chatSink ->
+                CompanionClient(KeystorePairingStore(this), OkHttpClient(), scope, streamSink = sink, chatSink = chatSink)
+            },
             newController = { link ->
                 StreamController(link, video, scope, nowMillis = SystemClock::uptimeMillis, log = { Log.i(STREAM_TAG, it) })
             },
             newRepository = { client -> SessionTreeRepository(client, scope) },
+            newChats = { link ->
+                // The chat consumer reads and writes the seen marks: on the app scope's Default
+                // dispatcher, never the main thread.
+                ChatRepository(
+                    link,
+                    scope,
+                    FileChatSeenStore.inNoBackupDir(this) { Log.w(CHAT_TAG, it) },
+                    nowMillis = SystemClock::uptimeMillis,
+                    log = { Log.i(CHAT_TAG, it) },
+                )
+            },
             log = { Log.w(TAG, it) },
         )
         input = InputSender(
-            link = sessions.client,
+            link = home.client,
             scope = scope,
-            isCurrent = { target -> isInputTarget(sessions.controller.activeStream.value, target) },
+            isCurrent = { target -> isInputTarget(home.controller.activeStream.value, target) },
             log = { Log.i(INPUT_TAG, it) },
         )
         selection = SelectionDriver(
-            link = sessions.client,
-            active = sessions.controller.activeStream,
-            selection = sessions.controller.selection,
+            link = home.client,
+            active = home.controller.activeStream,
+            selection = home.controller.selection,
             scope = scope,
             log = { Log.i(SELECTION_TAG, it) },
         )
         browser = BrowserDriver(
             input = input,
-            active = sessions.controller.activeStream,
-            editing = sessions.controller.browserEditing,
-            navigation = sessions.controller.browserNavigation,
-            macRevision = sessions.client.state.map(::macRevisionOf).stateIn(scope, SharingStarted.Eagerly, macRevisionOf(sessions.client.state.value)),
+            active = home.controller.activeStream,
+            editing = home.controller.browserEditing,
+            navigation = home.controller.browserNavigation,
+            macRevision = home.client.state.map(::macRevisionOf).stateIn(scope, SharingStarted.Eagerly, macRevisionOf(home.client.state.value)),
             scope = scope,
             nowMillis = SystemClock::uptimeMillis,
             log = { Log.i(BROWSER_TAG, it) },
@@ -206,11 +222,16 @@ class CompanionApp : Application() {
             object : DefaultLifecycleObserver {
                 override fun onStart(owner: LifecycleOwner) {
                     // Back in the app: do not wait out a grown backoff (up to 30 s) to reconnect.
-                    sessions.client.reconnectNow()
-                    sessions.controller.resume()
+                    home.client.reconnectNow()
+                    home.controller.resume()
+                    home.chats.setForeground(true)
                 }
 
-                override fun onStop(owner: LifecycleOwner) = sessions.controller.pause()
+                override fun onStop(owner: LifecycleOwner) {
+                    home.controller.pause()
+                    // Locked or backgrounded: no conversation is visible, so a turn ending now is Done.
+                    home.chats.setForeground(false)
+                }
             },
         )
     }
@@ -273,6 +294,7 @@ class CompanionApp : Application() {
     private companion object {
         const val TAG = "CompanionApp"
         const val STREAM_TAG = "StreamController"
+        const val CHAT_TAG = "ChatRepository"
         const val INPUT_TAG = "InputSender"
         const val SELECTION_TAG = "SelectionDriver"
         const val BROWSER_TAG = "BrowserDriver"

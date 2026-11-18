@@ -1,11 +1,16 @@
 package dev.bugobliterator.itermbuddy.core.sessions
 
 import dev.bugobliterator.itermbuddy.core.ClientState
+import dev.bugobliterator.itermbuddy.core.chat.AgentState
+import dev.bugobliterator.itermbuddy.core.chat.ChatListState
+import dev.bugobliterator.itermbuddy.core.chat.ChatRow
+import dev.bugobliterator.itermbuddy.core.chat.ConversationState
 import dev.bugobliterator.itermbuddy.core.noise.newStaticKeyPair
 import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.stream.TileState
 import dev.bugobliterator.itermbuddy.core.stream.Tiles
+import dev.bugobliterator.itermbuddy.fakemac.FakeChatMac
 import dev.bugobliterator.itermbuddy.fakemac.FakeMac
 import dev.bugobliterator.itermbuddy.ui.HomeDestination
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -27,7 +32,7 @@ import kotlin.time.Duration.Companion.seconds
 
 /**
  * Unpairing, from this phone or from the Mac, leaves nothing of the old pairing behind: the
- * tree, the navigation and the watch, through the same wiring `CompanionApp` uses.
+ * tree, the navigation, the watch and the chats, through the same wiring `CompanionApp` uses.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class UnpairCleanupTest {
@@ -93,6 +98,41 @@ class UnpairCleanupTest {
         assertEquals(emptyList<String>(), second.receivedCases().filter { it == "startSessionStream" })
         assertEquals(LiveViewState.Closed, rig.controller.state.value)
         assertEquals(TreeState.Loaded(SessionsRig.treeOf(SessionsRig.PUSH), refreshing = false), rig.repository.state.value)
+    }
+
+    @Test
+    fun localAndRemoteUnpairClearChats() {
+        unpairClearsChats(fromMac = false)
+        unpairClearsChats(fromMac = true)
+    }
+
+    private fun unpairClearsChats(fromMac: Boolean) = runTest {
+        val rig = SessionsRig(this)
+        rig.answerFetches()
+        rig.connect()
+        advanceTimeBy(5.seconds)
+        val chatID = FakeChatMac.SAMPLE_CHAT
+        rig.chats.open(chatID)
+        rig.chatMac.streamReply(chatID, appends = 2)
+        advanceTimeBy(5.seconds)
+        assertTrue(rig.chats.list.value is ChatListState.Loaded)
+        assertTrue(rig.chats.conversation(chatID).value is ConversationState.Shown)
+        assertNotNull(rig.chatSeen.seen(chatID))
+        assertEquals("open but never on screen", AgentState.DONE, rig.chats.activity.value[chatID])
+
+        if (fromMac) {
+            rig.mac.sendUnpaired()
+            withTimeout(1.minutes) { rig.client.state.first { it is ClientState.Failed } }
+        } else {
+            rig.client.unpair()
+        }
+        advanceTimeBy(5.seconds)
+        assertEquals(ChatListState.Loading, rig.chats.list.value)
+        assertEquals(emptyList<ChatRow>(), rig.chats.rows.value)
+        assertEquals(emptyMap<String, AgentState>(), rig.chats.activity.value)
+        assertEquals(ConversationState.Loading, rig.chats.conversation(chatID).value)
+        assertNull(rig.chats.macRevision.value)
+        assertNull("the seen marks belong to the old pairing", rig.chatSeen.seen(chatID))
     }
 
     @Test
