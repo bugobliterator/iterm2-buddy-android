@@ -53,12 +53,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import dev.bugobliterator.itermbuddy.core.chat.ChatListSnapshot
 import dev.bugobliterator.itermbuddy.core.chat.ChatListState
 import dev.bugobliterator.itermbuddy.core.chat.ChatRow
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolution
 import dev.bugobliterator.itermbuddy.ui.live.NoPersonalizedLearning
+import java.nio.ByteBuffer
 import java.time.ZoneId
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 
 internal const val EMPTY_CHATS_TITLE = "No chats yet"
 internal const val EMPTY_CHATS_BODY = "Tap New Chat to start a conversation with a session or the orchestrator."
@@ -93,10 +103,9 @@ sealed interface ChatListContent {
 }
 
 /**
- * The Chats root for the repository's [list], [rows], [aiAvailable] and [macRevision], the
- * search [query] and the mention [resolutions]. AI off comes first, whatever list is kept (iOS
- * checks it first, `IOS/Screens/HomeView.swift:16-19`); then the list's state; then the rows that
- * [filterChatRows] keeps, in the Mac's order, each as [chatRowModel].
+ * The Chats root for the repository's [list], [rows] and [aiAvailable] (one
+ * [ChatListSnapshot]), the Mac's [macRevision], the search [query] and the mention
+ * [resolutions], with no earlier models to reuse. See [ChatListPresenter.present].
  */
 fun chatListContent(
     list: ChatListState,
@@ -105,31 +114,100 @@ fun chatListContent(
     macRevision: Int?,
     query: String,
     resolutions: Map<String, MentionResolution>,
-): ChatListContent {
-    if (!aiAvailable) return ChatListContent.AiOff
-    return when (list) {
-        ChatListState.Loading -> ChatListContent.Loading
-        is ChatListState.Failed -> ChatListContent.Failed(list.retryable)
-        ChatListState.AiUnavailable -> ChatListContent.AiOff
-        is ChatListState.Loaded -> {
-            val terms = searchTerms(query)
-            when {
-                rows.isEmpty() -> ChatListContent.Empty(list.refreshing, list.refreshFailed)
+): ChatListContent = ChatListPresenter().present(list, rows, aiAvailable, macRevision, query, resolutions)
+
+/**
+ * Builds what the Chats root shows, keeping the previous row models: a row whose [ChatRow],
+ * rendered snippet and actions are unchanged keeps its [ChatRowModel] instance (so Compose skips
+ * it), and an icon whose bytes are unchanged keeps its [ChatIconRef] (hashed once). Single-threaded:
+ * one presenter per collector ([chatListContents]), off the main thread.
+ */
+class ChatListPresenter(private val iconRef: (ByteBuffer?) -> ChatIconRef? = ::chatIconRef) {
+    private class Shown(val row: ChatRow, val model: ChatRowModel)
+
+    private var previous: Map<String, Shown> = emptyMap()
+
+    /**
+     * AI off comes first, whatever list is kept (iOS checks it first,
+     * `IOS/Screens/HomeView.swift:16-19`); then the list's state. Empty is decided from the
+     * list's entries; while [rows] do not cover them (never, from one snapshot) it shows Loading.
+     * Then the rows [filterChatRows] keeps, in the Mac's order.
+     */
+    fun present(
+        list: ChatListState,
+        rows: List<ChatRow>,
+        aiAvailable: Boolean,
+        macRevision: Int?,
+        query: String,
+        resolutions: Map<String, MentionResolution>,
+    ): ChatListContent {
+        if (!aiAvailable) return ChatListContent.AiOff
+        return when (list) {
+            ChatListState.Loading -> ChatListContent.Loading
+            is ChatListState.Failed -> ChatListContent.Failed(list.retryable)
+            ChatListState.AiUnavailable -> ChatListContent.AiOff
+            is ChatListState.Loaded -> when {
+                list.entries.isEmpty() -> ChatListContent.Empty(list.refreshing, list.refreshFailed)
+                rows.map { it.entry.chat.id } != list.entries.map { it.chat.id } -> ChatListContent.Loading
                 else -> {
-                    val shown = rows.mapNotNull { row ->
-                        val model = chatRowModel(row, macRevision, resolutions)
-                        model.takeIf { terms.isEmpty() || matches(terms, it.title, it.snippet) }
-                    }
-                    if (shown.isEmpty()) {
+                    val shown = rows.map { Shown(it, model(it, macRevision, resolutions)) }
+                    previous = shown.associateBy { it.model.chatID }
+                    val terms = searchTerms(query)
+                    val matching = shown.map { it.model }.filter { terms.isEmpty() || matches(terms, it.title, it.snippet) }
+                    if (matching.isEmpty()) {
                         ChatListContent.NoMatch(query.trim(), list.refreshing, list.refreshFailed)
                     } else {
-                        ChatListContent.Rows(shown, list.refreshing, list.refreshFailed)
+                        ChatListContent.Rows(matching, list.refreshing, list.refreshFailed)
                     }
                 }
             }
         }
     }
+
+    private fun model(row: ChatRow, macRevision: Int?, resolutions: Map<String, MentionResolution>): ChatRowModel {
+        val chat = row.entry.chat
+        val snippet = renderedSnippet(row.entry.snippet, resolutions)
+        val actions = chatRowActions(row.entry, macRevision)
+        val prior = previous[chat.id]
+        if (prior != null && prior.row == row && prior.model.snippet == snippet && prior.model.actions == actions) return prior.model
+        val icon = if (prior != null && prior.row.entry.chat.iconView() == chat.iconView()) prior.model.icon else iconRef(chat.iconView())
+        return ChatRowModel(
+            chatID = chat.id,
+            title = chat.title,
+            lastModifiedMillis = chat.lastModifiedMillis,
+            snippet = snippet,
+            muted = row.entry.muted == true,
+            state = row.state,
+            unread = row.unread,
+            actions = actions,
+            icon = icon,
+        )
+    }
 }
+
+/**
+ * The Chats root's content from the repository's [snapshot] and [macRevision], the search
+ * [query] and the mention [resolutions], computed on [context] (Default: never the main thread)
+ * by one [ChatListPresenter], and only when it changes.
+ */
+fun chatListContents(
+    snapshot: Flow<ChatListSnapshot>,
+    macRevision: Flow<Int?>,
+    query: Flow<String>,
+    resolutions: Flow<Map<String, MentionResolution>>,
+    context: CoroutineContext = Dispatchers.Default,
+    iconRef: (ByteBuffer?) -> ChatIconRef? = ::chatIconRef,
+): Flow<ChatListContent> = flow {
+    val presenter = ChatListPresenter(iconRef)
+    emitAll(
+        combine(snapshot, macRevision, query, resolutions) { shot, revision, text, names ->
+            presenter.present(shot.list, shot.rows, shot.aiAvailable, revision, text, names)
+        },
+    )
+}.distinctUntilChanged().flowOn(context)
+
+/** How long until the next whole [intervalMillis] after [nowMillis] (the stamps refresh on the minute). */
+fun nextStampRefreshDelay(nowMillis: Long, intervalMillis: Long): Long = intervalMillis - Math.floorMod(nowMillis, intervalMillis)
 
 /** The Chats root's callbacks. Opening and the actions go to app-scoped owners, never composition state. */
 interface ChatListActions {
@@ -155,7 +233,8 @@ interface ChatListActions {
  * failed. A long press offers Mute/Unmute (Mac revision 5 and later) and Delete, which asks
  * first. Back while searching clears the search.
  *
- * [icons] decodes each chat icon once per content.
+ * [icons] decodes each chat icon once per content, off the main thread. The stamps read
+ * [nowMillis] and refresh on each whole [stampRefreshMillis].
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -167,11 +246,13 @@ fun ChatListScreen(
     modifier: Modifier = Modifier,
     topBarActions: @Composable RowScope.() -> Unit = {},
     banners: @Composable ColumnScope.() -> Unit = {},
+    nowMillis: () -> Long = System::currentTimeMillis,
+    stampRefreshMillis: Long = STAMP_REFRESH_MILLIS,
 ) {
     val aiOff = content == ChatListContent.AiOff
     var searchFocused by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
-    BackHandler(enabled = query.isNotEmpty() || searchFocused) {
+    BackHandler(enabled = !aiOff && (query.isNotEmpty() || searchFocused)) {
         actions.setChatQuery("")
         focusManager.clearFocus()
     }
@@ -202,7 +283,7 @@ fun ChatListScreen(
                     onDone = { focusManager.clearFocus() },
                 )
             }
-            ChatListBody(content, actions, icons, onDelete = { deleting = it })
+            ChatListBody(content, actions, icons, nowMillis, stampRefreshMillis, onDelete = { deleting = it })
         }
     }
     val pending = deleting
@@ -224,7 +305,14 @@ fun ChatListScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ChatListBody(content: ChatListContent, actions: ChatListActions, icons: ChatIconCache<ImageBitmap>, onDelete: (String) -> Unit) {
+private fun ChatListBody(
+    content: ChatListContent,
+    actions: ChatListActions,
+    icons: ChatIconCache<ImageBitmap>,
+    nowMillis: () -> Long,
+    stampRefreshMillis: Long,
+    onDelete: (String) -> Unit,
+) {
     val refreshing = when (content) {
         is ChatListContent.Rows -> content.refreshing
         is ChatListContent.Empty -> content.refreshing
@@ -263,7 +351,7 @@ private fun ChatListBody(content: ChatListContent, actions: ChatListActions, ico
                 is ChatListContent.NoMatch -> Centered {
                     Text(content.text, style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center)
                 }
-                is ChatListContent.Rows -> ChatRows(content.rows, actions, icons, onDelete)
+                is ChatListContent.Rows -> ChatRows(content.rows, actions, icons, nowMillis, stampRefreshMillis, onDelete)
                 ChatListContent.AiOff -> Unit
             }
         }
@@ -271,12 +359,19 @@ private fun ChatListBody(content: ChatListContent, actions: ChatListActions, ico
 }
 
 @Composable
-private fun ChatRows(rows: List<ChatRowModel>, actions: ChatListActions, icons: ChatIconCache<ImageBitmap>, onDelete: (String) -> Unit) {
-    val now by produceState(System.currentTimeMillis()) {
-        // The stamps move from time of day to weekday as time passes: refresh them each minute.
+private fun ChatRows(
+    rows: List<ChatRowModel>,
+    actions: ChatListActions,
+    icons: ChatIconCache<ImageBitmap>,
+    nowMillis: () -> Long,
+    stampRefreshMillis: Long,
+    onDelete: (String) -> Unit,
+) {
+    val now by produceState(nowMillis(), nowMillis, stampRefreshMillis) {
+        // The stamps move from time of day to weekday as time passes: refresh them on each minute.
         while (true) {
-            delay(STAMP_REFRESH_MILLIS)
-            value = System.currentTimeMillis()
+            delay(nextStampRefreshDelay(nowMillis(), stampRefreshMillis))
+            value = nowMillis()
         }
     }
     val context = LocalContext.current
@@ -285,7 +380,9 @@ private fun ChatRows(rows: List<ChatRowModel>, actions: ChatListActions, icons: 
     val zone = remember(now) { ZoneId.systemDefault() }
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         items(rows, key = { it.chatID }) { row ->
-            val icon = remember(row.summary) { icons.icon(row.summary.iconView()) }
+            // Keyed by the chat (the item key) and the icon's content hash; decoded off the main thread.
+            val ref = row.icon
+            val icon by produceState(ref?.let { icons.cached(it.key) }, ref) { value = ref?.let { icons.load(it) } }
             ChatRowView(
                 row = row,
                 timestamp = chatTimestamp(row.lastModifiedMillis, now, zone, locale, use24Hour),

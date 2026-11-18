@@ -19,6 +19,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,7 +41,6 @@ import androidx.compose.ui.unit.dp
 import dev.bugobliterator.itermbuddy.core.chat.AgentState
 import dev.bugobliterator.itermbuddy.core.chat.ChatListEntry
 import dev.bugobliterator.itermbuddy.core.chat.ChatRow
-import dev.bugobliterator.itermbuddy.core.chat.ChatSummary
 import dev.bugobliterator.itermbuddy.core.chat.DEFUNCT_SESSION_TEXT
 import dev.bugobliterator.itermbuddy.core.chat.MentionParser
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolution
@@ -73,8 +73,10 @@ fun agentStateLabel(state: AgentState): String? = when (state) {
  * [snippet] as the row shows it, iOS's `renderedSnippet` (`AM:4228-4247`): each @-mention the Mac
  * has answered is replaced by its display name, or [DEFUNCT_SESSION_TEXT] when it named nothing;
  * an unanswered one stays as written. Only "@"-signed mentions count (iOS parses the snippet with
- * the "@" required). Null for no snippet or an empty one. Markdown is shown as written (the
- * inline renderer comes with the conversation view).
+ * the "@" required). Null for no snippet or an empty one.
+ *
+ * Markdown stays raw here for now, unlike iOS (`AM:4229-4232`): the Conversation task's inline
+ * run model (`InlineRun`) is to render it, and the row then shows its runs.
  */
 fun renderedSnippet(snippet: String?, resolutions: Map<String, MentionResolution>): String? {
     if (snippet.isNullOrEmpty()) return null
@@ -93,37 +95,30 @@ fun renderedSnippet(snippet: String?, resolutions: Map<String, MentionResolution
 }
 
 /**
- * One chat row as shown: the Mac's [summary], the [snippet] already rendered ([renderedSnippet]),
- * whether it is [muted], its agent [state] and [unread] mark ([ChatRow]), and its long-press
- * [actions]. [toString] shows lengths and IDs only.
+ * One chat row as shown: the chat's ID, [title] and [lastModifiedMillis], the [snippet] already
+ * rendered ([renderedSnippet]), whether it is [muted], its agent [state] and [unread] mark
+ * ([ChatRow]), its long-press [actions], and its [icon] (a content hash and the bytes, decoded by
+ * [ChatIconCache] off the main thread). Built off the main thread by [ChatListPresenter].
+ * [toString] shows lengths and IDs only.
  */
+@Immutable
 data class ChatRowModel(
-    val summary: ChatSummary,
+    val chatID: String,
+    val title: String,
+    val lastModifiedMillis: Double,
     val snippet: String?,
     val muted: Boolean,
     val state: AgentState,
     val unread: Boolean,
     val actions: List<ChatRowAction>,
+    val icon: ChatIconRef?,
 ) {
-    val chatID: String get() = summary.id
-    val title: String get() = summary.title
-    val lastModifiedMillis: Double get() = summary.lastModifiedMillis
     val stateLabel: String? get() = agentStateLabel(state)
 
     override fun toString(): String =
         "ChatRowModel(chatID=$chatID, title(len=${title.length}), snippet(len=${snippet?.length}), muted=$muted, " +
-            "state=$state, unread=$unread, actions=$actions)"
+            "state=$state, unread=$unread, actions=$actions, icon=$icon)"
 }
-
-/** [row] as [ChatRowModel], its snippet rendered with [resolutions]. */
-fun chatRowModel(row: ChatRow, macRevision: Int?, resolutions: Map<String, MentionResolution>): ChatRowModel = ChatRowModel(
-    summary = row.entry.chat,
-    snippet = renderedSnippet(row.entry.snippet, resolutions),
-    muted = row.entry.muted == true,
-    state = row.state,
-    unread = row.unread,
-    actions = chatRowActions(row.entry, macRevision),
-)
 
 private val WORKING_COLOR = Color(0xFF34C759)
 private val WAITING_COLOR = Color(0xFFFF9F0A)
