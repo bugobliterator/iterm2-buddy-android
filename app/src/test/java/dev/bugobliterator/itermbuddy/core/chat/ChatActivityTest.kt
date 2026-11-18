@@ -5,6 +5,11 @@ import dev.bugobliterator.itermbuddy.core.chat.AgentState.IDLE
 import dev.bugobliterator.itermbuddy.core.chat.AgentState.UNKNOWN
 import dev.bugobliterator.itermbuddy.core.chat.AgentState.WAITING
 import dev.bugobliterator.itermbuddy.core.chat.AgentState.WORKING
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -18,14 +23,20 @@ class ChatActivityTest {
     private var now = 50_000L
     private val tracker = ChatActivityTracker({ now }, parkDebounceMillis = DEBOUNCE, snapshotSettleMillis = SETTLE)
 
-    /** Every state [CHAT] showed after each step, so a transient flash cannot hide. */
+    /** Every state [CHAT] was published with, so a transient flash cannot hide. */
     private val trail = mutableListOf<AgentState>()
+    private val collector = CoroutineScope(UnconfinedTestDispatcher())
+
+    init {
+        collector.launch { tracker.states.collect { trail += it[CHAT] ?: UNKNOWN } }
+    }
+
+    @After
+    fun stopCollecting() = collector.cancel()
 
     private var nextMessage = 0
 
     private fun state(chatID: String = CHAT): AgentState = tracker.states.value[chatID] ?: UNKNOWN
-
-    private fun record(): AgentState = state().also { trail += it }
 
     private fun advance(millis: Long, stepMillis: Long = 50) {
         var left = millis
@@ -34,7 +45,6 @@ class ChatActivityTest {
             now += step
             left -= step
             tracker.tick()
-            record()
         }
     }
 
@@ -64,7 +74,7 @@ class ChatActivityTest {
     fun turnStartedThenTypingIsWorking() {
         started()
         typing(true)
-        assertEquals(WORKING, record())
+        assertEquals(WORKING, state())
         advance(DEBOUNCE * 10)
         assertEquals(WORKING, state())
     }
@@ -90,9 +100,9 @@ class ChatActivityTest {
     }
 
     @Test
-    fun turnEndedWhileVisibleClearsAnEarlierDone() {
+    fun endedWhileVisibleClearsALatchedDone() {
         done()
-        working()
+        // An `ended` the owner watches, with no `started` in between to clear Done first.
         ended(visible = true)
         assertEquals(IDLE, state())
     }
@@ -115,10 +125,8 @@ class ChatActivityTest {
     fun endOfTurnTypingEdgeDoesNotFlashWaiting() {
         working()
         typing(false)
-        record()
         advance(DEBOUNCE - 1)
         ended()
-        record()
         advance(DEBOUNCE * 3)
         assertFalse(trail.toString(), WAITING in trail)
         assertEquals(DONE, state())
@@ -127,10 +135,9 @@ class ChatActivityTest {
     @Test
     fun startBeforeTypingDoesNotFlashWaiting() {
         started()
-        assertEquals(WORKING, record())
+        assertEquals(WORKING, state())
         advance(DEBOUNCE - 1)
         typing(true)
-        record()
         advance(DEBOUNCE * 3)
         assertFalse(trail.toString(), WAITING in trail)
         assertEquals(WORKING, state())
@@ -152,7 +159,8 @@ class ChatActivityTest {
     fun requestWithTypingOnIsWaiting() {
         working()
         deliver(WORKGROUP_PERMISSION)
-        assertEquals(WAITING, record())
+        trail.clear()
+        assertEquals(WAITING, state())
         advance(DEBOUNCE * 10)
         assertEquals(WAITING, state())
         assertFalse(WORKING in trail)
@@ -204,10 +212,10 @@ class ChatActivityTest {
     fun externalCommandDoesNotLatch() {
         working()
         deliver(MessageBody.ExternalCommand("send_text", "Send text", safe = null))
-        assertEquals(WORKING, record())
+        assertEquals(WORKING, state())
         for (card in NON_BLOCKING_CARDS) {
             deliver(card)
-            assertEquals(card.toString(), WORKING, record())
+            assertEquals(card.toString(), WORKING, state())
         }
         advance(DEBOUNCE * 3)
         assertFalse(WAITING in trail)
@@ -228,11 +236,11 @@ class ChatActivityTest {
         working()
         deliver(CLASSIC)
         typing(false)
-        assertEquals(WAITING, record())
+        assertEquals(WAITING, state())
         // The owner approved on the Mac: a notice, then executingCommand, typing still false (ChatClient:235-270).
         deliver(MessageBody.ClientNotice(ClientAction.Notice("Running make…")))
         deliver(MessageBody.ClientNotice(ClientAction.ExecutingCommand(COMMAND)))
-        assertEquals(WORKING, record())
+        assertEquals(WORKING, state())
         advance(DEBOUNCE * 10)
         assertEquals(WORKING, state())
         // The result is handled and typing resumes; a later quiet spell parks as usual.
@@ -299,6 +307,40 @@ class ChatActivityTest {
         assertEquals(WAITING, state())
         typing(true)
         assertEquals(WORKING, state())
+    }
+
+    @Test
+    fun clearedTypingParkAnsweredBeforeReconnectIsWorking() {
+        // Answered, typing back on, and the link dropped before the agent's next message.
+        for ((index, request) in listOf(CLASSIC, SELECT_SESSION, ENABLE_ORCHESTRATION).withIndex()) {
+            val chatID = "answered-$index"
+            history(request, chatID = chatID)
+            typing(true, chatID)
+            started(chatID)
+            assertEquals(request.toString(), WORKING, state(chatID))
+        }
+    }
+
+    @Test
+    fun staleLatchDoesNotFlashWaitingAtTurnStart() {
+        history(CLASSIC)
+        advance(SETTLE)
+        assertEquals(IDLE, state())
+        trail.clear()
+        deliver(MessageBody.PlainText("next question"), author = Participant.USER)
+        started()
+        typing(true)
+        assertEquals(WORKING, state())
+        assertFalse(trail.toString(), WAITING in trail)
+    }
+
+    @Test
+    fun staleRunningCommandDoesNotHoldANewTurnWorking() {
+        history(MessageBody.ClientNotice(ClientAction.ExecutingCommand(COMMAND)))
+        advance(SETTLE)
+        started()
+        advance(DEBOUNCE)
+        assertEquals(WAITING, state())
     }
 
     @Test
@@ -384,12 +426,11 @@ class ChatActivityTest {
         working()
         tracker.onLinkDown()
         history()
-        assertEquals(UNKNOWN, record())
+        assertEquals(UNKNOWN, state())
         advance(SETTLE - 1, stepMillis = 1)
         typing(true)
-        record()
         started()
-        assertEquals(WORKING, record())
+        assertEquals(WORKING, state())
         assertFalse(trail.toString(), DONE in trail)
     }
 
@@ -464,6 +505,20 @@ class ChatActivityTest {
         done()
         tracker.forget(CHAT)
         assertNull(tracker.states.value[CHAT])
+    }
+
+    @Test
+    fun inputsForAForgottenChatAreIgnored() {
+        working()
+        tracker.forget(CHAT)
+        typing(false)
+        deliver(CLASSIC)
+        ended()
+        started()
+        assertNull(tracker.states.value[CHAT])
+        history()
+        advance(SETTLE)
+        assertEquals(IDLE, state())
     }
 
     @Test
