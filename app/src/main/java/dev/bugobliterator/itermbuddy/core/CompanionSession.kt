@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy.core
 
+import dev.bugobliterator.itermbuddy.core.chat.ChatInboxStoppedException
 import dev.bugobliterator.itermbuddy.core.chat.ChatInput
 import dev.bugobliterator.itermbuddy.core.chat.ChatSink
 import dev.bugobliterator.itermbuddy.core.chat.isChatScoped
@@ -268,6 +269,9 @@ internal class CompanionSession(
      */
     @Volatile
     private var endingForSink = false
+
+    /** Whether a [ChatInboxStoppedException] has been logged on this session: it is logged once, not per frame. */
+    private var chatInboxStoppedLogged = false
 
     /** Whether the session ended because the Mac sent a message over the Noise reassembly cap. */
     val messageTooLarge: Boolean get() = channel.messageTooLarge
@@ -599,6 +603,13 @@ internal class CompanionSession(
                 if (!currentCoroutineContext().isActive) throw e
                 log("the $name sink failed on $kind: ${e.javaClass.simpleName}; ending the link")
                 endingForSink = true
+                return false
+            } catch (e: ChatInboxStoppedException) {
+                // A dead chat consumer refuses every chat frame at once: say so once per session.
+                if (!chatInboxStoppedLogged) {
+                    chatInboxStoppedLogged = true
+                    log("the $name sink failed on $kind: ${e.javaClass.simpleName}; chat inputs are refused from here on")
+                }
                 return false
             } catch (e: Exception) {
                 log("the $name sink failed on $kind: ${e.javaClass.simpleName}")

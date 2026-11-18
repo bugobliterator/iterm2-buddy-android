@@ -672,6 +672,7 @@ class ChatChannelTest {
         assertTrue("$failure", failure is CompanionRequestException)
         assertEquals(startedAt, currentTime)
         assertEquals("still the first link", 1, h.relay.phoneAdmissions.size)
+        assertEquals("logged once per session", 1, h.logs.count { "ChatInboxStoppedException" in it })
         assertTrue(h.client.state.value is ClientState.Connected)
     }
 
