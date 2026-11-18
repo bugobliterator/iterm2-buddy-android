@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy.core.chat
 
+import dev.bugobliterator.itermbuddy.core.RequestNotSentException
 import dev.bugobliterator.itermbuddy.core.stream.StreamLink
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
@@ -22,12 +23,16 @@ sealed interface ChatListState {
     /** No list yet. */
     data object Loading : ChatListState
 
-    /** The Mac's list, in its order (most recent first); [refreshing] while a refetch is out. */
-    data class Loaded(val entries: List<ChatListEntry>, val refreshing: Boolean) : ChatListState {
-        override fun toString(): String = "Loaded(entries=${entries.size}, refreshing=$refreshing)"
+    /**
+     * The Mac's list, in its order (most recent first); [refreshing] while a refetch is out;
+     * [refreshFailed] when the latest refetch failed and these are the last entries read.
+     */
+    data class Loaded(val entries: List<ChatListEntry>, val refreshing: Boolean, val refreshFailed: Boolean = false) :
+        ChatListState {
+        override fun toString(): String = "Loaded(entries=${entries.size}, refreshing=$refreshing, refreshFailed=$refreshFailed)"
     }
 
-    /** The list could not be fetched or read; [retryable] offers Try again (pull to refresh). */
+    /** No list could be fetched or read; [retryable] offers Try again (pull to refresh). */
     data class Failed(val retryable: Boolean) : ChatListState
 
     /** AI is turned off on the Mac, which refuses every chat request (`HB:2276-2330`). */
@@ -40,19 +45,28 @@ sealed interface ConversationState {
 
     /**
      * The transcript: [messages] is a read-only snapshot (the transcript itself stays on the chat
-     * consumer), [version] changes with every snapshot. [stale]: served from the cache while a
-     * refetch is out, after it failed, or after an append was lost (iOS's soft banner,
-     * `AM:2934-3010`). [deleted]: missing from the Mac's list (`AM:2877-2900`), shown with
+     * consumer); [version] is unique to that snapshot within the process. [stale]: served from the
+     * cache while a refetch is out, after it failed, or after an append was lost (iOS's soft
+     * banner, `AM:2934-3010`). [deleted]: missing from the Mac's list (`AM:2877-2900`), shown with
      * [ChatRepository.DELETED_CHAT_NOTICE]. [sendable]: connected, AI available, not deleted, and
      * a history for this chat received on the current link.
+     *
+     * Equality compares [version] and the flags only, never the messages: the version names the
+     * snapshot, so a republish of the same snapshot is equal at no cost.
      */
-    data class Shown(
+    class Shown(
         val messages: List<ChatMessage>,
         val version: Long,
         val stale: Boolean,
         val deleted: Boolean,
         val sendable: Boolean,
     ) : ConversationState {
+        override fun equals(other: Any?): Boolean =
+            other is Shown && other.version == version && other.stale == stale && other.deleted == deleted &&
+                other.sendable == sendable
+
+        override fun hashCode(): Int = listOf(version, stale, deleted, sendable).hashCode()
+
         override fun toString(): String =
             "Shown(messages=${messages.size}, version=$version, stale=$stale, deleted=$deleted, sendable=$sendable)"
     }
@@ -106,24 +120,34 @@ data class ChatTimeouts(
  * history [ChatInput.PayloadTooLarge] on link N means subscribed on N whenever it lands, even after
  * the request timed out (the Mac installs the subscription first, `HB:1411-1427`). Each subscribe's
  * request ID maps to its [SubscribeTicket] for the life of the link, so a reply that lands late
- * still answers it. The request's outcome only drives the banner and settles the ticket.
+ * still answers it. The request's outcome only drives the banner and settles the ticket; a
+ * request that never reached the Mac ([RequestNotSentException]) settles as answered by an error,
+ * so it is never blamed for a link that ends on an oversized frame.
+ *
+ * **AI off.** The Mac drops every subscription and lists no chats while AI is off (`HB:283-288`,
+ * `HB:2250-2269`), so list values are not applied then: the entries, seen marks, Done latches and
+ * transcripts are kept, read-only, until AI is back and the list is fetched again.
  *
  * **Histories and deliveries.** A history replaces the chat's transcript when the chat is open or
  * cached and is dropped otherwise (watched chats cost no transcript memory); it seeds the activity
  * tracker. A delivery merges only into a transcript built from a history on the current link
- * (`AM:4296-4313`), and always feeds the tracker. A lost append (a delivery over the raw cap, or an
- * undecodable delta) marks the transcript stale and resubscribes the chat once per link.
+ * (`AM:4296-4313`), and always feeds the tracker. A lost append (a delivery over the raw cap, an
+ * undecodable raw delivery, or an undecodable delta) marks a held transcript stale and resubscribes
+ * its chat once per link.
  *
  * **Too large.** A history over the raw chat cap makes its chat too large for the process (its
  * subscription still feeds its live state); a link ended by a frame over the Noise cap names the
  * one unanswered subscribe as too large, or makes the unanswered ones suspects, retried first and
- * alone ([OversizedChats], [ChatSubscriptions]). Only [retry] subscribes a too-large chat again.
+ * alone ([OversizedChats], [ChatSubscriptions]). Only [retry] subscribes a too-large chat again,
+ * or the chat leaving the list and coming back. A link ended that way while only the list request
+ * was out marks the list too large for the process: it is not fetched again until [refresh].
  *
  * **Unread.** A chat is unread when the Mac's `lastModified` is past the owner's mark
  * ([ChatSeenStore], Mac values only, never phone time), or its turn ended unseen (Done). A chat's
- * first appearance sets its mark. Marked seen: on opening; at each list value while it is visible;
- * at the first list value past an own send ([noteOwnSend]); and at a list value that moved while
- * the chat's newest visible delivery on this link is the owner's (typed on the Mac, `CLM:122-129`).
+ * first appearance sets its mark (one store write per list). Marked seen: on opening; at each list
+ * value while it is visible; at the first list value past an own send ([noteOwnSend]); and at a
+ * list value that moved while the chat's newest visible delivery on this link is the owner's
+ * (typed on the Mac, `CLM:122-129`).
  *
  * **Memory.** Transcripts are kept for open conversations and the `closedTranscripts` most
  * recently closed ([ChatBudgets]); attachment bytes under [ChatBudgets.attachments] per transcript.
@@ -185,14 +209,14 @@ class ChatRepository(
         /** An append was lost since the history (a resubscribe is out, or was refused). */
         var lostAppend = false
 
-        /** The transcript the last snapshot was taken from, its version and when. */
+        /** The transcript the last snapshot was taken from, its version, and when (null: none yet). */
         var snapshotOf: Transcript? = null
-        var snapshotVersion = -1L
-        var snapshotAtMillis = Long.MIN_VALUE
+        var snapshotOfVersion = -1L
+        var snapshotAtMillis: Long? = null
         var snapshot: List<ChatMessage> = emptyList()
 
-        /** Counts the snapshots taken, for [ConversationState.Shown.version]. */
-        var snapshots = 0L
+        /** [ConversationState.Shown.version] of [snapshot]. */
+        var snapshotSerial = 0L
     }
 
     private val oversized = OversizedChats()
@@ -207,14 +231,24 @@ class ChatRepository(
     private var ai = true
     private var entries: List<ChatListEntry>? = null
 
+    /** [entries] by chat ID. */
+    private val entryByID = HashMap<String, ChatListEntry>()
+
     /** A whole list arrived on the current link (subscriptions plan with it only then). */
     private var listOnThisLink = false
+
+    /** The latest list request failed, or the latest list could not be read. */
     private var listFailed = false
     private var listInFlight = false
 
+    /**
+     * Process-wide: a link ended on a frame over the Noise cap while only the list request was
+     * out, so the list is too large to read. Not fetched again until [refresh] or [clear].
+     */
+    private var listTooLarge = false
+
     /** Bumped by every list applied, so a failed request does not hide a list that landed meanwhile. */
     private var listGeneration = 0L
-    private val listRequests = HashSet<Long>()
     private val subscribeTickets = HashMap<Long, SubscribeTicket>()
 
     /** Chats whose subscribe on this link failed (an error or an undecodable reply) or timed out, with no history yet. */
@@ -237,10 +271,19 @@ class ChatRepository(
 
     /** Each listed chat's `lastModified` in the previous list. */
     private val previousModified = HashMap<String, Double>()
+
+    /** Open chats that left the list: forgotten once closed, unless listed again. */
+    private val leftWhileOpen = HashSet<String>()
     private var planNeeded = false
-    private var publishedAtMillis = Long.MIN_VALUE
+    private var publishedAtMillis: Long? = null
     private var timer: Job? = null
     private var timerAtMillis = Long.MAX_VALUE
+
+    /** Names the scheduled timer; a timer's post that is no longer current changes no schedule. */
+    private var timerSerial = 0L
+
+    /** Process-wide counter for [ConversationState.Shown.version]. */
+    private var snapshotSerials = 0L
     private var cost = LinkCost(0, 0)
     private var lastWanted: List<String> = emptyList()
 
@@ -251,7 +294,11 @@ class ChatRepository(
         var allWantedLogged = false
     }
 
-    /** The conversation flows the UI asked for, by chat ID; published by the consumer. */
+    /**
+     * The conversation flows handed out, by chat ID. Never removed while the process is paired, so
+     * a screen keeps the instance it was given across closes, reopens and evictions; [clear] resets
+     * them to Loading. They grow with the chats the owner opens, a handful per session.
+     */
     private val conversationFlows = ConcurrentHashMap<String, MutableStateFlow<ConversationState>>()
 
     /** For tests: transcripts held, as of the last publish. */
@@ -275,7 +322,11 @@ class ChatRepository(
     /** Where the client delivers chat inputs: accept only enqueues. */
     val sink: ChatSink get() = inbox
 
-    /** [chatID]'s conversation. Loading until it is [open]ed and its history lands. Thread-safe. */
+    /**
+     * [chatID]'s conversation, for a chat the owner [open]s: Loading until its history lands, and
+     * Loading again once it is closed and its transcript no longer kept. The same instance for the
+     * life of the pairing (see [conversationFlows]). Thread-safe.
+     */
     fun conversation(chatID: String): StateFlow<ConversationState> =
         conversationFlows.computeIfAbsent(chatID) { MutableStateFlow(ConversationState.Loading) }
 
@@ -295,14 +346,13 @@ class ChatRepository(
     /** The conversation on screen, or null. Visible only while [setForeground] says the app is. */
     fun setVisible(chatID: String?) = post {
         visibleChat = chatID
-        if (chatID != null && foreground) ownerSaw(chatID)
+        visibilityChanged()
     }
 
     /** Whether the app is in the foreground (false while locked or backgrounded): no chat is visible otherwise. */
     fun setForeground(foreground: Boolean) = post {
         this.foreground = foreground
-        val chatID = visibleChat
-        if (foreground && chatID != null) ownerSaw(chatID)
+        visibilityChanged()
     }
 
     /** Try again for [chatID]: subscribes it once more on this link, too large or failed included. */
@@ -314,8 +364,11 @@ class ChatRepository(
         planNeeded = true
     }
 
-    /** Refetches the list (pull to refresh, or Try again after a failed list). */
-    fun refresh() = post { if (ai) requestList() }
+    /** Refetches the list (pull to refresh, or Try again after a failed list); lifts a too-large list. */
+    fun refresh() = post {
+        listTooLarge = false
+        if (ai) requestList()
+    }
 
     /**
      * Unpair: drops everything, ignores every input from the links seen so far, and clears the
@@ -328,7 +381,7 @@ class ChatRepository(
      * past the chat's current `lastModified` is the owner's own bump, not news.
      */
     internal fun noteOwnSend(chatID: String) = post {
-        entries?.firstOrNull { it.chat.id == chatID }?.let { sendMarks[chatID] = it.chat.lastModifiedMillis }
+        entryByID[chatID]?.let { sendMarks[chatID] = it.chat.lastModifiedMillis }
     }
 
     private fun post(block: () -> Unit) {
@@ -364,9 +417,7 @@ class ChatRepository(
         ai = up.aiAvailable
         subscriptions = ChatSubscriptions(oversized)
         listOnThisLink = false
-        listFailed = false
         listInFlight = false
-        listRequests.clear()
         subscribeTickets.clear()
         failedThisLink.clear()
         newestDeliveryAuthor.clear()
@@ -384,6 +435,13 @@ class ChatRepository(
 
     private fun endLink(messageTooLarge: Boolean) {
         val linkId = currentLink ?: return
+        if (messageTooLarge && listInFlight && subscriptions.outstanding.isEmpty()) {
+            // Only the list was out: it is what ended the link. Fetching it on every link would
+            // end every link (and the live view with it).
+            listTooLarge = true
+            listFailed = true
+            log("chat link $linkId ended on a frame over the Noise cap with only the list out: the list is too large")
+        }
         val before = oversized.tooLarge
         subscriptions.linkEnded(messageTooLarge)
         val named = oversized.tooLarge - before
@@ -400,7 +458,7 @@ class ChatRepository(
     private fun payload(input: ChatInput.Payload) {
         when (val decoded = input.decode(budgets.attachments)) {
             is PayloadDecoding.Decoded -> message(decoded.message, input.requestID, input.linkId, input.size)
-            is PayloadDecoding.Undecodable -> undecodable(decoded, input.linkId)
+            is PayloadDecoding.Undecodable -> undecodable(decoded, input.chatID, input.linkId)
         }
     }
 
@@ -414,10 +472,7 @@ class ChatRepository(
                 // AM:4336-4345: from the open transcript and the cache alike; unknown IDs are ignored.
                 conversations[message.chatID]?.transcript?.removeAll(message.messageIDs.toSet())
             }
-            is MacMessage.ChatsAndSessions -> {
-                if (requestID != null) listRequests -= requestID
-                applyList(message.chats)
-            }
+            is MacMessage.ChatsAndSessions -> applyList(message.chats)
             is MacMessage.ChatListChanged -> applyList(message.chats)
             is MacMessage.ChatCreated -> chatCreated(message.entry)
             is MacMessage.AiAvailabilityChanged -> if (message.available) aiOn() else aiOff()
@@ -429,7 +484,9 @@ class ChatRepository(
     private fun history(history: MacMessage.History, requestID: Long?, linkId: Long, frameBytes: Int) {
         val chatID = history.chatID
         requestID?.let(subscribeTickets::get)?.let { subscriptions.settled(it, SubscribeOutcome.ANSWERED) }
-        subscriptions.subscribed(chatID)
+        // A history in flight when AI went off: the Mac has dropped that subscription again
+        // (HB:2250-2269), so it is not subscribed, and is planned again when AI is back.
+        if (ai) subscriptions.subscribed(chatID)
         failedThisLink -= chatID
         cost.histories++
         cost.bytes += frameBytes
@@ -455,8 +512,17 @@ class ChatRepository(
         if (result == MergeResult.Ignored(IgnoreReason.UNREADABLE_DELTA)) lostAppend(chatID)
     }
 
+    /**
+     * An append for [chatID] was lost. Only a held transcript is hurt by it (a watched chat keeps
+     * none): it is marked stale and the chat subscribed once more on this link for a fresh history.
+     */
     private fun lostAppend(chatID: String) {
-        conversations[chatID]?.lostAppend = true
+        val conversation = conversations[chatID]
+        if (conversation?.transcript == null) {
+            log("chat $chatID lost an append; no transcript is held")
+            return
+        }
+        conversation.lostAppend = true
         if (subscriptions.resubscribe(chatID)) {
             log("chat $chatID lost an append: subscribing again")
             planNeeded = true
@@ -474,7 +540,7 @@ class ChatRepository(
                     return
                 }
                 log("chat $chatID history of ${input.sizeBytes} bytes is over the chat cap: too large")
-                subscriptions.subscribed(chatID, tooLarge = true)
+                if (ai) subscriptions.subscribed(chatID, tooLarge = true) else oversized.foundTooLarge(chatID)
                 failedThisLink -= chatID
                 cost.histories++
                 cost.bytes += input.sizeBytes
@@ -493,16 +559,14 @@ class ChatRepository(
             }
             else -> {
                 log("a ${input.case} of ${input.sizeBytes} bytes is over the chat cap")
-                input.requestID?.let { listRequests -= it }
                 listFailed = true
             }
         }
     }
 
-    private fun undecodable(failure: PayloadDecoding.Undecodable, linkId: Long) {
+    private fun undecodable(failure: PayloadDecoding.Undecodable, chatID: String?, linkId: Long) {
         log("a chat ${failure.case} did not decode: ${failure.reason}")
-        val requestID = failure.requestID
-        val ticket = requestID?.let(subscribeTickets::get)
+        val ticket = failure.requestID?.let(subscribeTickets::get)
         when {
             ticket != null -> {
                 // The reply arrived whole: it answers the subscribe, but the chat has no history.
@@ -511,31 +575,36 @@ class ChatRepository(
                 if (conversation?.historyLink != linkId) failedThisLink += ticket.chatID
                 planNeeded = true
             }
-            failure.case == "chatsAndSessions" || failure.case == "chatListChanged" -> {
-                requestID?.let { listRequests -= it }
-                listFailed = true
-            }
+            failure.case == "delivery" -> if (chatID != null) lostAppend(chatID)
+            failure.case == "chatsAndSessions" || failure.case == "chatListChanged" -> listFailed = true
         }
     }
 
     // The list
 
     private fun applyList(newEntries: List<ChatListEntry>) {
+        if (!ai) {
+            // HB:283-288: with AI off the Mac lists no chats. That says nothing about which exist:
+            // keep the list, marks, latches and transcripts until AI is back.
+            log("a chat list of ${newEntries.size} while AI is off: not applied")
+            return
+        }
         val previous = entries
-        entries = newEntries
+        setEntries(newEntries)
         listOnThisLink = true
         listFailed = false
         listGeneration++
-        val listed = newEntries.mapTo(HashSet()) { it.chat.id }
-        previous?.forEach { if (it.chat.id !in listed) forgetChat(it.chat.id) }
+        previous?.forEach { if (it.chat.id !in entryByID) leftList(it.chat.id) }
+        val firstMarks = HashMap<String, Double>()
         for (entry in newEntries) {
             val chatID = entry.chat.id
+            leftWhileOpen -= chatID
             val modified = entry.chat.lastModifiedMillis
             val mark = seen.seen(chatID)
             val moved = previousModified[chatID]?.let { modified > it } == true
             val pastSend = sendMarks[chatID]?.let { modified > it } == true
             when {
-                mark == null -> seen.markSeen(chatID, modified)
+                mark == null -> firstMarks[chatID] = modified
                 isVisible(chatID) -> seen.markSeen(chatID, modified)
                 pastSend -> seen.markSeen(chatID, modified)
                 moved && newestDeliveryAuthor[chatID] == Participant.USER -> seen.markSeen(chatID, modified)
@@ -543,28 +612,44 @@ class ChatRepository(
             if (pastSend) sendMarks -= chatID
             previousModified[chatID] = modified
         }
+        // One write for every first appearance (a fresh pairing lists them all at once).
+        if (firstMarks.isNotEmpty()) seen.markSeenAll(firstMarks)
         planNeeded = true
     }
 
-    /** A chat that left the list: its cached transcript, activity and marks go (`AM:2242-2254`). */
+    private fun setEntries(newEntries: List<ChatListEntry>?) {
+        entries = newEntries
+        entryByID.clear()
+        newEntries?.forEach { entryByID[it.chat.id] = it }
+    }
+
+    /**
+     * [chatID] left the list. An open chat keeps its activity and mark while the owner reads it
+     * (it is latched deleted), and is forgotten when closed unless listed again.
+     */
+    private fun leftList(chatID: String) {
+        if (chatID in open) leftWhileOpen += chatID else forgetChat(chatID)
+    }
+
+    /** A chat that is gone: its cached transcript, activity, marks and too-large mark go (`AM:2242-2254`). */
     private fun forgetChat(chatID: String) {
+        leftWhileOpen -= chatID
         tracker.forget(chatID)
         seen.forget(chatID)
+        oversized.tryAgain(chatID)
         sendMarks -= chatID
         previousModified -= chatID
         newestDeliveryAuthor -= chatID
-        if (chatID !in open) {
-            closed -= chatID
-            conversations -= chatID
-            conversationFlows.remove(chatID)?.value = ConversationState.Loading
-        }
+        closed -= chatID
+        conversations -= chatID
     }
 
     /** `chatCreated`: inserted at the top only if missing (`AM:2587-2591`); with no list yet the next list brings it. */
     private fun chatCreated(entry: ChatListEntry) {
         val current = entries ?: return
-        if (current.any { it.chat.id == entry.chat.id }) return
-        entries = listOf(entry) + current
+        if (!ai || entry.chat.id in entryByID) return
+        setEntries(listOf(entry) + current)
+        leftWhileOpen -= entry.chat.id
         if (seen.seen(entry.chat.id) == null) seen.markSeen(entry.chat.id, entry.chat.lastModifiedMillis)
         previousModified[entry.chat.id] = entry.chat.lastModifiedMillis
         planNeeded = true
@@ -573,15 +658,15 @@ class ChatRepository(
     private fun requestList() {
         val linkId = currentLink ?: return
         if (listInFlight) return
+        if (listTooLarge) {
+            log("the chat list is too large to fetch; waiting for a refresh")
+            listFailed = true
+            return
+        }
         listInFlight = true
         listFailed = false
         val generation = listGeneration
-        launchRequest(
-            PhoneMessage.ListChatsAndSessions,
-            linkId,
-            timeouts.list,
-            onSent = { id -> listRequests += id },
-        ) { outcome ->
+        launchRequest(PhoneMessage.ListChatsAndSessions, linkId, timeouts.list, onSent = {}) { outcome ->
             listInFlight = false
             when (outcome) {
                 is Outcome.Replied -> when (val reply = outcome.reply) {
@@ -594,8 +679,8 @@ class ChatRepository(
                     }
                     else -> log("unexpected reply to the chat list request: ${reply.javaClass.simpleName}")
                 }
-                is Outcome.Failed -> {
-                    log("the chat list request failed: ${outcome.reason}")
+                is Outcome.Failed, is Outcome.NotSent -> {
+                    log("the chat list request failed: $outcome")
                     if (listGeneration == generation) listFailed = true
                 }
             }
@@ -644,6 +729,12 @@ class ChatRepository(
                     log("unexpected reply to chat $chatID subscribe: ${reply.javaClass.simpleName}")
                     subscriptions.settled(ticket, SubscribeOutcome.ANSWERED)
                 }
+            }
+            is Outcome.NotSent -> {
+                // The Mac never saw it: nothing of it can still arrive, and it cannot have ended a link.
+                log("chat $chatID subscribe was not sent: ${outcome.reason}")
+                subscriptions.settled(ticket, SubscribeOutcome.ERROR)
+                if (chatID !in subscriptions.subscribedChats) failedThisLink += chatID
             }
             is Outcome.Failed -> {
                 // Still installed on the Mac: its history may land later and answer the ticket.
@@ -710,52 +801,62 @@ class ChatRepository(
             return
         }
         open -= chatID
-        val conversation = conversations[chatID]
-        // A deleted chat is readable only until the owner leaves it (AM:441-442).
-        if (conversation?.transcript != null && !isDeleted(chatID)) {
+        if (chatID in leftWhileOpen) {
+            // Deleted while open: readable only until the owner leaves it (AM:441-442).
+            forgetChat(chatID)
+        } else if (conversations[chatID]?.transcript != null) {
             closed += chatID
             while (closed.size > budgets.closedTranscripts) {
                 val evicted = closed.first()
                 closed -= evicted
                 conversations -= evicted
-                conversationFlows.remove(evicted)?.value = ConversationState.Loading
             }
         } else {
             conversations -= chatID
-            conversationFlows.remove(chatID)?.value = ConversationState.Loading
         }
         planNeeded = true
     }
 
     private fun isVisible(chatID: String): Boolean = foreground && visibleChat == chatID
 
+    private fun visibilityChanged() {
+        val shown = visibleChat.takeIf { foreground }
+        tracker.visibilityChanged(shown)
+        if (shown != null) ownerSaw(shown)
+    }
+
     /** The owner sees [chatID] now: its mark moves to the Mac's latest value and Done ends. */
     private fun ownerSaw(chatID: String) {
-        entries?.firstOrNull { it.chat.id == chatID }?.let { seen.markSeen(chatID, it.chat.lastModifiedMillis) }
+        entryByID[chatID]?.let { seen.markSeen(chatID, it.chat.lastModifiedMillis) }
         tracker.markRead(chatID)
     }
 
     // Unpair
 
     private fun clearNow() {
+        // The barrier is taken when the consumer runs this, not when clear() was called: every
+        // input already in the inbox was consumed before it, and every later one names a link up
+        // to newestLink (dropped) or a newer link, which can only come from a new pairing because
+        // the client numbers links in order and the old pairing's links have all been seen here.
         clearedThrough = maxOf(newestLink, currentLink ?: 0)
         log("chat state cleared through link $clearedThrough")
         currentLink = null
         subscriptions = ChatSubscriptions(oversized)
         for (chatID in tracker.states.value.keys) tracker.forget(chatID)
-        entries = null
+        setEntries(null)
         listOnThisLink = false
         listFailed = false
         listInFlight = false
-        listRequests.clear()
+        listTooLarge = false
         subscribeTickets.clear()
         failedThisLink.clear()
         open.clear()
         closed.clear()
         conversations.clear()
+        leftWhileOpen.clear()
         conversationFlows.values.forEach { it.value = ConversationState.Loading }
-        conversationFlows.clear()
         visibleChat = null
+        tracker.visibilityChanged(null)
         newestDeliveryAuthor.clear()
         sendMarks.clear()
         previousModified.clear()
@@ -766,6 +867,7 @@ class ChatRepository(
         timer?.cancel()
         timer = null
         timerAtMillis = Long.MAX_VALUE
+        timerSerial++
         oversized.clear()
         seen.clear()
         planNeeded = false
@@ -777,7 +879,15 @@ class ChatRepository(
     private sealed interface Outcome {
         class Replied(val reply: MacMessage) : Outcome
 
-        class Failed(val reason: String) : Outcome
+        /** It failed after it may have reached the Mac (a timeout, the connection closed). */
+        class Failed(val reason: String) : Outcome {
+            override fun toString(): String = reason
+        }
+
+        /** It never reached the Mac ([RequestNotSentException]). */
+        class NotSent(val reason: String) : Outcome {
+            override fun toString(): String = "not sent: $reason"
+        }
     }
 
     /**
@@ -802,6 +912,8 @@ class ChatRepository(
                 )
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: RequestNotSentException) {
+                Outcome.NotSent(e.javaClass.simpleName)
             } catch (e: Exception) {
                 Outcome.Failed(e.javaClass.simpleName)
             }
@@ -831,20 +943,22 @@ class ChatRepository(
         }
         val now = nowMillis()
         val interval = timeouts.snapshotInterval.inWholeMilliseconds
-        if (drained || now - publishedAtMillis >= interval) publish(now) else scheduleAt(publishedAtMillis + interval)
+        val last = publishedAtMillis
+        if (drained || last == null || now - last >= interval) publish(now) else scheduleAt(last + interval)
         tracker.nextDeadlineMillis()?.let(::scheduleAt)
     }
 
     private fun publish(now: Long) {
         publishedAtMillis = now
         aiFlow.value = ai
+        val listed = entries
         listFlow.value = when {
             currentLink != null && !ai -> ChatListState.AiUnavailable
-            listFailed -> ChatListState.Failed(retryable = true)
-            else -> entries?.let { ChatListState.Loaded(it, refreshing = listInFlight) } ?: ChatListState.Loading
+            listed == null -> if (listFailed) ChatListState.Failed(retryable = true) else ChatListState.Loading
+            else -> ChatListState.Loaded(listed, refreshing = listInFlight, refreshFailed = listFailed)
         }
         val states = tracker.states.value
-        rowsFlow.value = entries.orEmpty().map { entry ->
+        rowsFlow.value = listed.orEmpty().map { entry ->
             val chatID = entry.chat.id
             val state = states[chatID] ?: AgentState.UNKNOWN
             val mark = seen.seen(chatID)
@@ -863,17 +977,18 @@ class ChatRepository(
         val conversation = conversations[chatID]
         val transcript = conversation?.transcript
         if (conversation != null && transcript != null) {
-            if (conversation.snapshotOf !== transcript || conversation.snapshotVersion != transcript.version) {
+            if (conversation.snapshotOf !== transcript || conversation.snapshotOfVersion != transcript.version) {
                 val interval = timeouts.snapshotInterval.inWholeMilliseconds
+                val last = conversation.snapshotAtMillis
                 // A new history shows at once; a streaming transcript at most once per interval.
-                if (conversation.snapshotOf !== transcript || now - conversation.snapshotAtMillis >= interval) {
+                if (conversation.snapshotOf !== transcript || last == null || now - last >= interval) {
                     conversation.snapshot = transcript.messages()
                     conversation.snapshotOf = transcript
-                    conversation.snapshotVersion = transcript.version
+                    conversation.snapshotOfVersion = transcript.version
                     conversation.snapshotAtMillis = now
-                    conversation.snapshots++
+                    conversation.snapshotSerial = ++snapshotSerials
                 } else {
-                    scheduleAt(conversation.snapshotAtMillis + interval)
+                    scheduleAt(last + interval)
                 }
             }
             val linkId = currentLink
@@ -881,7 +996,7 @@ class ChatRepository(
             val deleted = isDeleted(chatID)
             return ConversationState.Shown(
                 messages = conversation.snapshot,
-                version = conversation.snapshots,
+                version = conversation.snapshotSerial,
                 stale = !current || conversation.lostAppend,
                 deleted = deleted,
                 sendable = current && ai && !deleted,
@@ -895,21 +1010,23 @@ class ChatRepository(
     }
 
     /** Deleted only on an authoritative list's word (`AM:2877-2900`): an empty history never means it. */
-    private fun isDeleted(chatID: String): Boolean = entries?.none { it.chat.id == chatID } ?: false
+    private fun isDeleted(chatID: String): Boolean = entries != null && chatID !in entryByID
 
     /** Has the consumer run [onTimer] at [atMillis] (or sooner, if already due sooner). */
     private fun scheduleAt(atMillis: Long) {
         if (timer?.isActive == true && timerAtMillis <= atMillis) return
         timer?.cancel()
         timerAtMillis = atMillis
+        val serial = ++timerSerial
         timer = scope.launch {
             delay((atMillis - nowMillis()).coerceAtLeast(0))
-            post { onTimer() }
+            post { onTimer(serial) }
         }
     }
 
-    private fun onTimer() {
-        timerAtMillis = Long.MAX_VALUE
+    private fun onTimer(serial: Long) {
+        // A superseded timer's post still ticks (harmless), but leaves the current schedule alone.
+        if (serial == timerSerial) timerAtMillis = Long.MAX_VALUE
         tracker.tick()
         publish(nowMillis())
     }

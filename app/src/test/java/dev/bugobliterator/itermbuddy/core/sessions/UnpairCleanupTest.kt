@@ -24,6 +24,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
@@ -113,10 +114,11 @@ class UnpairCleanupTest {
         advanceTimeBy(5.seconds)
         val chatID = FakeChatMac.SAMPLE_CHAT
         rig.chats.open(chatID)
+        val conversation = rig.chats.conversation(chatID)
         rig.chatMac.streamReply(chatID, appends = 2)
         advanceTimeBy(5.seconds)
         assertTrue(rig.chats.list.value is ChatListState.Loaded)
-        assertTrue(rig.chats.conversation(chatID).value is ConversationState.Shown)
+        assertTrue(conversation.value is ConversationState.Shown)
         assertNotNull(rig.chatSeen.seen(chatID))
         assertEquals("open but never on screen", AgentState.DONE, rig.chats.activity.value[chatID])
 
@@ -130,7 +132,8 @@ class UnpairCleanupTest {
         assertEquals(ChatListState.Loading, rig.chats.list.value)
         assertEquals(emptyList<ChatRow>(), rig.chats.rows.value)
         assertEquals(emptyMap<String, AgentState>(), rig.chats.activity.value)
-        assertEquals(ConversationState.Loading, rig.chats.conversation(chatID).value)
+        assertSame("the screen's flow is reset, not replaced", conversation, rig.chats.conversation(chatID))
+        assertEquals(ConversationState.Loading, conversation.value)
         assertNull(rig.chats.macRevision.value)
         assertNull("the seen marks belong to the old pairing", rig.chatSeen.seen(chatID))
     }

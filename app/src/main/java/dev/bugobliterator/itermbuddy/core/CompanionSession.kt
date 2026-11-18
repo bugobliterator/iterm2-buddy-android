@@ -112,7 +112,15 @@ internal class OkHttpRelayTransport(
 }
 
 /** A request could not complete: no live connection, the connection closed, or no reply in time. */
-class CompanionRequestException(message: String, cause: Throwable? = null) : IOException(message, cause)
+open class CompanionRequestException(message: String, cause: Throwable? = null) : IOException(message, cause)
+
+/**
+ * A [CompanionRequestException] for a message that never reached the Mac: not connected, the
+ * named link had ended, or the envelope could not be written whole (the channel then closes, so
+ * the Mac cannot read any part of it). A request failing this way was never seen by the Mac; any
+ * other failure may come after the Mac received it.
+ */
+class RequestNotSentException(message: String, cause: Throwable? = null) : CompanionRequestException(message, cause)
 
 /** How a session treats the Mac's first decrypted frame. */
 internal enum class ConfirmationMode {
@@ -390,14 +398,14 @@ internal class CompanionSession(
                 channel.encryptMessage(envelope)
             } catch (e: NoiseException) {
                 abort()
-                throw CompanionRequestException("the connection is closed", e)
+                throw RequestNotSentException("the connection is closed", e)
             }
             var sent = false
             try {
                 for (frame in frames) socket.send(frame)
                 sent = true
             } catch (e: IOException) {
-                throw CompanionRequestException("the frame could not be sent", e)
+                throw RequestNotSentException("the frame could not be sent", e)
             } finally {
                 // The nonce advanced for every frame: one not sent desynchronises the channel.
                 if (!sent) abort()
@@ -539,10 +547,12 @@ internal class CompanionSession(
         val size = plaintext.size
         val tooLarge = size > maxRawChatBytes
         // A second scan only for a frame too large to decode, before the lock: it names the chat.
-        val chatID = if (tooLarge) peekChatID(plaintext) else null
+        // A raw delivery names its chat too, so one that does not decode still marks that chat's
+        // transcript as having lost an append.
+        val chatID = if (tooLarge || case == DELIVERY_CASE) peekChatID(plaintext) else null
         if (tooLarge) log("a $case of $size bytes is over the raw chat cap of $maxRawChatBytes; not parsed")
         val taken = deliverChat(case) { id ->
-            if (tooLarge) ChatInput.PayloadTooLarge(id, case, chatID, requestID, size) else ChatInput.Payload(id, requestID, case, plaintext)
+            if (tooLarge) ChatInput.PayloadTooLarge(id, case, chatID, requestID, size) else ChatInput.Payload(id, requestID, case, plaintext, chatID)
         }
         settleChatReply(requestID, taken, MacMessage.ChatPayloadTaken(case, size))
     }

@@ -465,9 +465,9 @@ class CompanionClient internal constructor(
     }
 
     private fun linkFor(onLink: Long?): CompanionSession {
-        val current = active ?: throw CompanionRequestException("not connected")
+        val current = active ?: throw RequestNotSentException("not connected")
         if (onLink != null && onLink != current.id) {
-            throw CompanionRequestException("link $onLink has ended; the current link is ${current.id}")
+            throw RequestNotSentException("link $onLink has ended; the current link is ${current.id}")
         }
         return current.session
     }

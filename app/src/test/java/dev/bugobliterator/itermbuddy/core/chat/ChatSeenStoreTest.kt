@@ -134,6 +134,20 @@ class ChatSeenStoreTest {
         assertNull(store.seen(CHAT_A))
     }
 
+    @Test
+    fun markSeenAllWritesOnce() {
+        val store = store()
+        store.markSeenAll((1..10).associate { "chat-$it" to it * 1000.0 })
+        assertEquals(1, store.saves)
+        store.markSeenAll((1..10).associate { "chat-$it" to it * 1000.0 })
+        assertEquals("nothing changed, nothing written", 1, store.saves)
+        assertEquals(7000.0, store().seen("chat-7")!!, 0.0)
+        val memory = InMemoryChatSeenStore()
+        memory.markSeenAll(mapOf("a" to 1.0, "b" to Double.NaN))
+        assertEquals(1.0, memory.seen("a")!!, 0.0)
+        assertNull(memory.seen("b"))
+    }
+
     private companion object {
         const val CHAT_A = "6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E"
         const val CHAT_B = "9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E"

@@ -221,6 +221,18 @@ class ChatActivityTracker(
         publish()
     }
 
+    /**
+     * The conversation on screen is now [chatID] (null for none, or the app is not in the
+     * foreground). A history snapshot still settling judges an unseen end of turn by the
+     * visibility at settle time, not at the history's arrival, so a chat the owner opened (or
+     * left) inside the settle window latches Done only if it is not on screen then.
+     */
+    fun visibilityChanged(chatID: String?) {
+        for ((id, chat) in chats) {
+            if (chat.snapshotPendingSinceMillis != null) chat.historyVisible = id == chatID
+        }
+    }
+
     /** Drops [chatID] entirely (deleted, or no longer listed); its late inputs are ignored until [onHistory]. */
     fun forget(chatID: String) {
         chats.remove(chatID)

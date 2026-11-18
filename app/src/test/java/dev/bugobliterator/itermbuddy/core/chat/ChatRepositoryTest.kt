@@ -30,7 +30,9 @@ import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -256,7 +258,8 @@ class ChatRepositoryTest {
         val reply = rig.shown(B).textOf(OPENING_ID)
         assertNotNull(reply)
         assertEquals("every delivery applied", DELIVERIES, Regex(Regex.escape(APPENDED)).findAll(reply!!).count())
-        assertTrue("accepts only enqueue: ${rig.acceptMillis.max()}", rig.acceptMillis.all { it == 0L })
+        assertTrue("every delivery went through the sink: ${rig.acceptMillis.size}", rig.acceptMillis.size > DELIVERIES)
+        assertEquals("accepts only enqueue: the longest accept, in virtual ms", 0L, rig.acceptMillis.max())
         assertTrue(rig.logs.joinToString("\n"), rig.logs.none { "did not take" in it || "ending the link" in it })
         assertTrue("snapshots are rate-limited: ${snapshots.size}", snapshots.size < 20)
         assertEquals(AgentState.UNKNOWN, rig.repository.activity.value[A] ?: AgentState.UNKNOWN)
@@ -705,7 +708,8 @@ class ChatRepositoryTest {
             rig.repository.close(id)
             settle()
         }
-        assertEquals("evicted", ConversationState.Loading, rig.repository.conversation(ids[0]).value)
+        val first = rig.repository.conversation(ids[0])
+        assertEquals("evicted", ConversationState.Loading, first.value)
         ids.subList(1, 4).forEach { assertEquals(sampleHistory.size, rig.shown(it).messages.size) }
         assertEquals(3, rig.repository.heldTranscripts)
 
@@ -717,6 +721,8 @@ class ChatRepositoryTest {
         settle()
         assertEquals("an evicted one is fetched again", before + 1, rig.subscribes.size)
         assertEquals(sampleHistory.size, rig.shown(ids[0]).messages.size)
+        assertSame("the screen keeps its flow across the eviction", first, rig.repository.conversation(ids[0]))
+        assertTrue(first.value is ConversationState.Shown)
     }
 
     @Test
@@ -768,6 +774,270 @@ class ChatRepositoryTest {
         assertEquals("no longer too large", 2, rig.subscribesFor(B))
     }
 
+
+    // Review fixes
+
+    @Test
+    fun aiOffEmptyListKeepsMarksAndTranscripts() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
+        rig.connect()
+        rig.repository.open(A)
+        settle()
+        rig.chatMac.streamReply(B, appends = 1)
+        settle()
+        assertEquals(AgentState.DONE, rig.row(B).state)
+
+        rig.chatMac.flipAi(false)
+        rig.chats = emptyList()
+        rig.pushList()
+        settle()
+        assertEquals(ChatListState.AiUnavailable, rig.repository.list.value)
+        assertEquals("the empty list while AI is off is not applied", listOf(A, B), rig.repository.rows.value.map { it.entry.chat.id })
+        assertNotNull(rig.seen.seen(A))
+        assertNotNull(rig.seen.seen(B))
+        assertEquals("the Done latch survives", AgentState.DONE, rig.row(B).state)
+        val shown = rig.shown(A)
+        assertFalse("not deleted", shown.deleted)
+        assertEquals(sampleHistory.size, shown.messages.size)
+    }
+
+    @Test
+    fun quickCloseAndReopenIsNotStuck() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME)
+        rig.connect()
+        settle()
+        rig.repository.open(A)
+        val flow = rig.repository.conversation(A)
+        rig.repository.close(A)
+        rig.repository.open(A)
+        settle()
+        assertSame(flow, rig.repository.conversation(A))
+        assertTrue("${flow.value}", flow.value is ConversationState.Shown)
+    }
+
+    @Test
+    fun neverSentSubscribeIsNotBlamedForAnOversizedLink() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
+        rig.notSent += B
+        rig.historyFrames[A] = { id -> envelope(padded(FakeChatMac.history(A), "history", NOISE_CAP + 1024), id) }
+        rig.connect()
+        rig.awaitConnected(2)
+        settle()
+        assertEquals("A was the only subscribe the Mac saw", setOf(A), rig.repository.tooLargeChats())
+        assertEquals(listOf(A), rig.subscribes.toList())
+    }
+
+    @Test
+    fun listOverNoiseCapStopsRefetching() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME)
+        rig.listFrame = { id -> envelope(padded(rig.listPayload("chatsAndSessions"), "chatsAndSessions", NOISE_CAP + 1024), id) }
+        rig.connect()
+        rig.awaitConnected(2)
+        settle()
+        advanceTimeBy(5.minutes)
+        runCurrent()
+        assertEquals("no reconnect loop", 2, rig.connectionCount)
+        assertEquals(1, rig.listRequests.get())
+        assertEquals(ChatListState.Failed(retryable = true), rig.repository.list.value)
+
+        rig.listFrame = null
+        rig.repository.refresh()
+        settle()
+        assertEquals(listOf(A), rig.listedIDs())
+    }
+
+    @Test
+    fun firstAppearancesAreMarkedInOneWrite() = runTest {
+        val store = CountingSeenStore()
+        val rig = ChatRig(this, seen = store)
+        rig.chats = (1..10).map { chatId(it) to MAC_TIME }
+        rig.connect()
+        settle()
+        assertEquals(listOf(10), store.batches)
+        assertEquals(0, store.singles)
+    }
+
+    @Test
+    fun failedRefetchKeepsTheCachedList() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME)
+        rig.connect()
+        settle()
+        rig.listFrame = { id -> envelope(FakeChatMac.samplePayload("error-unknown-session.json"), id) }
+        rig.reconnect()
+        settle()
+        val loaded = rig.repository.list.value as ChatListState.Loaded
+        assertEquals(listOf(A), loaded.entries.map { it.chat.id })
+        assertTrue(loaded.refreshFailed)
+        assertFalse(loaded.refreshing)
+    }
+
+    @Test
+    fun historyInFlightWhenAiGoesOffIsSubscribedAgainWhenBack() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME)
+        rig.holdNext[A] = 5.seconds
+        rig.connect()
+        rig.repository.open(A)
+        advanceTimeBy(1.seconds)
+        runCurrent()
+        rig.chatMac.flipAi(false)
+        advanceTimeBy(10.seconds)
+        runCurrent()
+        assertFalse("read-only while AI is off", rig.shown(A).sendable)
+        rig.chatMac.flipAi(true)
+        settle()
+        assertEquals("the Mac dropped it with AI: subscribed again", 2, rig.subscribesFor(A))
+        assertTrue(rig.shown(A).sendable)
+    }
+
+    @Test
+    fun chatLeavingTheListLiftsItsTooLargeMark() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
+        rig.historyFrames[B] = { id -> envelope(padded(FakeChatMac.history(B), "history", RAW_CAP + 1), id) }
+        rig.connect()
+        settle()
+        assertEquals(setOf(B), rig.repository.tooLargeChats())
+        rig.chats = listOf(A to MAC_TIME)
+        rig.pushList()
+        settle()
+        assertEquals(emptySet<String>(), rig.repository.tooLargeChats())
+        rig.historyFrames.remove(B)
+        rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
+        rig.pushList()
+        settle()
+        assertEquals(2, rig.subscribesFor(B))
+    }
+
+    @Test
+    fun undecodableRawDeliveryIsALostAppend() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
+        rig.connect()
+        rig.repository.open(A)
+        settle()
+        val nested = "[".repeat(600) + "1" + "]".repeat(600)
+        val padding = "p".repeat(ChatRig.RAW_DELIVERY + 1)
+        for (chatID in listOf(A, B)) {
+            val frame = """{"payload":{"delivery":{"chatID":"$chatID","padding":"$padding","message":$nested,"partial":true}}}"""
+            rig.mac.sendRaw(frame.toByteArray())
+        }
+        settle()
+        assertEquals("the open chat refetches its history", 2, rig.subscribesFor(A))
+        assertEquals("a watched chat holds no transcript to repair", 1, rig.subscribesFor(B))
+        assertFalse(rig.shown(A).stale)
+    }
+
+    @Test
+    fun overCapDeliveryForAWatchedChatIsNotResubscribed() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME)
+        rig.connect()
+        settle()
+        rig.mac.sendRaw(envelope(padded(rig.chatMac.append(A, 0), "delivery", RAW_CAP + 1), null))
+        settle()
+        assertEquals(1, rig.subscribesFor(A))
+    }
+
+    @Test
+    fun openChatLeavingTheListKeepsItsStateUntilClosed() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
+        rig.connect()
+        rig.repository.open(A)
+        settle()
+        assertEquals(AgentState.IDLE, rig.repository.activity.value[A])
+        rig.chats = listOf(B to MAC_TIME)
+        rig.pushList()
+        settle()
+        assertEquals(AgentState.IDLE, rig.repository.activity.value[A])
+        assertNotNull(rig.seen.seen(A))
+        rig.repository.close(A)
+        settle()
+        assertNull(rig.repository.activity.value[A])
+        assertNull(rig.seen.seen(A))
+    }
+
+    @Test
+    fun messagesRemovedTruncatesTheTranscript() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME)
+        rig.connect()
+        rig.repository.open(A)
+        settle()
+        rig.sendSample("messages-removed.json", A)
+        rig.sendSample("messages-removed.json", A)
+        settle()
+        val removed = setOf("11111111-2222-4333-8444-000000000300", "11111111-2222-4333-8444-000000000350", "11111111-2222-4333-8444-000000000400")
+        assertEquals(sampleHistory.map { it.uniqueID }.filterNot { it in removed }, rig.shown(A).messages.map { it.uniqueID })
+    }
+
+    @Test
+    fun chatCreatedIsInsertedOnceAndWatched() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME)
+        rig.connect()
+        settle()
+        val created = FakeChatMac.samplePayload("chat-created.json")
+        rig.mac.sendMessage(created, null)
+        rig.mac.sendMessage(created, null)
+        settle()
+        assertEquals(listOf(CREATED, A), rig.listedIDs())
+        assertEquals(1, rig.subscribesFor(CREATED))
+        assertFalse(rig.row(CREATED).unread)
+    }
+
+    @Test
+    fun oversizedLinkEndWithNothingUnansweredNamesNoChat() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
+        rig.connect()
+        settle()
+        rig.mac.sendRaw(envelope(padded(rig.chatMac.append(A, 0), "delivery", NOISE_CAP + 1024), null))
+        rig.awaitConnected(2)
+        settle()
+        assertEquals(emptySet<String>(), rig.repository.tooLargeChats())
+        assertEquals(listOf(A, B, A, B), rig.subscribes.toList())
+        assertEquals(2, rig.listRequests.get())
+    }
+
+    @Test
+    fun shownEqualityIgnoresMessages() {
+        val one = ChatMessage(A, Participant.AGENT, MessageBody.Markdown("one"), 1.0, ECHO_ID)
+        val first = ConversationState.Shown(listOf(one), version = 7, stale = false, deleted = false, sendable = true)
+        assertEquals(first, ConversationState.Shown(emptyList(), version = 7, stale = false, deleted = false, sendable = true))
+        assertNotEquals(first, ConversationState.Shown(listOf(one), version = 8, stale = false, deleted = false, sendable = true))
+        assertNotEquals(first, ConversationState.Shown(listOf(one), version = 7, stale = true, deleted = false, sendable = true))
+    }
+
+    /** Counts single marks and batches. */
+    private class CountingSeenStore : ChatSeenStore {
+        private val inner = InMemoryChatSeenStore()
+        @Volatile var singles = 0
+        val batches = CopyOnWriteArrayList<Int>()
+
+        override fun seen(chatID: String): Double? = inner.seen(chatID)
+
+        override fun markSeen(chatID: String, lastModifiedMillis: Double) {
+            singles++
+            inner.markSeen(chatID, lastModifiedMillis)
+        }
+
+        override fun markSeenAll(marks: Map<String, Double>) {
+            batches += marks.size
+            inner.markSeenAll(marks)
+        }
+
+        override fun forget(chatID: String) = inner.forget(chatID)
+
+        override fun clear() = inner.clear()
+    }
+
     // Content
 
     @Test
@@ -786,6 +1056,7 @@ class ChatRepositoryTest {
         val A = chatId(101)
         val B = chatId(102)
         val C = chatId(103)
+        const val CREATED = "2F3E4D5C-6B7A-4980-A1B2-C3D4E5F60718"
         const val DELIVERIES = 1_000
         const val OPENING_ID = "11111111-2222-4333-8444-000000000501"
         const val ECHO_ID = "11111111-2222-4333-8444-000000000500"

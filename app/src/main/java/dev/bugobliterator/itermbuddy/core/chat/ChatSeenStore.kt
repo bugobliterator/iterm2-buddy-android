@@ -44,6 +44,12 @@ interface ChatSeenStore {
      */
     fun markSeen(chatID: String, lastModifiedMillis: Double)
 
+    /**
+     * [markSeen] for every entry of [marks] at once: a file store writes (and syncs) once for the
+     * whole batch, as the repository does for each list's first appearances.
+     */
+    fun markSeenAll(marks: Map<String, Double>)
+
     /** Drops [chatID]'s mark (the chat was deleted). */
     fun forget(chatID: String)
 
@@ -61,6 +67,11 @@ class InMemoryChatSeenStore : ChatSeenStore {
     @Synchronized
     override fun markSeen(chatID: String, lastModifiedMillis: Double) {
         if (lastModifiedMillis.isFinite()) marks[chatID] = lastModifiedMillis
+    }
+
+    @Synchronized
+    override fun markSeenAll(marks: Map<String, Double>) {
+        for ((chatID, millis) in marks) markSeen(chatID, millis)
     }
 
     @Synchronized
@@ -91,6 +102,11 @@ class FileChatSeenStore(private val file: File, private val log: (String) -> Uni
 
     private val temp = File(file.path + TEMP_SUFFIX)
 
+    /** For tests: how many times the file was written. */
+    @Volatile
+    internal var saves = 0
+        private set
+
     private fun marks(): HashMap<String, Double> = loaded ?: load().also { loaded = it }
 
     @Synchronized
@@ -103,6 +119,18 @@ class FileChatSeenStore(private val file: File, private val log: (String) -> Uni
         if (marks[chatID] == lastModifiedMillis) return
         marks[chatID] = lastModifiedMillis
         save(marks)
+    }
+
+    @Synchronized
+    override fun markSeenAll(marks: Map<String, Double>) {
+        val held = marks()
+        var changed = false
+        for ((chatID, millis) in marks) {
+            if (!millis.isFinite() || held[chatID] == millis) continue
+            held[chatID] = millis
+            changed = true
+        }
+        if (changed) save(held)
     }
 
     @Synchronized
@@ -161,6 +189,7 @@ class FileChatSeenStore(private val file: File, private val log: (String) -> Uni
             append('}')
         }
         var written = false
+        saves++
         try {
             file.absoluteFile.parentFile?.mkdirs()
             FileOutputStream(temp).use { out ->
