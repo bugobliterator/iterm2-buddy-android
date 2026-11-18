@@ -44,6 +44,9 @@ fun peekChatID(bytes: ByteArray): String? = try {
     EnvelopeScanner(bytes).chatID()
 } catch (_: WireDecodeException) {
     null
+} catch (_: RuntimeException) {
+    // Defensive: the scanner bounds-checks every read, but this must never fail a frame.
+    null
 }
 
 private const val QUOTE = '"'.code.toByte()

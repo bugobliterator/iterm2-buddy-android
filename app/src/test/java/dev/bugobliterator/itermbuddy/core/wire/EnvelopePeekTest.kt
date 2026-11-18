@@ -125,6 +125,37 @@ class EnvelopePeekTest {
     }
 
     /** A `history` frame of about [targetBytes], with the request ID last so the scan must cross the body. */
+    @Test
+    fun peekChatIDReadsTheBodysChatID() {
+        val chat = "6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E"
+        assertEquals(chat, peekChatID("""{"requestID":12,"payload":{"history":{"messages":[{"chatID":"inner"}],"chatID":"$chat"}}}""".toByteArray()))
+        assertEquals("escaped key", chat, peekChatID("""{"payload":{"delivery":{"chat\u0049D":"$chat"}}}""".toByteArray()))
+        assertEquals("only the body's own key", null, peekChatID("""{"payload":{"chatListChanged":{"chats":[{"chatID":"x"}]}}}""".toByteArray()))
+    }
+
+    @Test
+    fun peekChatIDIsNullAndNeverThrowsOnBadFrames() {
+        val longID = "a".repeat(257)
+        val deep = "[".repeat(2_000) + "]".repeat(2_000)
+        val frames = mapOf(
+            "truncated" to """{"payload":{"history":{"chatID":"6A1D3F5B""",
+            "truncated after the key" to """{"payload":{"history":{"chatID":""",
+            "non-string chatID" to """{"payload":{"history":{"chatID":42}}}""",
+            "object chatID" to """{"payload":{"history":{"chatID":{"id":"x"}}}}""",
+            "chatID over 256 bytes" to """{"payload":{"history":{"chatID":"$longID"}}}""",
+            "bad unicode escape" to """{"payload":{"history":{"chatID":"\u12G4"}}}""",
+            "short unicode escape" to """{"payload":{"history":{"chatID":"\u12"}}}""",
+            "deep nesting before it" to """{"payload":{"history":{"messages":$deep,"chatID":"""",
+            "deep nesting, unterminated" to """{"payload":{"history":{"messages":${"[".repeat(5_000)}""",
+            "not an object" to """[1,2,3]""",
+            "empty" to "",
+        )
+        for ((name, text) in frames) assertEquals(name, null, peekChatID(text.toByteArray()))
+        val media = byteArrayOf(0x01) + """{"payload":{"history":{"chatID":"x"}}}""".toByteArray()
+        assertEquals("media byte", null, peekChatID(media))
+        assertEquals("256 bytes is still read", "b".repeat(256), peekChatID("""{"payload":{"history":{"chatID":"${"b".repeat(256)}"}}}""".toByteArray()))
+    }
+
     private fun largeHistoryFrame(targetBytes: Int): ByteArray {
         val head = """{"payload":{"history":{"chatID":"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E","maxSeq":1,"messages":["""
         val tail = """]}},"requestID":12}"""

@@ -37,7 +37,10 @@ data class ChatBudgets(val inboxItems: Int = 4096, val inboxBytes: Long = DEFAUL
  * consumer goes on with the next input; only the cancellation of [scope] stops it. Once it has
  * stopped, [accept] throws [ChatInboxStoppedException] at once (also to an accept already waiting
  * for room), which the session treats as a sink failure that did not take the input, rather than
- * waiting out its stall bound on every frame.
+ * waiting out its stall bound on every frame: a chat reply's request fails at once. Link markers
+ * are different: the client counts a marker the sink threw on as taken (`sinkMarker`), so a link
+ * still comes up, and goes down, with the chat consumer dead. That is deliberate: a dead chat
+ * feature must never keep live video from connecting.
  *
  * @param log diagnostics: input kinds and exception classes only, never content.
  */
