@@ -2,6 +2,7 @@ package dev.bugobliterator.itermbuddy.core.stream
 
 import dev.bugobliterator.itermbuddy.core.CompanionRequestException
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
+import dev.bugobliterator.itermbuddy.core.wire.BrowserNavigationState
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.core.wire.SelectionSpan
@@ -149,6 +150,26 @@ class StreamController(
 
     /** The active stream's selection as the Mac reports it; null when none or no stream. */
     val selection: StateFlow<SelectionSpan?> = historyTiles.selection
+
+    private val browserEditingFlow = MutableStateFlow(false)
+
+    /**
+     * Whether a text field on the active browser stream's page has focus, from the Mac's
+     * `browserEditingChanged` for that stream (iOS `activeStreamBrowserEditing`,
+     * `AppModel.swift:4425-4428`); false when no stream is active, and reset whenever the active
+     * stream ends or is replaced.
+     */
+    val browserEditing: StateFlow<Boolean> = browserEditingFlow.asStateFlow()
+
+    private val browserNavigationFlow = MutableStateFlow<BrowserNavigationState?>(null)
+
+    /**
+     * The active browser stream's address, title and history state, from the Mac's
+     * `browserNavigationChanged` for that stream (iOS `activeStreamBrowserNavigation`,
+     * `AppModel.swift:4429-4432`); null until the first one, and reset whenever the active stream
+     * ends or is replaced.
+     */
+    val browserNavigation: StateFlow<BrowserNavigationState?> = browserNavigationFlow.asStateFlow()
 
     // ---- Inbox ----
 
@@ -525,6 +546,8 @@ class StreamController(
             is MacMessage.StreamEnded -> onEnded(control.linkId, message)
             is MacMessage.StreamExtent -> onExtent(control.linkId, message)
             is MacMessage.SelectionRange -> onSelectionRange(control.linkId, message)
+            is MacMessage.BrowserEditingChanged -> if (isActive(control.linkId, message.streamID)) browserEditingFlow.value = message.editing
+            is MacMessage.BrowserNavigationChanged -> if (isActive(control.linkId, message.streamID)) browserNavigationFlow.value = message.state
             else -> Unit
         }
     }
@@ -616,6 +639,9 @@ class StreamController(
         if (stream.linkId != linkId || stream.streamID != selection.streamID) return
         historyTiles.onSelectionRange(selection.range)
     }
+
+    /** Whether [streamID] on [linkId] is the active stream. */
+    private fun isActive(linkId: Long, streamID: Long): Boolean = active.let { it != null && it.linkId == linkId && it.streamID == streamID }
 
     // ---- Starts ----
 
@@ -829,8 +855,11 @@ class StreamController(
 
     private fun setActive(stream: Active?) {
         active = stream
-        // Every end or replacement of the active stream: no tile or selection outlives it.
+        // Every end or replacement of the active stream: no tile, selection or browser state outlives it
+        // (iOS resets the browser state on a start and on streamEnded, AppModel.swift:4438-4442, 4542-4544).
         historyTiles.clear()
+        browserEditingFlow.value = false
+        browserNavigationFlow.value = null
         rejectingSince = null
         requestRunSince = null
         deferredKeyframe?.cancel()
