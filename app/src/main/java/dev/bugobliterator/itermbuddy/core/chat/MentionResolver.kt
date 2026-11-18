@@ -49,7 +49,8 @@ fun mentionDisplay(resolution: MentionResolution?): MentionDisplay {
 /**
  * The texts of a message body that can hold @-mentions, as iOS scans them (`AppModel.swift:4141-4166`):
  * plain text and markdown, their multipart subparts (not attachments or context), an explanation
- * response, and a command request's markdown description.
+ * response, and a command request's markdown description; also an executing-command notice's
+ * description, which the conversation renders as markdown.
  */
 fun mentionableTexts(body: MessageBody): List<String> = when (body) {
     is MessageBody.PlainText -> listOf(body.text)
@@ -64,6 +65,9 @@ fun mentionableTexts(body: MessageBody): List<String> = when (body) {
     is MessageBody.ExplanationResponse -> listOf(body.markdown)
     is MessageBody.ClassicCommand -> listOf(body.content.markdownDescription())
     is MessageBody.ExternalCommand -> listOf(body.markdownDescription)
+    // Android addition: the notice renders its command's description with mentions named.
+    is MessageBody.ClientNotice -> (body.action as? ClientAction.ExecutingCommand)?.let { listOf(it.content.markdownDescription()) }
+        ?: emptyList()
     else -> emptyList()
 }
 

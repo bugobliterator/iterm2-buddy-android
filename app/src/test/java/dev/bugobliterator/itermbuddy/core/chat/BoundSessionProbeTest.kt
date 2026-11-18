@@ -7,6 +7,7 @@ import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.core.wire.decodeEnvelope
 import dev.bugobliterator.itermbuddy.core.wire.encodeEnvelope
+import dev.bugobliterator.itermbuddy.core.stream.StreamLink
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -20,6 +21,10 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -160,6 +165,43 @@ class BoundSessionProbeTest {
         runCurrent()
         rig.nextRequest()
         rig.assertNoRequest()
+    }
+
+    /** A link whose requests ignore cancellation: a superseded probe runs on to its verdict. */
+    private class UncancellableLink : StreamLink {
+        val waiting = ArrayList<Continuation<MacMessage>>()
+
+        override suspend fun send(message: PhoneMessage, onLink: Long?) = Unit
+
+        override suspend fun request(message: PhoneMessage, onLink: Long?, timeout: Duration?, onSent: (requestID: Long) -> Unit): MacMessage =
+            suspendCoroutine { waiting += it }
+    }
+
+    @Test
+    fun supersededProbeStillRunningIsDropped() = runTest {
+        val link = UncancellableLink()
+        val probe = BoundSessionProbe(link, backgroundScope)
+        probe.watch(chat, legacySession)
+        runCurrent()
+        probe.linkUp()
+        runCurrent()
+        assertEquals(2, link.waiting.size)
+        // The superseded probe's coroutine is cancelled but still running: its answer reaches the
+        // identity guard and is dropped.
+        link.waiting[0].resume(unknownSession())
+        runCurrent()
+        assertNull("the superseded answer is dropped", probe.live.value[chat])
+        link.waiting[1].resume(sampleReply("session-screen-info"))
+        runCurrent()
+        assertEquals(true, probe.live.value[chat])
+
+        // A probe still running when the probe is cleared (unpair) is dropped by the generation guard.
+        probe.linkUp()
+        runCurrent()
+        probe.clear()
+        link.waiting[2].resume(unknownSession())
+        runCurrent()
+        assertTrue(probe.live.value.isEmpty())
     }
 
     @Test

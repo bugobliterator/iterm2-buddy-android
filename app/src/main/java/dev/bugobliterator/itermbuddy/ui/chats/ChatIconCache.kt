@@ -10,8 +10,14 @@ import java.util.HexFormat
 import kotlin.coroutines.CoroutineContext
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 /** A decoded image and the bytes it holds in memory (not its encoded size). */
 class DecodedImage<out T : Any>(val image: T, val byteCount: Int) {
@@ -57,15 +63,28 @@ fun chatIconRef(bytes: ByteBuffer?): ChatIconRef? {
  * the main thread). Decoded images are kept least recently used first out under [maxBytes] of
  * decoded size (2 MiB by default, *Global Constraints*: about 32 icons decoded at 128 px). An
  * icon the decoder cannot read, or one larger than the whole budget, is remembered as such and
- * shows the default glyph: never an exception, never a second decode. Thread-safe. Nothing is
- * logged; [toString] shows counts only.
+ * shows the default glyph: never an exception, never a second decode.
+ *
+ * A decode belongs to the cache, not to its caller: at most [maxConcurrentDecodes] run at once
+ * (each holds a whole image's bytes), callers asking for the same key share one decode, and a
+ * decode whose caller left (a row scrolled away) still completes and is kept. [clear] drops what
+ * the decodes still out bring back. Thread-safe. Nothing is logged; [toString] shows counts only.
  */
 class ChatIconCache<T : Any>(
     private val decoder: ImageBytesDecoder<T>,
     private val maxBytes: Int = DEFAULT_MAX_BYTES,
-    private val decodeContext: CoroutineContext = Dispatchers.Default,
+    decodeContext: CoroutineContext = Dispatchers.Default,
+    maxConcurrentDecodes: Int = 2,
 ) {
     private val lock = Any()
+    private val decodeScope = CoroutineScope(SupervisorJob() + decodeContext)
+    private val permits = Semaphore(maxConcurrentDecodes)
+
+    /** The decodes still out, by key; each is shared by every caller asking for its key. */
+    private val inFlight = HashMap<String, Deferred<DecodedImage<T>?>>()
+
+    /** Bumped by [clear], so a decode started before it is not kept after. */
+    private var generation = 0L
 
     /** Access-ordered: the first entry is the least recently used. */
     private val images = LinkedHashMap<String, DecodedImage<T>>(16, 0.75f, true)
@@ -81,41 +100,65 @@ class ChatIconCache<T : Any>(
     /** The icon already decoded for [key], or null; a map lookup, cheap enough for composition. */
     fun cached(key: String): T? = synchronized(lock) { images[key]?.image }
 
-    /** The icon for [ref], decoding it on [decodeContext] when needed; null for the default glyph. */
+    /** The icon for [ref], decoding it off the caller's thread when needed; null for the default glyph. */
     suspend fun load(ref: ChatIconRef): T? {
-        synchronized(lock) {
+        val decode = synchronized(lock) {
             images[ref.key]?.let { return it.image }
             if (ref.key in unusable) return null
+            inFlight[ref.key] ?: startDecode(ref)
         }
-        val decoded = withContext(decodeContext) {
-            try {
-                decoder.decode(ref.bytes.duplicate())
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                null
+        val decoded = decode.await()
+        return if (decoded == null || decoded.byteCount > maxBytes) null else decoded.image
+    }
+
+    /** Starts [ref]'s decode, kept when it completes whoever still waits. Under [lock]. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun startDecode(ref: ChatIconRef): Deferred<DecodedImage<T>?> {
+        val startedIn = generation
+        val decode = decodeScope.async {
+            permits.withPermit {
+                try {
+                    decoder.decode(ref.bytes.duplicate())
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
+                }
             }
         }
-        synchronized(lock) {
-            if (decoded == null || decoded.byteCount > maxBytes) {
-                unusable += ref.key
-                return null
+        inFlight[ref.key] = decode
+        decode.invokeOnCompletion { failure ->
+            val decoded = if (failure == null) decode.getCompleted() else null
+            synchronized(lock) {
+                if (inFlight[ref.key] === decode) inFlight -= ref.key
+                if (generation == startedIn && failure == null) keep(ref.key, decoded)
             }
-            images[ref.key]?.let { return it.image }
-            images[ref.key] = decoded
-            held += decoded.byteCount
-            val eldest = images.entries.iterator()
-            while (held > maxBytes && eldest.hasNext()) {
-                val entry = eldest.next()
-                held -= entry.value.byteCount
-                eldest.remove()
-            }
-            return decoded.image
+        }
+        return decode
+    }
+
+    /** Keeps a finished decode, evicting the least recently used over the budget. Under [lock]. */
+    private fun keep(key: String, decoded: DecodedImage<T>?) {
+        if (decoded == null || decoded.byteCount > maxBytes) {
+            unusable += key
+            return
+        }
+        if (images.containsKey(key)) return
+        images[key] = decoded
+        held += decoded.byteCount
+        val eldest = images.entries.iterator()
+        while (held > maxBytes && eldest.hasNext()) {
+            val entry = eldest.next()
+            if (entry.key == key) continue
+            held -= entry.value.byteCount
+            eldest.remove()
         }
     }
 
     /** Drops every icon (unpair). */
     fun clear() = synchronized(lock) {
+        generation++
+        inFlight.clear()
         images.clear()
         unusable.clear()
         held = 0

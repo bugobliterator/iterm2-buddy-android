@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.Placeholder
@@ -267,12 +268,18 @@ private fun fullArgument(content: CommandContent): String? {
     }
 }
 
-/** Renders one message's texts: the agent's with the "@" optional, as the Mac links them. */
+/**
+ * Renders one message's texts. Every author's mentions are found with the "@" optional, so a bare
+ * stable ID is always kept whole through markdown (upstream's `protect`); only the agent's bare
+ * ones are linked, as the Mac links them, while the owner's show as written (iOS links only
+ * "@"-signed mentions, `MessageBubbleView.swift:119-121`).
+ */
 private class MessageText(private val agent: Boolean, private val resolve: (String) -> MentionResolution?) {
-    fun plain(value: String): List<InlineRun> = plainRuns(value, MentionParser.mentions(value, agent), resolve)
+    fun plain(value: String): List<InlineRun> =
+        plainRuns(value, MentionParser.mentions(value, atSignOptional = true), resolve, atSignOptional = agent)
 
     fun markdown(value: String): List<InlineRun> =
-        inlineMarkdown(value, MentionParser.protectedMentions(value, atSignOptional = agent), resolve)
+        inlineMarkdown(value, MentionParser.protectedMentions(value, atSignOptional = true), resolve, atSignOptional = agent)
 }
 
 /** Colours a bubble's text is drawn in. */
@@ -362,7 +369,7 @@ private fun CardLineView(line: CardLine, colors: BubbleColors, onMention: (LinkT
             "⚠ ${line.text}",
             style = typography.bodyMedium,
             fontWeight = FontWeight.SemiBold,
-            color = WARNING_ORANGE,
+            color = warningOrange(MaterialTheme.colorScheme.surface.luminance()),
         )
         is CardLine.Title -> RunsText(line.runs, colors, onMention, typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold))
         is CardLine.Body -> RunsText(line.runs, colors, onMention, typography.bodyLarge)
@@ -460,5 +467,12 @@ private fun RunsText(
     Text(text, style = style, color = color, inlineContent = inline)
 }
 
-/** iOS's `.orange` for the safety warning. */
-private val WARNING_ORANGE = Color(0xFFFF9F0A)
+/** iOS's `.orange` for the safety warning: its dark-mode value. */
+internal val WARNING_ORANGE_DARK = Color(0xFFFF9F0A)
+
+/** iOS's `.orange` in light mode. */
+internal val WARNING_ORANGE_LIGHT = Color(0xFFFF9500)
+
+/** iOS's system orange for a background of [backgroundLuminance] (dark below one half). */
+internal fun warningOrange(backgroundLuminance: Float): Color =
+    if (backgroundLuminance < 0.5f) WARNING_ORANGE_DARK else WARNING_ORANGE_LIGHT

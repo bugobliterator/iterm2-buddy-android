@@ -1,7 +1,20 @@
 package dev.bugobliterator.itermbuddy.ui.chats
 
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -13,6 +26,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import kotlin.coroutines.EmptyCoroutineContext
 
+@OptIn(ExperimentalCoroutinesApi::class)
 /** Chat icons: decoded once per content off the caller's thread, under a byte budget, a corrupt one shown as the default glyph. */
 class ChatIconCacheTest {
     /** Decodes "png:<label>:<bytes>" into a label of that decoded size; anything else is corrupt. */
@@ -130,5 +144,61 @@ class ChatIconCacheTest {
         assertEquals(0, cache.heldBytes)
         assertFalse(cache.toString(), "png" in cache.toString())
         assertFalse(png("x", 1).toString(), "png" in png("x", 1).toString())
+    }
+
+    @Test
+    fun concurrentLoadsShareOneDecode() = runTest {
+        val decoder = FakeDecoder()
+        val cache = ChatIconCache(decoder, maxBytes = 1_000, decodeContext = StandardTestDispatcher(testScheduler))
+        val loads = List(3) { async(start = CoroutineStart.UNDISPATCHED) { cache.load(png("robot", 10)) } }
+        advanceUntilIdle()
+        assertEquals(listOf("robot", "robot", "robot"), loads.awaitAll())
+        assertEquals(1, decoder.decoded.size)
+    }
+
+    @Test
+    fun decodeFinishingAfterItsCallerLeftIsKept() = runTest {
+        val decoder = FakeDecoder()
+        val cache = ChatIconCache(decoder, maxBytes = 1_000, decodeContext = StandardTestDispatcher(testScheduler))
+        val caller = launch(start = CoroutineStart.UNDISPATCHED) { cache.load(png("robot", 10)) }
+        caller.cancel()
+        runCurrent()
+        advanceUntilIdle()
+        assertEquals("robot", cache.cached(png("robot", 10).key))
+        assertEquals(1, decoder.decoded.size)
+        // A decode still out when the cache is cleared (unpair) is not kept.
+        val late = launch(start = CoroutineStart.UNDISPATCHED) { cache.load(png("cat", 10)) }
+        late.cancel()
+        cache.clear()
+        advanceUntilIdle()
+        assertNull(cache.cached(png("cat", 10).key))
+    }
+
+    @Test
+    fun atMostTwoDecodesRunAtOnce() {
+        val executor = Executors.newFixedThreadPool(4)
+        val running = AtomicInteger()
+        val most = AtomicInteger()
+        val twoStarted = CountDownLatch(2)
+        val release = CountDownLatch(1)
+        val decoder = ImageBytesDecoder { bytes ->
+            most.accumulateAndGet(running.incrementAndGet(), ::maxOf)
+            twoStarted.countDown()
+            release.await(30, TimeUnit.SECONDS)
+            running.decrementAndGet()
+            DecodedImage(bytes.remaining().toString(), 1)
+        }
+        try {
+            val cache = ChatIconCache(decoder, maxBytes = 1_000, decodeContext = executor.asCoroutineDispatcher())
+            runBlocking(Dispatchers.Default) {
+                val loads = List(4) { index -> async { cache.load(png("image$index", 1)) } }
+                assertEquals(true, twoStarted.await(30, TimeUnit.SECONDS))
+                release.countDown()
+                loads.awaitAll()
+            }
+            assertEquals(2, most.get())
+        } finally {
+            executor.shutdown()
+        }
     }
 }

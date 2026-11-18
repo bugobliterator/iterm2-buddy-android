@@ -192,6 +192,8 @@ class MentionResolverTest {
             MessageBody.WatcherEvent("g") to emptyList(),
             MessageBody.TerminalCommand("h", "i") to emptyList(),
             MessageBody.Unsupported to emptyList(),
+            MessageBody.ClientNotice(ClientAction.ExecutingCommand(command)) to listOf(command.markdownDescription()),
+            MessageBody.ClientNotice(ClientAction.Notice("@$stableID")) to emptyList(),
         )
         for ((body, expected) in texts) assertEquals(body.toString(), expected, mentionableTexts(body))
     }
