@@ -6,11 +6,13 @@ import android.util.Log
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.CompanionClient
 import dev.bugobliterator.itermbuddy.core.CompanionRequestException
 import dev.bugobliterator.itermbuddy.core.input.InputSender
 import dev.bugobliterator.itermbuddy.core.input.InputTrace
 import dev.bugobliterator.itermbuddy.core.input.isInputTarget
+import dev.bugobliterator.itermbuddy.core.stream.BrowserDriver
 import dev.bugobliterator.itermbuddy.core.stream.SelectionDriver
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
 import dev.bugobliterator.itermbuddy.core.stream.StreamController
@@ -101,6 +103,10 @@ class CompanionApp : Application() {
     lateinit var selection: SelectionDriver
         private set
 
+    /** Taps, scrolls and the browser controls for a browser session; see the class comment. */
+    lateinit var browser: BrowserDriver
+        private set
+
     private val started = AtomicBoolean(false)
 
     private val scanNoticeFlow = MutableStateFlow<ScanNotice?>(null)
@@ -183,6 +189,16 @@ class CompanionApp : Application() {
             scope = scope,
             log = { Log.i(SELECTION_TAG, it) },
         )
+        browser = BrowserDriver(
+            link = sessions.client,
+            active = sessions.controller.activeStream,
+            editing = sessions.controller.browserEditing,
+            navigation = sessions.controller.browserNavigation,
+            macRevision = { (sessions.client.state.value as? ClientState.Connected)?.macRevision ?: 0 },
+            scope = scope,
+            nowMillis = SystemClock::uptimeMillis,
+            log = { Log.i(BROWSER_TAG, it) },
+        )
         // Application.onCreate runs on the main thread, as addObserver requires.
         ProcessLifecycleOwner.get().lifecycle.addObserver(
             object : DefaultLifecycleObserver {
@@ -257,6 +273,7 @@ class CompanionApp : Application() {
         const val STREAM_TAG = "StreamController"
         const val INPUT_TAG = "InputSender"
         const val SELECTION_TAG = "SelectionDriver"
+        const val BROWSER_TAG = "BrowserDriver"
         val UNPAIR_FAILED_SHOWN = 5.seconds
     }
 }

@@ -1,6 +1,7 @@
 package dev.bugobliterator.itermbuddy.ui.live
 
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
+import dev.bugobliterator.itermbuddy.core.stream.BROWSER_INPUT_REVISION
 import dev.bugobliterator.itermbuddy.core.stream.LiveProblem
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.wire.ProtocolRevision
@@ -13,9 +14,6 @@ const val MAC_SIDE_ADVICE = "Make the iTerm2 window smaller on the Mac (leave fu
 
 /** Shown over a browser session's video until browser control exists on both sides. */
 const val BROWSER_NOTE = "Browser control comes later"
-
-/** The first revision with browser input (`browserTap` and friends). */
-const val BROWSER_INPUT_REVISION = 15
 
 /** What an overlay's one button does. */
 enum class OverlayAction {

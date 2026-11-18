@@ -1350,6 +1350,75 @@ class StreamControllerTest {
     }
 
     @Test
+    fun browserEventsReachControllerAndResetOnStreamEnd() = runTest {
+        val h = Harness(this)
+        h.openLive()
+        // The fixtures name stream 2: switching sessions makes it the active one.
+        h.controller.open(B)
+        runCurrent()
+        assertEquals(2L, h.active?.streamID)
+        h.mac.sendSample(BROWSER_EDITING, null)
+        h.mac.sendSample(BROWSER_NAVIGATION, null)
+        runCurrent()
+        assertTrue(h.controller.browserEditing.value)
+        val navigation = h.controller.browserNavigation.value
+        assertEquals("https://iterm2.com/documentation-web-browser.html", navigation?.url)
+        assertEquals("Web Browser - Documentation - iTerm2", navigation?.title)
+        assertEquals(listOf(true, false, true), listOf(navigation!!.canGoBack, navigation.canGoForward, navigation.isLoading))
+        // Another stream's events are ignored.
+        h.mac.sendMessage(browserEditingPayload(1, editing = false), null)
+        h.mac.sendMessage(browserNavigationPayload(9), null)
+        runCurrent()
+        assertTrue(h.controller.browserEditing.value)
+        assertEquals(navigation, h.controller.browserNavigation.value)
+        h.mac.sendStreamEnded(2, "sessionClosed")
+        runCurrent()
+        assertFalse(h.controller.browserEditing.value)
+        assertNull(h.controller.browserNavigation.value)
+    }
+
+    @Test
+    fun browserEventsResetWhenTheStreamIsReplaced() {
+        for (transition in listOf("open", "pause", "link")) browserEventsResetOn(transition)
+    }
+
+    private fun browserEventsResetOn(transition: String) = runTest {
+        val h = Harness(this)
+        h.openLive()
+        h.mac.sendMessage(browserEditingPayload(1, editing = true), null)
+        h.mac.sendMessage(browserNavigationPayload(1), null)
+        runCurrent()
+        assertTrue(transition, h.controller.browserEditing.value)
+        assertNotNull(transition, h.controller.browserNavigation.value)
+        when (transition) {
+            "open" -> h.controller.open(B)
+            "pause" -> h.controller.pause()
+            "link" -> {
+                h.mac.dropSocket()
+                h.awaitConnected(2)
+            }
+        }
+        runCurrent()
+        assertFalse(transition, h.controller.browserEditing.value)
+        assertNull(transition, h.controller.browserNavigation.value)
+    }
+
+    private fun browserEditingPayload(streamID: Long, editing: Boolean) = JsonObject(
+        mapOf("browserEditingChanged" to JsonObject(mapOf("streamID" to JsonPrimitive(streamID), "editing" to JsonPrimitive(editing)))),
+    )
+
+    private fun browserNavigationPayload(streamID: Long) = JsonObject(
+        mapOf(
+            "browserNavigationChanged" to JsonObject(
+                mapOf(
+                    "streamID" to JsonPrimitive(streamID),
+                    "state" to JsonObject(mapOf("url" to JsonPrimitive("https://other.invalid/"), "canGoBack" to JsonPrimitive(false))),
+                ),
+            ),
+        ),
+    )
+
+    @Test
     fun streamSwitchClearsTilesAndSelection() {
         for (transition in listOf("pause", "link", "ended", "open")) switchClearsTilesAndSelection(transition)
     }
@@ -1474,6 +1543,8 @@ class StreamControllerTest {
         const val ORIGIN = "https://relay.example.ts.net"
         const val SEED = 20261117
         const val SENTINEL = "SENTINEL-session-name-7Q"
+        const val BROWSER_EDITING = "messages/browser-sessions/browser-editing-changed.json"
+        const val BROWSER_NAVIGATION = "messages/browser-sessions/browser-navigation-changed.json"
         const val KIB = 1024
         const val MIB = 1024L * 1024
 
