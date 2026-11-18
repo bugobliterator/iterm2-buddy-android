@@ -215,7 +215,12 @@ sealed interface AgentStatusUpdate {
 
     /** The update flattened: nested multiparts expanded in order (`exploded`). */
     val exploded: List<AgentStatusUpdate>
-        get() = if (this is Multipart) parts.flatMap { it.exploded } else listOf(this)
+        get() = if (this is Multipart) ArrayList<AgentStatusUpdate>().also { explodeInto(it) } else listOf(this)
+
+    /** Adds [exploded] to [out] without building a list per level. */
+    fun explodeInto(out: MutableList<AgentStatusUpdate>) {
+        if (this is Multipart) parts.forEach { it.explodeInto(out) } else out.add(this)
+    }
 
     val displayString: String
         get() = when (this) {
@@ -230,7 +235,7 @@ sealed interface AgentStatusUpdate {
 
 /** Keeps the last "long" update and everything after it (`LLM.swift:518-532`, `subpartsForDisplay`). */
 private fun partsForDisplay(parts: List<AgentStatusUpdate>): List<AgentStatusUpdate> {
-    val single = parts.flatMap { it.exploded }
+    val single = ArrayList<AgentStatusUpdate>().also { out -> parts.forEach { it.explodeInto(out) } }
     val keepStart = listOf(
         single.indexOfLast { it is AgentStatusUpdate.ReasoningSummaryUpdate },
         single.indexOfLast { it is AgentStatusUpdate.WebSearchFinished },

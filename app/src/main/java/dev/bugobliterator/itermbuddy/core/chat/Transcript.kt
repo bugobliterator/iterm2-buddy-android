@@ -9,9 +9,11 @@ import java.util.Locale
  *
  * - An index by `uniqueID` (the first message with an ID, as iOS's `firstIndex(where:)`) makes an
  *   upsert or a delta cost nothing in the transcript's length; a delta mutates only its target.
- * - Streamed text is held in an open buffer for its message, so a reply of many deltas allocates
- *   linearly in its text: the target's body is rebuilt from the buffer only when it is read
- *   ([get], [messages]), at most once per read.
+ * - The last segment of the message being streamed (its text, a trailing code attachment or a
+ *   trailing status update) is held in one open buffer, so a reply of many deltas allocates
+ *   linearly in what they carry: the target's body is rebuilt from the buffer only when it is
+ *   read ([messages]), at most once per read. At most one buffer is open: streaming another
+ *   message, or adding one, folds the open buffer into its body and closes it.
  * - File attachment bytes are under one [AttachmentBudgets.maxTranscriptImageBytes] allowance for
  *   the whole transcript, held across live deliveries (each of which was decoded with a fresh
  *   allowance): over it, an attachment keeps its name, type and size and drops its bytes.
@@ -26,7 +28,9 @@ class Transcript(history: List<ChatMessage>, internal val budgets: AttachmentBud
     private val entries = ArrayList<ChatMessage>(history.size)
     private val indexByID = HashMap<String, Int>(history.size * 2)
     private val removedIDs = HashSet<String>()
-    private val openText = HashMap<String, OpenText>()
+
+    /** The one open buffer, for the first message with its [OpenBuffer.messageID]; null when none is open. */
+    private var open: OpenBuffer? = null
 
     /** File attachment bytes kept across the whole transcript. */
     var keptImageBytes: Long = 0
@@ -52,19 +56,16 @@ class Transcript(history: List<ChatMessage>, internal val budgets: AttachmentBud
 
     val size: Int get() = entries.size
 
-    /** The message at [index], with any streamed text it has received. */
-    operator fun get(index: Int): ChatMessage {
+    /** The message at [index], with everything streamed into it. Internal: others read [messages]. */
+    internal operator fun get(index: Int): ChatMessage {
         val message = entries[index]
-        val open = openText[message.uniqueID] ?: return message
-        // A buffer belongs to the first message with its ID, the one deltas target.
-        return if (open.stale && indexByID[message.uniqueID] == index) materialise(index, open) else message
+        val buffer = open
+        return if (buffer != null && buffer.stale && ownsBuffer(index, buffer)) materialise(index, buffer) else message
     }
 
     /** A read-only snapshot of every message, in order; later changes do not show in it. */
     fun messages(): List<ChatMessage> {
-        for ((id, open) in openText) {
-            if (open.stale) materialise(indexByID.getValue(id), open)
-        }
+        open?.let { buffer -> if (buffer.stale) materialise(indexByID.getValue(buffer.messageID), buffer) }
         return Collections.unmodifiableList(ArrayList(entries))
     }
 
@@ -89,13 +90,13 @@ class Transcript(history: List<ChatMessage>, internal val budgets: AttachmentBud
     fun removeAll(ids: Set<String>): Int {
         val upper = ids.mapTo(HashSet(ids.size * 2)) { it.upper() }
         removedIDs.addAll(upper)
+        if (open?.messageID in upper) open = null
         val before = entries.size
         val iterator = entries.iterator()
         while (iterator.hasNext()) {
             val message = iterator.next()
             if (message.uniqueID in upper) {
                 keptImageBytes -= message.keptImageBytes()
-                openText.remove(message.uniqueID)
                 iterator.remove()
             }
         }
@@ -110,24 +111,26 @@ class Transcript(history: List<ChatMessage>, internal val budgets: AttachmentBud
 
     override fun toString(): String =
         "Transcript(size=${entries.size}, version=$version, keptImageBytes=$keptImageBytes, " +
-            "streaming=${openText.size}, removed=${removedIDs.size})"
+            "streaming=${if (open != null) 1 else 0}, removed=${removedIDs.size})"
 
     // The merge's primitives, used by applyDelivery (TranscriptMerge.kt).
 
-    internal fun isRemoved(uniqueID: String): Boolean = uniqueID in removedIDs
+    internal fun isRemoved(uniqueID: String): Boolean = uniqueID.upper() in removedIDs
 
-    /** The message stored at [index], without folding in streamed text: its body's case is current. */
+    /** The message stored at [index], without folding in a buffer: its body's case is current. */
     internal fun storedAt(index: Int): ChatMessage = entries[index]
 
-    /** The current message at [index], its streamed text folded in, and closes its open buffer. */
+    /** The current message at [index], everything streamed folded in; closes its buffer if it has one. */
     internal fun settle(index: Int): ChatMessage {
         val message = get(index)
-        openText.remove(message.uniqueID)
+        val buffer = open
+        if (buffer != null && ownsBuffer(index, buffer)) open = null
         return message
     }
 
-    /** Appends [message] under the transcript's image allowance; returns its index. */
+    /** Appends [message] under the transcript's image allowance; returns its index. Closes the open buffer. */
     internal fun appendMessage(message: ChatMessage): Int {
+        closeBuffer()
         val admitted = admitImages(message, keptImageBytes)
         keptImageBytes += admitted.keptImageBytes()
         val index = entries.size
@@ -139,8 +142,9 @@ class Transcript(history: List<ChatMessage>, internal val budgets: AttachmentBud
 
     /** Replaces the message at [index] with [message] (same `uniqueID`) under the image allowance. */
     internal fun replaceMessage(index: Int, message: ChatMessage) {
+        val buffer = open
+        if (buffer != null && ownsBuffer(index, buffer)) open = null
         val old = entries[index]
-        openText.remove(old.uniqueID)
         val others = keptImageBytes - old.keptImageBytes()
         val admitted = admitImages(message, others)
         keptImageBytes = others + admitted.keptImageBytes()
@@ -149,24 +153,34 @@ class Transcript(history: List<ChatMessage>, internal val budgets: AttachmentBud
     }
 
     /**
-     * Grows the message at [index] by [delta] in its open buffer, as upstream's merge would grow its
-     * last segment (`Message.swift:627-690`, `LLM.swift:158-190`). A buffer that cannot take
-     * [delta] is folded into the body and closed first. Returns false when the last segment cannot
-     * grow by [delta]; the caller then merges by rebuilding the body.
+     * Grows the message at [index] by [delta] in the open buffer, as upstream's merge would grow
+     * its last segment (`Message.swift:627-690`, `LLM.swift:158-190`). A buffer that cannot take
+     * [delta], or belongs to another message, is folded into its body and closed first. Returns
+     * false when the last segment cannot grow by [delta]; the caller then merges by rebuilding
+     * the body.
      */
-    internal fun growText(index: Int, delta: TextDelta): Boolean {
-        val id = entries[index].uniqueID
-        val open = openText[id]
-        if (open != null && open.takes(delta)) {
-            open.text.append(delta.text)
-            open.stale = true
+    internal fun growText(index: Int, delta: StreamDelta): Boolean {
+        val buffer = open
+        if (buffer != null && ownsBuffer(index, buffer) && buffer.take(delta)) {
             changed(index)
             return true
         }
-        val opened = OpenText.openFor(settle(index).body, delta) ?: return false
-        openText[id] = opened
+        closeBuffer()
+        val message = entries[index]
+        val opened = OpenBuffer.openFor(message.uniqueID, message.body, delta) ?: return false
+        open = opened
         changed(index)
         return true
+    }
+
+    private fun ownsBuffer(index: Int, buffer: OpenBuffer): Boolean =
+        entries[index].uniqueID == buffer.messageID && indexByID[buffer.messageID] == index
+
+    /** Folds the open buffer, if any, into its message and closes it. */
+    private fun closeBuffer() {
+        val buffer = open ?: return
+        if (buffer.stale) materialise(indexByID.getValue(buffer.messageID), buffer)
+        open = null
     }
 
     private fun changed(index: Int?) {
@@ -174,21 +188,12 @@ class Transcript(history: List<ChatMessage>, internal val budgets: AttachmentBud
         lastChangedIndex = index
     }
 
-    /** Rebuilds the body at [index] from its open buffer; the buffer stays open for later deltas. */
-    private fun materialise(index: Int, open: OpenText): ChatMessage {
+    /** Rebuilds the body at [index] from [buffer]; the buffer stays open for later deltas. */
+    private fun materialise(index: Int, buffer: OpenBuffer): ChatMessage {
         val message = entries[index]
-        val text = open.text.toString()
-        val body = when (val kind = open.kind) {
-            OpenText.Kind.PlainText -> MessageBody.PlainText(text)
-            OpenText.Kind.Markdown -> MessageBody.Markdown(text)
-            OpenText.Kind.PlainTextPart -> message.withLastPart(Subpart.PlainText(text))
-            OpenText.Kind.MarkdownPart -> message.withLastPart(Subpart.Markdown(text))
-            is OpenText.Kind.CodePart ->
-                message.withLastPart(Subpart.AttachmentPart(Attachment(kind.inline, kind.id, AttachmentKind.Code(text))))
-        }
-        val rebuilt = message.copy(body = body)
+        val rebuilt = message.copy(body = buffer.bodyFrom(message.body))
         entries[index] = rebuilt
-        open.stale = false
+        buffer.stale = false
         return rebuilt
     }
 
@@ -218,35 +223,82 @@ class Transcript(history: List<ChatMessage>, internal val budgets: AttachmentBud
 }
 
 /** A streamed delta that can grow a message's last segment in place. */
-internal sealed interface TextDelta {
-    val text: String
-
+internal sealed interface StreamDelta {
     /** `append(string)`. */
-    class Chunk(override val text: String) : TextDelta
+    class Chunk(val text: String) : StreamDelta
 
     /** `appendAttachment` of a code attachment. */
-    class Code(val attachment: Attachment, override val text: String) : TextDelta
+    class Code(val attachment: Attachment, val text: String) : StreamDelta
+
+    /** `appendAttachment` of a status update. */
+    class Status(val update: AgentStatusUpdate) : StreamDelta
 }
 
-/** The open buffer of a message being streamed: its last segment's text, growing. */
-private class OpenText(val kind: Kind, val text: StringBuilder) {
-    /** True when [text] holds more than the message's body shows. */
+/** The open buffer of the message being streamed: its last segment, growing. */
+private sealed class OpenBuffer(val messageID: String) {
+    /** True when the buffer holds more than the message's body shows. */
     var stale = true
 
-    sealed interface Kind {
-        data object PlainText : Kind
-        data object Markdown : Kind
-        data object PlainTextPart : Kind
-        data object MarkdownPart : Kind
+    /** Grows the buffer by [delta] when upstream's rules grow this segment by it; false otherwise. */
+    abstract fun take(delta: StreamDelta): Boolean
 
-        /** A trailing code attachment, which code attachments with its [id] coalesce into (`LLM.swift:166-178`). */
-        data class CodePart(val inline: Boolean, val id: String) : Kind
+    /** [body] (the message's stored body) with this segment as the buffer holds it. */
+    abstract fun bodyFrom(body: MessageBody): MessageBody
+
+    /** Text: a plain text or markdown body, a multipart's trailing text part, or a trailing code attachment. */
+    class Text(messageID: String, val kind: TextKind, val text: StringBuilder) : OpenBuffer(messageID) {
+        override fun take(delta: StreamDelta): Boolean {
+            val grows = when (delta) {
+                is StreamDelta.Chunk -> kind !is TextKind.CodePart
+                is StreamDelta.Code -> kind is TextKind.CodePart && kind.id == delta.attachment.id
+                is StreamDelta.Status -> false
+            }
+            if (!grows) return false
+            text.append(if (delta is StreamDelta.Chunk) delta.text else (delta as StreamDelta.Code).text)
+            stale = true
+            return true
+        }
+
+        override fun bodyFrom(body: MessageBody): MessageBody {
+            val text = text.toString()
+            return when (kind) {
+                TextKind.PlainText -> MessageBody.PlainText(text)
+                TextKind.Markdown -> MessageBody.Markdown(text)
+                TextKind.PlainTextPart -> body.withLastPart(Subpart.PlainText(text))
+                TextKind.MarkdownPart -> body.withLastPart(Subpart.Markdown(text))
+                is TextKind.CodePart ->
+                    body.withLastPart(Subpart.AttachmentPart(Attachment(kind.inline, kind.id, AttachmentKind.Code(text))))
+            }
+        }
     }
 
-    /** Whether [delta] grows this buffer with upstream's append rules. */
-    fun takes(delta: TextDelta): Boolean = when (delta) {
-        is TextDelta.Chunk -> kind !is Kind.CodePart
-        is TextDelta.Code -> kind is Kind.CodePart && kind.id == delta.attachment.id
+    /**
+     * A trailing status update. Status updates always coalesce, whatever their IDs, into one flat
+     * multipart under the first attachment's `inline` and `id` (`LLM.swift:158-164`).
+     */
+    class Status(messageID: String, val inline: Boolean, val id: String, val updates: ArrayList<AgentStatusUpdate>) :
+        OpenBuffer(messageID) {
+        override fun take(delta: StreamDelta): Boolean {
+            if (delta !is StreamDelta.Status) return false
+            delta.update.explodeInto(updates)
+            stale = true
+            return true
+        }
+
+        override fun bodyFrom(body: MessageBody): MessageBody {
+            val update = AgentStatusUpdate.Multipart(ArrayList(updates))
+            return body.withLastPart(Subpart.AttachmentPart(Attachment(inline, id, AttachmentKind.StatusUpdate(update))))
+        }
+    }
+
+    sealed interface TextKind {
+        data object PlainText : TextKind
+        data object Markdown : TextKind
+        data object PlainTextPart : TextKind
+        data object MarkdownPart : TextKind
+
+        /** A trailing code attachment, which code attachments with its [id] coalesce into (`LLM.swift:166-178`). */
+        data class CodePart(val inline: Boolean, val id: String) : TextKind
     }
 
     companion object {
@@ -254,36 +306,41 @@ private class OpenText(val kind: Kind, val text: StringBuilder) {
          * A buffer holding [body]'s last segment grown by [delta], when upstream's merge would grow
          * that segment in place (`Message.swift:627-690`, `LLM.swift:158-190`); null otherwise.
          */
-        fun openFor(body: MessageBody, delta: TextDelta): OpenText? {
-            val (kind, existing) = when (delta) {
-                is TextDelta.Chunk -> when (body) {
-                    is MessageBody.PlainText -> Kind.PlainText to body.text
-                    is MessageBody.Markdown -> Kind.Markdown to body.text
-                    is MessageBody.Multipart -> when (val last = body.parts.lastOrNull()) {
-                        is Subpart.PlainText -> Kind.PlainTextPart to last.text
-                        is Subpart.Markdown -> Kind.MarkdownPart to last.text
-                        else -> return null
-                    }
+        fun openFor(messageID: String, body: MessageBody, delta: StreamDelta): OpenBuffer? {
+            val last = (body as? MessageBody.Multipart)?.parts?.lastOrNull()
+            val lastAttachment = (last as? Subpart.AttachmentPart)?.attachment
+            val (kind, existing, added) = when (delta) {
+                is StreamDelta.Chunk -> when {
+                    body is MessageBody.PlainText -> Triple(TextKind.PlainText, body.text, delta.text)
+                    body is MessageBody.Markdown -> Triple(TextKind.Markdown, body.text, delta.text)
+                    last is Subpart.PlainText -> Triple(TextKind.PlainTextPart, last.text, delta.text)
+                    last is Subpart.Markdown -> Triple(TextKind.MarkdownPart, last.text, delta.text)
                     else -> return null
                 }
-                is TextDelta.Code -> {
-                    val last = ((body as? MessageBody.Multipart)?.parts?.lastOrNull() as? Subpart.AttachmentPart)?.attachment
-                    val code = last?.kind as? AttachmentKind.Code
-                    if (last == null || code == null || last.id != delta.attachment.id) return null
-                    Kind.CodePart(last.inline, last.id) to code.text
+                is StreamDelta.Code -> {
+                    val code = lastAttachment?.kind as? AttachmentKind.Code
+                    if (code == null || lastAttachment.id != delta.attachment.id) return null
+                    Triple(TextKind.CodePart(lastAttachment.inline, lastAttachment.id), code.text, delta.text)
+                }
+                is StreamDelta.Status -> {
+                    val status = lastAttachment?.kind as? AttachmentKind.StatusUpdate ?: return null
+                    val updates = ArrayList<AgentStatusUpdate>()
+                    status.update.explodeInto(updates)
+                    delta.update.explodeInto(updates)
+                    return Status(messageID, lastAttachment.inline, lastAttachment.id, updates)
                 }
             }
-            val text = StringBuilder(existing.length + delta.text.length + MIN_GROWTH).append(existing).append(delta.text)
-            return OpenText(kind, text)
+            val text = StringBuilder(existing.length + added.length + MIN_GROWTH).append(existing).append(added)
+            return Text(messageID, kind, text)
         }
 
         private const val MIN_GROWTH = 64
     }
 }
 
-/** This multipart message's body with its last part replaced by [last]. */
-private fun ChatMessage.withLastPart(last: Subpart): MessageBody.Multipart {
-    val parts = (body as MessageBody.Multipart).parts
+/** This multipart body with its last part replaced by [last]. */
+private fun MessageBody.withLastPart(last: Subpart): MessageBody.Multipart {
+    val parts = (this as MessageBody.Multipart).parts
     return MessageBody.Multipart(parts.subList(0, parts.size - 1) + last)
 }
 
