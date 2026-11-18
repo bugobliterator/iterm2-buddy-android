@@ -32,9 +32,10 @@ enum class AgentState {
  *   just before typing goes true and `ended` just after it goes false, and a mid-turn park keeps the
  *   turn in progress (`ChatListModel.swift:776-802`).
  * - Agent typing is only the spinner. ChatAgent clears it when a turn parks on an approval (a classic
- *   command, a select-session it implies, or enable orchestration) and sets it again on resume
- *   (`ChatAgent.swift:154-167`, `240-263`, `2187-2214`, `1424-1432`); an orchestration tool call parks
- *   on a workgroup-permission request with typing still on. So a visible [ChatMessage.isBlockingRequest]
+ *   command, the select-session request it becomes when no session resolves, or enable orchestration)
+ *   and sets it again on resume (`ChatAgent.swift:240-263`, `2187-2227`, `1424-1432`;
+ *   `ChatClient.swift:126-142`); only an orchestration tool call parks on a workgroup-permission
+ *   request with typing still on (`ChatAgent.swift:160-167`, `453-458`). So a visible [ChatMessage.isBlockingRequest]
  *   latches Waiting whatever typing says, and typing off without a request reads as parked only after
  *   [parkDebounceMillis], which absorbs the end-of-turn and start-of-turn edges.
  * - The subscribe reply is `history` followed, in the same synchronous block, by `typingStatus(true)`
@@ -47,9 +48,15 @@ enum class AgentState {
  * [onUnsubscribed] and [onHistory]. A chat busy when it was lost from sight whose next history brings
  * no `started` ended its turn unseen, and becomes Done (Idle if visible).
  *
- * Android additions beyond the plain rules: a request latch is cleared by typing only on a real
- * resume edge (typing seen off after the latch, then on), so the snapshot's `typingStatus(true)`
- * cannot clear a typing-on park after a reconnect; the owner's own messages do not clear the latch
+ * Android additions beyond the plain rules: a live request latch is cleared by typing only on a real
+ * resume edge (typing seen off after the latch, then on). A latch seeded from a history is cleared by
+ * the snapshot's `typingStatus(true)` only for the kinds whose park clears typing (classic,
+ * select-session, enable orchestration: typing on means it was answered); a workgroup-permission park
+ * keeps typing on, so it holds. That split trusts ChatAgent's park prediction, which can in principle
+ * disagree with the client's real park decision (`ChatAgent.swift:1279-1288`); a mispredicted park would
+ * read as Working. A live `started` that opens a new turn clears a stale latch and a stale
+ * running command. Inputs for a chat dropped by [forget] are ignored until its next [onHistory].
+ * The owner's own messages do not clear the latch
  * (a select-session or workgroup request is not abandoned by a typed message, `ChatService.swift:229-237`);
  * and an `executingCommand` notice shows Working while an approved command runs with typing still off
  * (`ChatClient.swift:230-270`), until typing resumes.
@@ -73,6 +80,9 @@ class ChatActivityTracker(
         var quietSinceMillis = 0L
         var requestLatched = false
 
+        /** The latched request parks with typing still on (workgroup permission). */
+        var latchKeepsTyping = false
+
         /** Typing was seen off since the latch was set, so typing on is a resume. */
         var resumeArmed = false
         var commandRunning = false
@@ -88,6 +98,9 @@ class ChatActivityTracker(
     }
 
     private val chats = HashMap<String, Chat>()
+
+    /** Chats dropped by [forget]; their late inputs are ignored until the next [onHistory]. */
+    private val forgotten = HashSet<String>()
     private val mutableStates = MutableStateFlow<Map<String, AgentState>>(emptyMap())
 
     /** Every chat the tracker has heard of; an absent chat is [AgentState.UNKNOWN]. */
@@ -96,6 +109,7 @@ class ChatActivityTracker(
     /** A `history` reply replaced [chatID]'s transcript; [newestVisible] seeds the request latch. */
     fun onHistory(chatID: String, newestVisible: ChatMessage?, visible: Boolean) {
         settleSnapshots(except = chatID)
+        forgotten.remove(chatID)
         val chat = chats.getOrPut(chatID, ::Chat)
         val now = nowMillis()
         chat.busyUnseen = chat.busyUnseen || chat.turnInProgress
@@ -105,6 +119,7 @@ class ChatActivityTracker(
         chat.quietSinceMillis = now
         val agentNewest = newestVisible?.takeIf { it.author == Participant.AGENT && !it.hidden }
         chat.requestLatched = agentNewest?.isBlockingRequest == true
+        chat.latchKeepsTyping = agentNewest?.parksWithTypingOn == true
         chat.resumeArmed = false
         chat.commandRunning = agentNewest?.isExecutingCommand == true
         chat.snapshotPendingSinceMillis = now
@@ -114,12 +129,13 @@ class ChatActivityTracker(
 
     /** A `typingStatus`; the owner's own typing is ignored (`AppModel.swift:4323-4331`). */
     fun onTyping(chatID: String, participant: Participant, isTyping: Boolean) {
-        if (participant != Participant.AGENT) return
+        if (participant != Participant.AGENT || chatID in forgotten) return
         val chat = chats.getOrPut(chatID, ::Chat)
         val inSnapshot = isTyping && chat.snapshotPendingSinceMillis != null
         settleSnapshots(except = if (inSnapshot) chatID else null)
         if (isTyping) {
-            if (chat.requestLatched && chat.resumeArmed) chat.requestLatched = false
+            val resumed = chat.resumeArmed || (inSnapshot && !chat.latchKeepsTyping)
+            if (chat.requestLatched && resumed) chat.requestLatched = false
             chat.commandRunning = false
         } else {
             if (chat.requestLatched) chat.resumeArmed = true
@@ -131,12 +147,18 @@ class ChatActivityTracker(
 
     /** A `turnLifecycle`; [TurnEvent.UNKNOWN_FUTURE] is ignored (`AppModel.swift:3664-3671`). */
     fun onTurn(chatID: String, event: TurnEvent, visible: Boolean) {
-        if (event == TurnEvent.UNKNOWN_FUTURE) return
+        if (event == TurnEvent.UNKNOWN_FUTURE || chatID in forgotten) return
         settleSnapshots(except = chatID)
         val chat = chats.getOrPut(chatID, ::Chat)
         chat.known = true
         when (event) {
             TurnEvent.STARTED -> {
+                if (chat.snapshotPendingSinceMillis == null && !chat.turnInProgress) {
+                    // A live start of a new turn: whatever an earlier turn left latched is stale.
+                    chat.requestLatched = false
+                    chat.resumeArmed = false
+                    chat.commandRunning = false
+                }
                 chat.snapshotPendingSinceMillis = null
                 chat.busyUnseen = false
                 chat.done = false
@@ -162,11 +184,12 @@ class ChatActivityTracker(
     /** A live `delivery` (decoded); only visible agent messages change the state. */
     fun onDelivery(chatID: String, message: ChatMessage) {
         settleSnapshots(except = null)
-        if (message.hidden || message.author != Participant.AGENT) return
+        if (message.hidden || message.author != Participant.AGENT || chatID in forgotten) return
         val chat = chats.getOrPut(chatID, ::Chat)
         when {
             message.isBlockingRequest -> {
                 chat.requestLatched = true
+                chat.latchKeepsTyping = message.parksWithTypingOn
                 chat.resumeArmed = !chat.typing
                 chat.commandRunning = false
             }
@@ -198,9 +221,10 @@ class ChatActivityTracker(
         publish()
     }
 
-    /** Drops [chatID] entirely (deleted, or no longer listed). */
+    /** Drops [chatID] entirely (deleted, or no longer listed); its late inputs are ignored until [onHistory]. */
     fun forget(chatID: String) {
         chats.remove(chatID)
+        forgotten += chatID
         publish()
     }
 
@@ -280,6 +304,10 @@ class ChatActivityTracker(
 
     override fun toString(): String = "ChatActivityTracker(chats=${chats.size})"
 }
+
+/** A workgroup-permission request: an orchestration tool call parked with typing still on. */
+private val ChatMessage.parksWithTypingOn: Boolean
+    get() = (body as? MessageBody.ClientNotice)?.action is ClientAction.WorkgroupPermissionRequest
 
 private val ChatMessage.isExecutingCommand: Boolean
     get() = (body as? MessageBody.ClientNotice)?.action is ClientAction.ExecutingCommand
