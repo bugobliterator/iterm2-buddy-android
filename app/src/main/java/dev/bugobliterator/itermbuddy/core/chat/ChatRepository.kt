@@ -273,6 +273,14 @@ class ChatRepository(
     private var listRequestedAsSuspect = false
 
     /**
+     * Process-wide: oversized link ends with the list unanswered since a list reply last landed
+     * (or [refresh], [clear]). At [LIST_SUSPICIONS_TO_LATCH] the list is latched too large whatever
+     * else was out, so a slow link where the suspect list times out and a subscribe is always out
+     * when its frame lands cannot loop forever.
+     */
+    private var listOversizedEnds = 0
+
+    /**
      * A request on this link could not be sent ([RequestNotSentException]): the link is gone and
      * its LinkDown is on the way. Nothing more is planned on it, and nothing is marked failed.
      */
@@ -398,6 +406,7 @@ class ChatRepository(
     /** Refetches the list (pull to refresh, or Try again after a failed list); lifts a too-large list. */
     fun refresh() = post {
         listTooLarge = false
+        listOversizedEnds = 0
         if (ai) requestList()
     }
 
@@ -469,9 +478,12 @@ class ChatRepository(
     private fun endLink(messageTooLarge: Boolean) {
         val linkId = currentLink ?: return
         val listOut = messageTooLarge && listUnanswered
-        if (listOut && subscriptions.outstanding.isEmpty() && (listSuspect || listRequestedAsSuspect)) {
-            // The suspect list was the only thing out: it is what ended the link. Fetching it on
-            // every link would end every link (and the live view with it).
+        if (listOut) listOversizedEnds++
+        val onlyTheSuspectList = subscriptions.outstanding.isEmpty() && (listSuspect || listRequestedAsSuspect)
+        if (listOut && (onlyTheSuspectList || listOversizedEnds >= LIST_SUSPICIONS_TO_LATCH)) {
+            // The suspect list was the only thing out, or has been out at every one of the last
+            // oversized ends: it is what ends the links. Fetching it on every link would end
+            // every link (and the live view with it). Subscribes out still become suspects below.
             listTooLarge = true
             listSuspect = false
             listFailed = true
@@ -716,6 +728,7 @@ class ChatRepository(
      */
     private fun listAnswered() {
         listUnanswered = false
+        listOversizedEnds = 0
         if (listSuspect) {
             listSuspect = false
             log("the chat list answered: no longer a suspect")
@@ -949,6 +962,7 @@ class ChatRepository(
         listSuspect = false
         listRequestedAsSuspect = false
         linkGone = false
+        listOversizedEnds = 0
         subscribeTickets.clear()
         failedThisLink.clear()
         open.clear()
@@ -1158,6 +1172,9 @@ class ChatRepository(
 private const val LAUNCHING = 0
 private const val LAUNCHED = 1
 private const val FINISHED_EARLY = 2
+
+/** Oversized link ends with the list unanswered after which the list is latched too large. */
+private const val LIST_SUSPICIONS_TO_LATCH = 3
 
 /** A bound on [ChatRepository]'s plan passes per step; a leftover plan runs at the next step. */
 private const val MAX_PLAN_PASSES = 64
