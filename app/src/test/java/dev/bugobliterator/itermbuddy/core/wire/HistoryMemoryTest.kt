@@ -1,6 +1,6 @@
 package dev.bugobliterator.itermbuddy.core.wire
 
-import dev.bugobliterator.itermbuddy.core.DEFAULT_MAX_HISTORY_BYTES
+import dev.bugobliterator.itermbuddy.core.DEFAULT_MAX_RAW_CHAT_BYTES
 import dev.bugobliterator.itermbuddy.core.chat.ChatInput
 import dev.bugobliterator.itermbuddy.core.chat.PayloadDecoding
 import java.lang.management.ManagementFactory
@@ -57,8 +57,8 @@ class HistoryMemoryTest {
     }
 
     companion object {
-        /** The plan's chat history cap (`maxHistoryBytes`): a larger `history` is never parsed. */
-        const val MAX_HISTORY_BYTES = DEFAULT_MAX_HISTORY_BYTES
+        /** The plan's chat history cap (`maxRawChatBytes`): a larger `history` is never parsed. */
+        const val MAX_HISTORY_BYTES = DEFAULT_MAX_RAW_CHAT_BYTES
 
         const val MESSAGES = 20_000
 

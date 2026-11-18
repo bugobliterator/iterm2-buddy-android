@@ -33,6 +33,19 @@ val RAW_CHAT_CASES: Set<String> = setOf("history", "chatsAndSessions", "chatList
  */
 fun peekEnvelope(bytes: ByteArray): EnvelopePeek = EnvelopeScanner(bytes).scan()
 
+/**
+ * The top-level `chatID` string of [bytes]' payload body (`{"payload":{"<case>":{"chatID":...}}}`),
+ * read by another forward scan like [peekEnvelope]'s, building no tree; only that one string is
+ * decoded. Null when there is none, when it is not a string or is longer than 256 bytes raw, or
+ * when the frame does not scan. Never throws. For a frame too large to decode, to say which chat
+ * it was about.
+ */
+fun peekChatID(bytes: ByteArray): String? = try {
+    EnvelopeScanner(bytes).chatID()
+} catch (_: WireDecodeException) {
+    null
+}
+
 private const val QUOTE = '"'.code.toByte()
 private const val BACKSLASH = '\\'.code.toByte()
 private const val OPEN_OBJECT = '{'.code.toByte()
@@ -48,6 +61,10 @@ private const val LONGEST_ENVELOPE_KEY = 64
 
 private val REQUEST_ID_KEY = "requestID".toByteArray(Charsets.US_ASCII)
 private val PAYLOAD_KEY = "payload".toByteArray(Charsets.US_ASCII)
+private val CHAT_ID_KEY = "chatID".toByteArray(Charsets.US_ASCII)
+
+/** A `chatID` longer than this, raw, is not one the Mac sends (a UUID string): not decoded. */
+private const val LONGEST_CHAT_ID = 256
 private val NULL_LITERAL = "null".toByteArray(Charsets.US_ASCII)
 
 private class EnvelopeScanner(private val bytes: ByteArray) {
@@ -94,6 +111,59 @@ private class EnvelopeScanner(private val bytes: ByteArray) {
                 payload.single ?: throw WireDecodeException("payload must have exactly one key, has ${payload.count}"),
             )
         }
+    }
+
+    /** The payload body's top-level `chatID` string (the last one, as the tree keeps), or null. */
+    fun chatID(): String? {
+        if (bytes.isNotEmpty() && bytes[0] == MEDIA_FRAME_BYTE) return null
+        skipWhitespace()
+        if (at() != OPEN_OBJECT) return null
+        pos++
+        var found: String? = null
+        if (closesEmpty(CLOSE_OBJECT)) return null
+        while (true) {
+            val keyStart = pos
+            skipString()
+            val isPayload = keyIs(keyStart, PAYLOAD_KEY)
+            expectColon()
+            if (isPayload && at() == OPEN_OBJECT) {
+                pos++
+                if (!closesEmpty(CLOSE_OBJECT)) {
+                    while (true) {
+                        skipString()
+                        expectColon()
+                        if (at() == OPEN_OBJECT) found = bodyChatID() ?: found else skipValue()
+                        if (nextMemberOrClose(CLOSE_OBJECT)) break
+                    }
+                }
+            } else {
+                skipValue()
+            }
+            if (nextMemberOrClose(CLOSE_OBJECT)) break
+        }
+        return found
+    }
+
+    /** At a case body's `{`: scans its members, returning its `chatID` string, leaving [pos] after its `}`. */
+    private fun bodyChatID(): String? {
+        pos++
+        var found: String? = null
+        if (closesEmpty(CLOSE_OBJECT)) return null
+        while (true) {
+            val keyStart = pos
+            skipString()
+            val isChatID = keyIs(keyStart, CHAT_ID_KEY)
+            expectColon()
+            if (isChatID && at() == QUOTE) {
+                val valueStart = pos
+                skipString()
+                found = if (pos - valueStart - 2 <= LONGEST_CHAT_ID) decodeString(valueStart) else null
+            } else {
+                skipValue()
+            }
+            if (nextMemberOrClose(CLOSE_OBJECT)) break
+        }
+        return found
     }
 
     private sealed interface RequestIdValue {

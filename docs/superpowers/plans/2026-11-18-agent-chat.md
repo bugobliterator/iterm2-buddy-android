@@ -182,7 +182,7 @@ Pure Kotlin: what a chat message is and how its body decodes. No wire cases yet.
   - `chatInputsFromAnEndedLinkAreDropped`: nothing from link 1 reaches the sink after `LinkDown(1)`.
   - `streamAndChatInputsKeepWireOrder`: interleaved media, stream control and chat deliveries reach their sinks in wire order, each after its link's `LinkUp`.
   - `missedChatLinkUpEndsTheLink`, `chatLinkDownSurvivesCancellation` (as the stream versions in `MediaChannelTest`).
-  - `oversizedHistoryEndsLinkWithFlag`: a 33 MiB history → `ChatInput.LinkDown(linkId, messageTooLarge = true)`, then a reconnect.
+  - `oversizedHistoryEndsLinkWithFlag`: with the Noise cap scaled to 1 MiB (`ClientTimeouts.maxMessageBytes`, standing in for 32 MiB so the test stays light), a 2 MiB history → `ChatInput.LinkDown(linkId, messageTooLarge = true)`, then a reconnect.
   - `sessionTreesStillUseEvents`: an unsolicited `sessionTree` still reaches `events` with its arrival stamp.
 - [ ] **Step: Failing tests** in `ChatInboxTest`: `historyAcceptReturnsWithoutDecoding` (with a consumer blocked on a gate, accepting a cap-sized `Payload` returns at once and the consumer has run nothing), `inboxBoundsItemsAndBytes`, `oversizedInputIsAdmittedOnlyIntoAnEmptyInbox`, `consumerKeepsOrder`, `fullInboxSuspendsAndNeverDrops`.
 - [ ] **Step: Run** `./gradlew testDebugUnitTest --tests '*ChatChannelTest*' --tests '*ChatInboxTest*' --tests '*MediaChannelTest*' --tests '*CompanionClientTest*'`. FAIL.

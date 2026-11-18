@@ -1,9 +1,12 @@
 package dev.bugobliterator.itermbuddy.core
 
 import com.southernstorm.noise.protocol.Noise
+import dev.bugobliterator.itermbuddy.core.chat.ChatInbox
 import dev.bugobliterator.itermbuddy.core.chat.ChatInput
 import dev.bugobliterator.itermbuddy.core.chat.ChatSink
+import dev.bugobliterator.itermbuddy.core.chat.NewChatMode
 import dev.bugobliterator.itermbuddy.core.chat.PayloadDecoding
+import dev.bugobliterator.itermbuddy.core.noise.DEFAULT_MAX_MESSAGE_BYTES
 import dev.bugobliterator.itermbuddy.core.noise.newStaticKeyPair
 import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
 import dev.bugobliterator.itermbuddy.core.pairing.roomName
@@ -32,7 +35,10 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -103,12 +109,15 @@ class ChatChannelTest {
     private inner class Harness(
         test: TestScope,
         timeouts: ClientTimeouts = ClientTimeouts(),
-        maxHistoryBytes: Int = DEFAULT_MAX_HISTORY_BYTES,
+        maxRawChatBytes: Int = DEFAULT_MAX_RAW_CHAT_BYTES,
+        rawDeliveryBytes: Int = DEFAULT_RAW_DELIVERY_BYTES,
+        chatSink: ChatSink? = null,
         chatPerItem: Duration = Duration.ZERO,
         val relay: FakeRelay = FakeRelay(ORIGIN),
     ) {
         val arrivals = Arrivals()
         val chat = RecordingChatSink(arrivals, chatPerItem)
+        private val sinkInUse: ChatSink = chatSink ?: chat
         val stream = RecordingStreamSink(arrivals)
         val store = InMemoryPairingStore()
         val logs = CopyOnWriteArrayList<String>()
@@ -129,12 +138,13 @@ class ChatChannelTest {
             EmptyCoroutineContext,
             { logs += it },
             stream,
-            chat,
-            maxHistoryBytes,
+            sinkInUse,
+            maxRawChatBytes,
             envelopeDecoder = { bytes ->
                 decodes.incrementAndGet()
                 decodeEnvelope(bytes).also { decoded += it.second.javaClass.simpleName }
             },
+            rawDeliveryBytes = rawDeliveryBytes,
         )
         val mac = FakeMac(relay, code, macKeys.first, test.backgroundScope)
         val chatMac = FakeChatMac(mac, test.backgroundScope)
@@ -221,14 +231,14 @@ class ChatChannelTest {
     fun historyOverTheChatCapIsNeverParsed() = runTest {
         val h = Harness(this)
         h.connect()
-        val frame = HistoryMemoryTest.historyFrame(DEFAULT_MAX_HISTORY_BYTES + 1, messages = 1_000)
-        assertEquals(DEFAULT_MAX_HISTORY_BYTES + 1, frame.size)
+        val frame = HistoryMemoryTest.historyFrame(DEFAULT_MAX_RAW_CHAT_BYTES + 1, messages = 1_000)
+        assertEquals(DEFAULT_MAX_RAW_CHAT_BYTES + 1, frame.size)
         val decodesBefore = h.decodes.get()
         h.mac.sendRaw(frame)
         runCurrent()
 
         assertEquals(
-            listOf(ChatInput.HistoryTooLarge(1, 12, DEFAULT_MAX_HISTORY_BYTES + 1)),
+            listOf(ChatInput.PayloadTooLarge(1, "history", HISTORY_CHAT, 12, DEFAULT_MAX_RAW_CHAT_BYTES + 1)),
             h.chat.inputs.drop(1),
         )
         assertEquals(decodesBefore, h.decodes.get())
@@ -241,22 +251,22 @@ class ChatChannelTest {
 
     @Test
     fun historyAtTheCapStillCrosses() = runTest {
-        val h = Harness(this, maxHistoryBytes = 64 * 1024)
+        val h = Harness(this, maxRawChatBytes = 64 * 1024)
         h.connect()
         h.mac.sendRaw(HistoryMemoryTest.historyFrame(64 * 1024, messages = 10))
         h.mac.sendRaw(HistoryMemoryTest.historyFrame(64 * 1024 + 1, messages = 10))
         runCurrent()
         val inputs = h.chat.inputs.drop(1)
         assertEquals(64 * 1024, (inputs[0] as ChatInput.Payload).size)
-        assertEquals(ChatInput.HistoryTooLarge(1, 12, 64 * 1024 + 1), inputs[1])
+        assertEquals(ChatInput.PayloadTooLarge(1, "history", HISTORY_CHAT, 12, 64 * 1024 + 1), inputs[1])
     }
 
     @Test
     fun tooLargeHistoryCompletesItsRequest() = runTest {
-        val h = Harness(this, maxHistoryBytes = 1024)
+        val h = Harness(this, maxRawChatBytes = 1024)
         h.connect()
         val reply = h.client.request(PhoneMessage.Subscribe(FakeChatMac.SAMPLE_CHAT))
-        val tooLarge = h.chat.inputs.filterIsInstance<ChatInput.HistoryTooLarge>().single()
+        val tooLarge = h.chat.inputs.filterIsInstance<ChatInput.PayloadTooLarge>().single()
         assertEquals(MacMessage.ChatPayloadTaken("history", tooLarge.sizeBytes), reply)
         assertTrue(tooLarge.sizeBytes > 1024)
     }
@@ -309,7 +319,7 @@ class ChatChannelTest {
         assertTrue("$resolved", resolved is MacMessage.MentionsResolved)
         val workgroup = h.client.request(PhoneMessage.FetchWorkgroupInfo("wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F"))
         assertTrue("$workgroup", workgroup is MacMessage.WorkgroupInfoMessage)
-        val created = h.client.request(PhoneMessage.CreateChat("Orchestrator", dev.bugobliterator.itermbuddy.core.chat.NewChatMode.Orchestrator))
+        val created = h.client.request(PhoneMessage.CreateChat("Orchestrator", NewChatMode.Orchestrator))
         assertTrue("$created", created is MacMessage.ChatCreated)
         val listed = h.client.request(PhoneMessage.ListChatsAndSessions)
         assertEquals("chatsAndSessions", (listed as MacMessage.ChatPayloadTaken).case)
@@ -436,7 +446,7 @@ class ChatChannelTest {
     @Test
     fun oversizedHistoryEndsLinkWithFlag() = runTest {
         // The Noise cap scaled down (1 MiB for 32 MiB) so the test stays light: a history over it ends the link.
-        val h = Harness(this, ClientTimeouts(maxMessageBytes = 1024 * 1024), maxHistoryBytes = 256 * 1024)
+        val h = Harness(this, ClientTimeouts(maxMessageBytes = 1024 * 1024), maxRawChatBytes = 256 * 1024)
         h.connect()
         h.mac.sendRaw(HistoryMemoryTest.historyFrame(2 * 1024 * 1024 + 1024, messages = 100))
         h.awaitConnected(2)
@@ -521,6 +531,150 @@ class ChatChannelTest {
         assertEquals(MacMessage.Pong, client.request(PhoneMessage.Ping))
     }
 
+    /**
+     * A `delivery` over the raw delivery threshold (an attachment with inline bytes) crosses raw
+     * and is decoded by the consumer, so a video frame behind it reaches the stream sink before
+     * the consumer has even started on it; a small delivery still decodes on the loop.
+     */
+    @Test
+    fun bigDeliveryCrossesRawAndIsDecodedByTheConsumer() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val consumed = CopyOnWriteArrayList<ChatInput>()
+        val inbox = ChatInbox(backgroundScope) { input ->
+            if (input !is ChatInput.LinkUp) gate.await()
+            consumed += input
+        }
+        val h = Harness(this, rawDeliveryBytes = 4096, chatSink = inbox)
+        h.connect()
+        val big = padded(h.chatMac.append(FakeChatMac.SAMPLE_CHAT, 1), "delivery", 64 * 1024)
+        val decodesBefore = h.decodes.get()
+        h.mac.sendMessage(big, null)
+        h.mac.sendMedia(byteArrayOf(9))
+        h.mac.sendMessage(h.chatMac.append(FakeChatMac.SAMPLE_CHAT, 2), null)
+        runCurrent()
+
+        assertEquals("the video frame went through", 1, h.stream.inputs.count { it is StreamInput.Media })
+        assertEquals("the consumer has decoded nothing yet", 1, consumed.size)
+        assertEquals("only the small delivery decoded on the loop", 1, h.decodes.get() - decodesBefore)
+        assertEquals("Delivery", h.decoded.last())
+        gate.complete(Unit)
+        runCurrent()
+        val raw = consumed[1] as ChatInput.Payload
+        assertEquals("delivery", raw.case)
+        assertTrue(raw.size > 64 * 1024)
+        val delivery = (raw.decode() as PayloadDecoding.Decoded).message as MacMessage.Delivery
+        assertEquals(FakeChatMac.appendID(1), delivery.message.uniqueID)
+        val small = consumed[2] as ChatInput.Message
+        assertEquals(FakeChatMac.appendID(2), (small.message as MacMessage.Delivery).message.uniqueID)
+        assertTrue("a decoded message carries its frame size", small.frameBytes in 1..4096)
+        assertTrue(h.events.isEmpty())
+    }
+
+    /** Every raw case over the raw chat cap is PayloadTooLarge, never decoded, its waiter completed. */
+    @Test
+    fun everyRawCaseOverTheCapIsTooLarge() = runTest {
+        val cap = 8 * 1024
+        val h = Harness(this, maxRawChatBytes = cap, rawDeliveryBytes = 1024)
+        h.connect()
+        val list = padded(FakeChatMac.samplePayload("chats-and-sessions.json"), "chatsAndSessions", cap + 1)
+        h.mac.onRequestScripted("listChatsAndSessions") { envelope ->
+            h.mac.sendMessage(list, envelope.getValue("requestID").let { (it as JsonPrimitive).content.toLong() })
+        }
+        val decodesBefore = h.decodes.get()
+        val reply = h.client.request(PhoneMessage.ListChatsAndSessions) as MacMessage.ChatPayloadTaken
+        assertEquals("chatsAndSessions", reply.case)
+        assertTrue(reply.sizeBytes > cap)
+        h.mac.sendRaw(envelope(padded(FakeChatMac.history(), "history", cap + 1), 12))
+        h.mac.sendRaw(envelope(padded(FakeChatMac.samplePayload("chat-list-changed.json"), "chatListChanged", cap + 1), null))
+        h.mac.sendRaw(envelope(padded(h.chatMac.append(FakeChatMac.SAMPLE_CHAT, 0), "delivery", cap + 1), null))
+        runCurrent()
+
+        val tooLarge = h.chat.inputs.filterIsInstance<ChatInput.PayloadTooLarge>()
+        assertEquals(listOf("chatsAndSessions", "history", "chatListChanged", "delivery"), tooLarge.map { it.case })
+        assertEquals(listOf(null, FakeChatMac.SAMPLE_CHAT, null, FakeChatMac.SAMPLE_CHAT), tooLarge.map { it.chatID })
+        assertTrue("the list reply names its request", tooLarge[0].requestID != null)
+        assertEquals(listOf(12L, null, null), tooLarge.drop(1).map { it.requestID })
+        assertEquals(reply.sizeBytes, tooLarge[0].sizeBytes)
+        assertTrue(tooLarge.all { it.sizeBytes > cap })
+        assertEquals("none was decoded", decodesBefore, h.decodes.get())
+        assertTrue(h.chat.payloads.isEmpty())
+        assertEquals(MacMessage.Pong, h.client.request(PhoneMessage.Ping))
+    }
+
+    @Test
+    fun rawChatCapIsUnderTheNoiseCap() {
+        assertTrue(DEFAULT_MAX_RAW_CHAT_BYTES < DEFAULT_MAX_MESSAGE_BYTES)
+        assertTrue(DEFAULT_RAW_DELIVERY_BYTES < DEFAULT_MAX_RAW_CHAT_BYTES)
+    }
+
+    /** A chat reply the sink did not take fails its request at once, not at its bound; the link stays up. */
+    @Test
+    fun chatReplyNotTakenFailsAtOnce() = runTest {
+        val h = Harness(this, ClientTimeouts(rpc = 15.seconds))
+        h.chat.onAccept = { if (it is ChatInput.Payload || it is ChatInput.Message) throw IllegalStateException("sink broke") }
+        h.connect()
+        for (request in listOf(PhoneMessage.ListChatsAndSessions, PhoneMessage.CreateChat("Orchestrator", NewChatMode.Orchestrator))) {
+            val startedAt = currentTime
+            val failure = runCatching { h.client.request(request) }.exceptionOrNull()
+            assertTrue("$failure", failure is CompanionRequestException)
+            assertEquals("the chat sink did not take the reply", failure?.message)
+            assertEquals("at once", startedAt, currentTime)
+        }
+        assertTrue(h.logs.any { it == "the chat sink failed on chatsAndSessions: IllegalStateException" })
+        assertEquals(MacMessage.Pong, h.client.request(PhoneMessage.Ping))
+    }
+
+    /** With no chat sink, a chat request fails at once too. */
+    @Test
+    fun chatReplyWithoutAChatSinkFailsAtOnce() = runTest {
+        val h = Harness(this, chatSink = ChatSink { if (it !is ChatInput.LinkUp) throw IllegalStateException() })
+        h.connect()
+        val startedAt = currentTime
+        val failure = runCatching { h.client.request(PhoneMessage.Subscribe(FakeChatMac.SAMPLE_CHAT)) }.exceptionOrNull()
+        assertTrue("$failure", failure is CompanionRequestException)
+        assertEquals(startedAt, currentTime)
+    }
+
+    @Test
+    fun chatSinkStallEndsTheLink() = runTest {
+        val h = Harness(this, ClientTimeouts(sinkStall = 30.seconds))
+        h.chat.onAccept = { if (it is ChatInput.Payload) delay(60.seconds) }
+        h.connect()
+        val startedAt = currentTime
+        val failure = runCatching { h.client.request(PhoneMessage.ListChatsAndSessions, timeout = 2.minutes) }.exceptionOrNull()
+        assertTrue("$failure", failure is CompanionRequestException)
+        assertEquals("fails as the link ends at sinkStall", 30_000L, currentTime - startedAt)
+        assertTrue(h.logs.joinToString("\n"), h.logs.any { it.startsWith("the chat sink did not take chatsAndSessions within 30s; ending the link") })
+        h.awaitConnected(2)
+        runCurrent()
+        assertEquals(
+            listOf(ChatInput.LinkUp(1, 15, true), ChatInput.LinkDown(1), ChatInput.LinkUp(2, 15, true)),
+            h.chat.markers,
+        )
+    }
+
+    /** A chat inbox whose consumer died refuses at once: chat requests fail, video and the link go on. */
+    @Test
+    fun deadChatConsumerDoesNotStallTheLink() = runTest {
+        val consumerScope = kotlinx.coroutines.CoroutineScope(backgroundScope.coroutineContext + Job())
+        val inbox = ChatInbox(consumerScope) {}
+        val h = Harness(this, ClientTimeouts(sinkStall = 30.seconds), chatSink = inbox)
+        h.connect()
+        consumerScope.coroutineContext[Job]!!.cancel()
+        runCurrent()
+        val startedAt = currentTime
+        repeat(10) { h.mac.sendMessage(h.chatMac.append(FakeChatMac.SAMPLE_CHAT, it), null) }
+        h.mac.sendMedia(byteArrayOf(1))
+        runCurrent()
+        assertEquals(startedAt, currentTime)
+        assertEquals(1, h.stream.inputs.count { it is StreamInput.Media })
+        val failure = runCatching { h.client.request(PhoneMessage.ListChatsAndSessions) }.exceptionOrNull()
+        assertTrue("$failure", failure is CompanionRequestException)
+        assertEquals(startedAt, currentTime)
+        assertEquals("still the first link", 1, h.relay.phoneAdmissions.size)
+        assertTrue(h.client.state.value is ClientState.Connected)
+    }
+
     @Test
     fun chatInputsShowNoContent() {
         val secret = "SENTINEL-chat-text"
@@ -530,15 +684,23 @@ class ChatChannelTest {
         val error = decodeEnvelope(envelope(FakeChatMac.samplePayload("error-delete-refused.json"), null)).second
         for (shown in listOf(
             ChatInput.Payload(1, 12, "history", history).toString(),
-            ChatInput.Message(1, null, decoded.message).toString(),
-            ChatInput.Message(1, null, delivery).toString(),
-            ChatInput.Message(1, null, error).toString(),
+            ChatInput.Message(1, null, decoded.message, history.size).toString(),
+            ChatInput.Message(1, null, delivery, 100).toString(),
+            ChatInput.Message(1, null, error, 100).toString(),
             decoded.toString(),
         )) {
             assertFalse(shown, shown.contains(secret))
             assertFalse(shown, shown.contains("Running the tests"))
             assertFalse(shown, shown.contains("not available"))
         }
+    }
+
+    /** [payload] with an ignored `padding` key in its [case] body, so its envelope is at least [atLeast] bytes. */
+    private fun padded(payload: JsonObject, case: String, atLeast: Int): JsonObject {
+        val body = payload.getValue(case) as JsonObject
+        val bare = envelope(payload, 99_999).size
+        val padding = JsonPrimitive("p".repeat(maxOf(0, atLeast - bare) + 16))
+        return JsonObject(mapOf(case to JsonObject(body + ("padding" to padding))))
     }
 
     private fun label(input: Any): String = when (input) {
@@ -550,7 +712,7 @@ class ChatChannelTest {
         is ChatInput.LinkDown -> "chat LinkDown ${input.linkId}"
         is ChatInput.Message -> "chat ${input.message.javaClass.simpleName} ${input.linkId}"
         is ChatInput.Payload -> "chat Payload ${input.linkId}"
-        is ChatInput.HistoryTooLarge -> "chat HistoryTooLarge ${input.linkId}"
+        is ChatInput.PayloadTooLarge -> "chat PayloadTooLarge ${input.linkId}"
         else -> "$input"
     }
 
@@ -568,6 +730,9 @@ class ChatChannelTest {
         const val APPENDS = 50
         const val DELIVERIES = 1_000
         const val NESTING = 600
+
+        /** The chat ID HistoryMemoryTest.historyFrame writes. */
+        const val HISTORY_CHAT = "6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E"
 
         /** [payload] in an envelope, keys in the order the Mac's samples list them. */
         fun envelope(payload: JsonObject, requestID: Long?): ByteArray {
