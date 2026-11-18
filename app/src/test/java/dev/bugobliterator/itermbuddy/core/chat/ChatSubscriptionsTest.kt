@@ -1,5 +1,8 @@
 package dev.bugobliterator.itermbuddy.core.chat
 
+import dev.bugobliterator.itermbuddy.core.chat.SubscribeOutcome.ANSWERED
+import dev.bugobliterator.itermbuddy.core.chat.SubscribeOutcome.ERROR
+import dev.bugobliterator.itermbuddy.core.chat.SubscribeOutcome.TIMEOUT
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -7,39 +10,58 @@ import org.junit.Test
 
 /** Which chats a link subscribes and unsubscribes, as the chat repository asks each time something changes. */
 class ChatSubscriptionsTest {
-    private val subscriptions = ChatSubscriptions()
+    private val oversized = OversizedChats()
+    private var subscriptions = ChatSubscriptions(oversized)
+
+    /** Tickets of the requests out, by chat, as the repository would hold them. */
+    private val tickets = LinkedHashMap<String, SubscribeTicket>()
 
     private fun entry(id: String) = ChatListEntry(ChatSummary(id, "title", 1.0, 2.0, false, null, null, emptyList(), null), null, null)
 
-    private fun entries(vararg ids: String) = ids.map(::entry)
+    private fun listed(vararg ids: String, open: List<String> = emptyList()) =
+        subscriptions.wanted(open = open, entries = ids.map(::entry))
 
-    /** Plans, then starts every planned subscribe, as the repository does; returns what was started. */
-    private fun planAndStart(wanted: List<String>, concurrency: Int = 2): List<String> {
-        val plan = subscriptions.plan(wanted, concurrency)
-        plan.subscribe.forEach(subscriptions::started)
+    /** Plans and takes the plan, as the repository does; returns the subscribes started. */
+    private fun planAndStart(wanted: List<String>, concurrency: Int = 2, aiAvailable: Boolean = true): List<String> {
+        val plan = subscriptions.plan(wanted, concurrency, aiAvailable)
+        subscriptions.take(plan).forEach { tickets[it.chatID] = it }
         return plan.subscribe
     }
+
+    /** [chatID]'s history lands, then its request is answered. */
+    private fun answer(chatID: String, tooLarge: Boolean = false) {
+        subscriptions.subscribed(chatID, tooLarge)
+        settle(chatID, ANSWERED)
+    }
+
+    private fun settle(chatID: String, outcome: SubscribeOutcome) = subscriptions.settled(tickets.remove(chatID)!!, outcome)
 
     /** Subscribes [wanted] until nothing more is planned, every history landing at once. */
     private fun subscribeAll(wanted: List<String>) {
         while (true) {
             val started = planAndStart(wanted)
             if (started.isEmpty()) return
-            started.forEach(subscriptions::subscribed)
+            started.forEach(::answer)
         }
+    }
+
+    private fun nextLink(messageTooLarge: Boolean) {
+        subscriptions.linkEnded(messageTooLarge)
+        subscriptions = ChatSubscriptions(oversized)
+        tickets.clear()
     }
 
     @Test
     fun openChatsComeFirst() {
-        val wanted = subscriptions.wanted(open = listOf(CHAT_C, CHAT_B), entries = entries(CHAT_A, CHAT_B, CHAT_C, CHAT_D), tooLarge = emptySet())
+        val wanted = listed(CHAT_A, CHAT_B, CHAT_C, CHAT_D, open = listOf(CHAT_C, CHAT_B))
         assertEquals(listOf(CHAT_C, CHAT_B, CHAT_A, CHAT_D), wanted)
-        assertEquals(listOf(CHAT_C, CHAT_B), subscriptions.plan(wanted, concurrency = 2).subscribe)
+        assertEquals(listOf(CHAT_C, CHAT_B), subscriptions.plan(wanted, concurrency = 2, aiAvailable = true).subscribe)
     }
 
     @Test
     fun everyListedChatIsWanted() {
         val ids = (0 until 300).map { "CHAT-%04d".format(it) }
-        val wanted = subscriptions.wanted(open = emptyList(), entries = ids.map(::entry), tooLarge = emptySet())
+        val wanted = listed(*ids.toTypedArray())
         assertEquals("the Mac's order, every chat", ids, wanted)
 
         subscribeAll(wanted)
@@ -48,29 +70,45 @@ class ChatSubscriptionsTest {
 
     @Test
     fun openChatMissingFromTheListIsStillWanted() {
-        val wanted = subscriptions.wanted(open = listOf(CHAT_D, CHAT_D), entries = entries(CHAT_A), tooLarge = emptySet())
-        assertEquals(listOf(CHAT_D, CHAT_A), wanted)
+        assertEquals(listOf(CHAT_D, CHAT_A), listed(CHAT_A, open = listOf(CHAT_D, CHAT_D)))
     }
 
     @Test
     fun tooLargeChatsAreExcluded() {
-        val wanted = subscriptions.wanted(open = listOf(CHAT_B), entries = entries(CHAT_A, CHAT_B, CHAT_C), tooLarge = setOf(CHAT_B, CHAT_C))
+        planAndStart(listOf(CHAT_B, CHAT_C))
+        answer(CHAT_B, tooLarge = true)
+        answer(CHAT_C, tooLarge = true)
+        nextLink(messageTooLarge = false)
+
+        val wanted = listed(CHAT_A, CHAT_B, CHAT_C, open = listOf(CHAT_B))
         assertEquals(listOf(CHAT_A), wanted)
-        assertEquals(listOf(CHAT_A), subscriptions.plan(wanted, concurrency = 2).subscribe)
+        assertEquals(listOf(CHAT_A), planAndStart(wanted))
     }
 
     @Test
     fun tooLargeChatAlreadySubscribedOnThisLinkIsKept() {
         // Its history was over the cap, but the Mac still installed the subscription, which keeps
         // feeding the chat's live state: it is neither resubscribed nor cut while it is listed.
-        subscriptions.started(CHAT_A)
-        subscriptions.subscribed(CHAT_A)
-        val listed = subscriptions.wanted(open = emptyList(), entries = entries(CHAT_A, CHAT_B), tooLarge = setOf(CHAT_A))
-        assertEquals(listOf(CHAT_A, CHAT_B), listed)
-        assertEquals(SubscriptionPlan(subscribe = listOf(CHAT_B), unsubscribe = emptyList()), subscriptions.plan(listed, 2))
+        planAndStart(listed(CHAT_A))
+        answer(CHAT_A, tooLarge = true)
+        assertEquals(setOf(CHAT_A), oversized.tooLarge)
+        val wanted = listed(CHAT_A, CHAT_B)
+        assertEquals(listOf(CHAT_A, CHAT_B), wanted)
+        assertEquals(SubscriptionPlan(subscribe = listOf(CHAT_B), unsubscribe = emptyList()), subscriptions.plan(wanted, 2, true))
 
-        val gone = subscriptions.wanted(open = emptyList(), entries = entries(CHAT_B), tooLarge = setOf(CHAT_A))
-        assertEquals(listOf(CHAT_A), subscriptions.plan(gone, 2).unsubscribe)
+        assertEquals(listOf(CHAT_A), subscriptions.plan(listed(CHAT_B), 2, true).unsubscribe)
+    }
+
+    @Test
+    fun tryAgainLiftsTooLarge() {
+        planAndStart(listed(CHAT_A))
+        answer(CHAT_A, tooLarge = true)
+        nextLink(messageTooLarge = false)
+        assertEquals(emptyList<String>(), planAndStart(listed(CHAT_A)))
+
+        subscriptions.tryAgain(CHAT_A)
+        assertEquals(emptySet<String>(), oversized.tooLarge)
+        assertEquals(listOf(CHAT_A), planAndStart(listed(CHAT_A)))
     }
 
     @Test
@@ -80,25 +118,60 @@ class ChatSubscriptionsTest {
         // In flight: not planned again, whatever changes.
         assertEquals(emptyList<String>(), planAndStart(listOf(CHAT_B, CHAT_A)))
 
-        subscriptions.subscribed(CHAT_A)
-        subscriptions.settled(CHAT_A)
+        answer(CHAT_A)
         // The subscribe for B timed out on the phone; the Mac installed it anyway and its history
         // may still land, so it is not planned again on this link either.
-        subscriptions.settled(CHAT_B)
+        settle(CHAT_B, TIMEOUT)
         assertEquals(listOf(CHAT_C), planAndStart(wanted))
-        subscriptions.subscribed(CHAT_C)
+        answer(CHAT_C)
         assertEquals(emptyList<String>(), planAndStart(wanted))
 
         // The late history is applied when it lands.
         subscriptions.subscribed(CHAT_B)
         assertEquals(setOf(CHAT_A, CHAT_B, CHAT_C), subscriptions.subscribedChats)
-        assertEquals(SubscriptionPlan(emptyList(), emptyList()), subscriptions.plan(wanted, 2))
+        assertEquals(SubscriptionPlan(emptyList(), emptyList()), subscriptions.plan(wanted, 2, true))
+    }
+
+    @Test
+    fun timedOutSubscribeStaysUnansweredAndIsNamedWhenTheLinkEndsOversized() {
+        planAndStart(listOf(CHAT_A, CHAT_B))
+        answer(CHAT_A)
+        settle(CHAT_B, TIMEOUT)
+        assertEquals(setOf(CHAT_B), subscriptions.outstanding)
+
+        nextLink(messageTooLarge = true)
+        assertEquals("the only unanswered chat is the culprit", setOf(CHAT_B), oversized.tooLarge)
+    }
+
+    @Test
+    fun errorReplyAnswersTheChat() {
+        planAndStart(listOf(CHAT_A, CHAT_B))
+        settle(CHAT_A, ERROR)
+        settle(CHAT_B, TIMEOUT)
+        assertEquals(setOf(CHAT_B), subscriptions.outstanding)
+        assertEquals("refused with AI on: only Try again retries it", emptyList<String>(), planAndStart(listOf(CHAT_A)))
+    }
+
+    @Test
+    fun staleSettleNeverFreesANewerRequestsSlot() {
+        planAndStart(listOf(CHAT_A, CHAT_B))
+        val oldA = tickets.getValue(CHAT_A)
+        subscriptions.settled(oldA, TIMEOUT)
+        tickets.remove(CHAT_A)
+        subscriptions.tryAgain(CHAT_A)
+        assertEquals(listOf(CHAT_A), planAndStart(listOf(CHAT_A, CHAT_B, CHAT_C)))
+
+        // The old request's outcome arrives again (a duplicate report): it frees nothing.
+        subscriptions.settled(oldA, ANSWERED)
+        subscriptions.settled(oldA, ERROR)
+        assertEquals("both slots still taken", emptyList<String>(), planAndStart(listOf(CHAT_A, CHAT_B, CHAT_C)))
+        assertEquals(setOf(CHAT_A, CHAT_B), subscriptions.outstanding)
     }
 
     @Test
     fun tryAgainPlansTheChatOnceMore() {
         planAndStart(listOf(CHAT_A))
-        subscriptions.settled(CHAT_A)
+        settle(CHAT_A, TIMEOUT)
         assertEquals(emptyList<String>(), planAndStart(listOf(CHAT_A)))
 
         subscriptions.tryAgain(CHAT_A)
@@ -110,115 +183,185 @@ class ChatSubscriptionsTest {
         planAndStart(listOf(CHAT_A))
         subscriptions.tryAgain(CHAT_A)
         assertEquals("one request per chat at a time", emptyList<String>(), planAndStart(listOf(CHAT_A)))
-        subscriptions.settled(CHAT_A)
+        settle(CHAT_A, TIMEOUT)
         assertEquals(listOf(CHAT_A), planAndStart(listOf(CHAT_A)))
     }
 
     @Test
     fun concurrencyIsBounded() {
         val wanted = (0 until 10).map { "CHAT-%04d".format(it) }
-        var outstanding = 0
         var peak = 0
         val done = mutableListOf<String>()
         while (done.size < wanted.size) {
-            val started = planAndStart(wanted, concurrency = 3)
-            outstanding += started.size
-            peak = maxOf(peak, outstanding)
-            assertTrue("something is out or planned", outstanding > 0)
-            // Answer the oldest one: its history lands, then its request settles.
-            val oldest = subscriptions.outstanding.first()
-            subscriptions.subscribed(oldest)
-            subscriptions.settled(oldest)
-            outstanding--
+            planAndStart(wanted, concurrency = 3)
+            peak = maxOf(peak, tickets.size)
+            assertTrue("something is out", tickets.isNotEmpty())
+            val oldest = tickets.keys.first()
+            answer(oldest)
             done += oldest
         }
         assertEquals(3, peak)
         assertEquals(wanted, done)
-        assertThrows(IllegalArgumentException::class.java) { subscriptions.plan(wanted, concurrency = 0) }
+        assertThrows(IllegalArgumentException::class.java) { subscriptions.plan(wanted, concurrency = 0, aiAvailable = true) }
     }
 
     @Test
-    fun settledAndSubscribedEachFreeTheSlotOnce() {
+    fun timeoutFreesTheSlot() {
         val wanted = listOf(CHAT_A, CHAT_B, CHAT_C, CHAT_D)
         assertEquals(listOf(CHAT_A, CHAT_B), planAndStart(wanted))
-        subscriptions.subscribed(CHAT_A)
-        subscriptions.settled(CHAT_A)
-        subscriptions.settled(CHAT_A)
-        subscriptions.subscribed(CHAT_A)
+        settle(CHAT_A, TIMEOUT)
         assertEquals(listOf(CHAT_C), planAndStart(wanted))
-        assertEquals(setOf(CHAT_B, CHAT_C), subscriptions.outstanding)
+        assertEquals(setOf(CHAT_A, CHAT_B, CHAT_C), subscriptions.outstanding)
     }
 
     @Test
-    fun suspectsGoAloneAndLast() {
-        subscriptions.suspects(setOf(CHAT_A, CHAT_C))
-        val wanted = listOf(CHAT_A, CHAT_B, CHAT_C, CHAT_D)
+    fun severalUnansweredBecomeSuspects() {
+        planAndStart(listOf(CHAT_A, CHAT_B))
+        nextLink(messageTooLarge = true)
+        assertEquals(setOf(CHAT_A, CHAT_B), oversized.suspects)
+        assertEquals(emptySet<String>(), oversized.tooLarge)
 
-        assertEquals("others first", listOf(CHAT_B, CHAT_D), planAndStart(wanted))
-        subscriptions.subscribed(CHAT_B)
-        assertEquals("not beside another subscribe", emptyList<String>(), planAndStart(wanted))
-        subscriptions.subscribed(CHAT_D)
+        // A link that ends on something else names nothing.
+        planAndStart(listOf(CHAT_C))
+        nextLink(messageTooLarge = false)
+        assertEquals(setOf(CHAT_A, CHAT_B), oversized.suspects)
+    }
 
-        assertEquals("one suspect, alone", listOf(CHAT_A), planAndStart(wanted))
+    @Test
+    fun suspectsGoFirstAndAlone() {
+        planAndStart(listOf(CHAT_A, CHAT_C))
+        nextLink(messageTooLarge = true)
+        val wanted = listOf(CHAT_B, CHAT_A, CHAT_D, CHAT_C)
+
+        assertEquals("one suspect, before anything else", listOf(CHAT_A), planAndStart(wanted))
+        assertEquals("nothing beside it", emptyList<String>(), planAndStart(wanted))
+        // A timeout does not release it: it may be the frame still arriving.
+        settle(CHAT_A, TIMEOUT)
         assertEquals(emptyList<String>(), planAndStart(wanted))
-        assertEquals(setOf(CHAT_A), subscriptions.outstanding)
         subscriptions.subscribed(CHAT_A)
+        assertEquals(setOf(CHAT_C), oversized.suspects)
 
-        assertEquals(listOf(CHAT_C), planAndStart(wanted))
-        subscriptions.subscribed(CHAT_C)
-        assertEquals(setOf(CHAT_A, CHAT_B, CHAT_C, CHAT_D), subscriptions.subscribedChats)
+        assertEquals("the next suspect, alone", listOf(CHAT_C), planAndStart(wanted))
+        assertEquals(emptyList<String>(), planAndStart(wanted))
+        answer(CHAT_C)
+
+        assertEquals(listOf(CHAT_B, CHAT_D), planAndStart(wanted))
+        assertEquals(emptySet<String>(), oversized.suspects)
     }
 
     @Test
-    fun aNewChatWaitsWhileASuspectIsOut() {
-        subscriptions.suspects(setOf(CHAT_A))
-        assertEquals(listOf(CHAT_A), planAndStart(listOf(CHAT_A)))
-        assertEquals(emptyList<String>(), planAndStart(listOf(CHAT_A, CHAT_B)))
-        subscriptions.settled(CHAT_A)
-        assertEquals(listOf(CHAT_B), planAndStart(listOf(CHAT_A, CHAT_B)))
+    fun suspectThatEndsALinkAloneIsTooLarge() {
+        planAndStart(listOf(CHAT_A, CHAT_B))
+        nextLink(messageTooLarge = true)
+        assertEquals(listOf(CHAT_A), planAndStart(listOf(CHAT_A, CHAT_B, CHAT_C)))
+        nextLink(messageTooLarge = true)
+        assertEquals(setOf(CHAT_A), oversized.tooLarge)
+        assertEquals(setOf(CHAT_B), oversized.suspects)
+
+        assertEquals(listOf(CHAT_B), planAndStart(subscriptions.wanted(emptyList(), listOf(CHAT_A, CHAT_B, CHAT_C).map(::entry))))
+    }
+
+    @Test
+    fun suspectWaitsForAChatAlreadyOut() {
+        planAndStart(listOf(CHAT_A, CHAT_B))
+        nextLink(messageTooLarge = true)
+        // The open conversation was planned before the list named the suspect.
+        assertEquals(listOf(CHAT_C), planAndStart(listOf(CHAT_C)))
+        assertEquals(emptyList<String>(), planAndStart(listOf(CHAT_C, CHAT_A, CHAT_D)))
+        answer(CHAT_C)
+        assertEquals(listOf(CHAT_A), planAndStart(listOf(CHAT_C, CHAT_A, CHAT_D)))
+    }
+
+    @Test
+    fun noSubscribesWhileAiIsOff() {
+        assertEquals(emptyList<String>(), planAndStart(listOf(CHAT_A), aiAvailable = false))
+        assertEquals(listOf(CHAT_A), planAndStart(listOf(CHAT_A), aiAvailable = true))
+    }
+
+    @Test
+    fun refusedWhileAiWasOffIsRetriedWhenItIsBack() {
+        planAndStart(listOf(CHAT_A, CHAT_B))
+        answer(CHAT_A)
+        subscriptions.aiDropped()
+        // B reached the Mac after AI went off: refused.
+        settle(CHAT_B, ERROR)
+        assertEquals(emptyList<String>(), planAndStart(listOf(CHAT_A, CHAT_B), aiAvailable = false))
+
+        assertEquals(listOf(CHAT_A, CHAT_B), planAndStart(listOf(CHAT_A, CHAT_B), aiAvailable = true))
+    }
+
+    @Test
+    fun refusedAfterAPlanWithAiOffIsRetriedWithoutADrop() {
+        // The link came up with AI off in the hello: no drop is reported, only plans with AI off.
+        planAndStart(listOf(CHAT_A))
+        assertEquals(emptyList<String>(), planAndStart(listOf(CHAT_A, CHAT_B), aiAvailable = false))
+        settle(CHAT_A, ERROR)
+        assertEquals(emptyList<String>(), planAndStart(listOf(CHAT_A, CHAT_B), aiAvailable = false))
+        assertEquals(listOf(CHAT_A, CHAT_B), planAndStart(listOf(CHAT_A, CHAT_B), aiAvailable = true))
+    }
+
+    @Test
+    fun refusalReportedBeforeTheDropIsRetriedToo() {
+        planAndStart(listOf(CHAT_A))
+        settle(CHAT_A, ERROR)
+        subscriptions.aiDropped()
+        assertEquals(listOf(CHAT_A), planAndStart(listOf(CHAT_A), aiAvailable = true))
     }
 
     @Test
     fun aiDroppedAllowsResubscribe() {
-        val wanted = listOf(CHAT_A, CHAT_B, CHAT_C)
+        val wanted = listed(CHAT_A, CHAT_B, CHAT_C)
         subscribeAll(listOf(CHAT_A, CHAT_B))
         assertEquals(listOf(CHAT_C), planAndStart(wanted))
 
         subscriptions.aiDropped()
         assertEquals(emptySet<String>(), subscriptions.subscribedChats)
-        assertEquals("nothing left to cut", emptyList<String>(), subscriptions.plan(emptyList(), 2).unsubscribe)
+        assertEquals("nothing left to cut", emptyList<String>(), subscriptions.plan(listed(), 2, false).unsubscribe)
 
         // C's request is still out (the Mac refuses it): it holds its slot and is not doubled.
         assertEquals(listOf(CHAT_A), planAndStart(wanted))
         assertEquals(setOf(CHAT_C, CHAT_A), subscriptions.outstanding)
-        subscriptions.settled(CHAT_C)
+        settle(CHAT_C, ERROR)
         assertEquals(listOf(CHAT_B), planAndStart(wanted))
-        subscriptions.subscribed(CHAT_A)
-        subscriptions.subscribed(CHAT_B)
+        answer(CHAT_A)
+        answer(CHAT_B)
         assertEquals(listOf(CHAT_C), planAndStart(wanted))
     }
 
     @Test
     fun planIsAMinimalDiff() {
-        subscribeAll(listOf(CHAT_A, CHAT_B, CHAT_C))
-        assertEquals(SubscriptionPlan(emptyList(), emptyList()), subscriptions.plan(listOf(CHAT_C, CHAT_A, CHAT_B), 2))
+        subscribeAll(listed(CHAT_A, CHAT_B, CHAT_C))
+        assertEquals(SubscriptionPlan(emptyList(), emptyList()), subscriptions.plan(listed(CHAT_C, CHAT_A, CHAT_B), 2, true))
 
-        val plan = subscriptions.plan(listOf(CHAT_A, CHAT_C, CHAT_D), 2)
+        val next = listed(CHAT_A, CHAT_C, CHAT_D)
+        val plan = subscriptions.plan(next, 2, true)
         assertEquals(SubscriptionPlan(subscribe = listOf(CHAT_D), unsubscribe = listOf(CHAT_B)), plan)
-        assertEquals("planning alone changes nothing", plan, subscriptions.plan(listOf(CHAT_A, CHAT_C, CHAT_D), 2))
+        assertEquals("planning alone changes nothing", plan, subscriptions.plan(next, 2, true))
 
-        subscriptions.unsubscribed(CHAT_B)
-        subscriptions.started(CHAT_D)
-        assertEquals(SubscriptionPlan(emptyList(), emptyList()), subscriptions.plan(listOf(CHAT_A, CHAT_C, CHAT_D), 2))
-        assertEquals("listed again: subscribed again", listOf(CHAT_B), subscriptions.plan(listOf(CHAT_A, CHAT_B), 2).subscribe)
+        subscriptions.take(plan)
+        assertEquals(SubscriptionPlan(emptyList(), emptyList()), subscriptions.plan(next, 2, true))
+        assertEquals("listed again: subscribed again", listOf(CHAT_B), subscriptions.plan(listed(CHAT_A, CHAT_B), 2, true).subscribe)
+    }
+
+    @Test
+    fun openChatNeverListedIsNotCut() {
+        planAndStart(listed(open = listOf(CHAT_A)))
+        answer(CHAT_A)
+        // The owner leaves before the list arrives: A is not wanted, but no list has named it.
+        assertEquals(emptyList<String>(), subscriptions.plan(listed(), 2, true).unsubscribe)
+        // A list without it does not count either: it never left a list.
+        assertEquals(emptyList<String>(), subscriptions.plan(listed(CHAT_B), 2, true).unsubscribe)
+
+        listed(CHAT_A, CHAT_B)
+        assertEquals("it left a list", listOf(CHAT_A), subscriptions.plan(listed(CHAT_B), 2, true).unsubscribe)
     }
 
     @Test
     fun unsubscribeWaitsForTheHistoryOfAChatStillOut() {
-        planAndStart(listOf(CHAT_A))
-        assertEquals("not subscribed yet: nothing to cut", emptyList<String>(), subscriptions.plan(emptyList(), 2).unsubscribe)
+        planAndStart(listed(CHAT_A))
+        assertEquals("not subscribed yet: nothing to cut", emptyList<String>(), subscriptions.plan(listed(), 2, true).unsubscribe)
         subscriptions.subscribed(CHAT_A)
-        assertEquals(listOf(CHAT_A), subscriptions.plan(emptyList(), 2).unsubscribe)
+        assertEquals(listOf(CHAT_A), subscriptions.plan(listed(), 2, true).unsubscribe)
     }
 
     private companion object {

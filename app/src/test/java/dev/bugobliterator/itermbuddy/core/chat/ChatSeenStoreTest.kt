@@ -84,6 +84,22 @@ class ChatSeenStoreTest {
     }
 
     @Test
+    fun tempFileLeftByAKillIsRemovedOnLoadAndClear() {
+        val temp = File(dir, "chat-seen.json.tmp")
+        store().markSeen(CHAT_A, WHOLE_MILLIS)
+        temp.writeText("{\"$CHAT_B\":1}")
+
+        val restarted = store()
+        assertEquals(WHOLE_MILLIS, restarted.seen(CHAT_A)!!, 0.0)
+        assertNull("the half-written file is not read", restarted.seen(CHAT_B))
+        assertFalse(temp.exists())
+
+        temp.writeText("{\"$CHAT_B\":1}")
+        restarted.clear()
+        assertEquals("unpair leaves no file at all", emptyList<String>(), dir.list()!!.toList())
+    }
+
+    @Test
     fun unreadableFileStartsEmptyAndIsLoggedWithoutItsBytes() {
         file.writeText("{\"$CHAT_A\":\"secret title\"")
         val store = store()

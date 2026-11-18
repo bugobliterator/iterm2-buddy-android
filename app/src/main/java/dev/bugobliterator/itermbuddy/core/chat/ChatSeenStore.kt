@@ -21,8 +21,17 @@ import kotlinx.serialization.json.doubleOrNull
  * repository's, and it only ever compares Mac values with Mac values, never with phone time
  * (`ChatListModel.swift:122-129` stamps `lastModifiedDate` with the Mac's clock).
  *
- * Holds chat IDs and numbers only, no content. Owner decision: persisted, and wiped on unpair
- * ([clear], from the unpair cleanups), so marks belong to one pairing.
+ * Holds chat IDs and numbers only, no content. Owner decision: persisted, and wiped on unpair,
+ * so marks belong to one pairing.
+ *
+ * **Writers.** Marks are written by the chat consumer only (the chat repository's single inbox
+ * consumer), so a mark can never land after the unpair wipe: `ChatRepository.clear()` clears this
+ * store itself, on the consumer, after its barrier against inputs from earlier links.
+ * [clear] is therefore **not** registered as a separate unpair cleanup, which would run on another
+ * thread and race a mark still in the inbox.
+ *
+ * **Threads.** An implementation may do file I/O on the caller's thread: never call it from the
+ * UI thread.
  */
 interface ChatSeenStore {
     /** The Mac's `lastModified` when the owner last saw [chatID], or null when never. */
@@ -66,9 +75,10 @@ class InMemoryChatSeenStore : ChatSeenStore {
 /**
  * A [ChatSeenStore] in [file]: one JSON object from chat ID to the Mac's milliseconds, written as a
  * plain decimal (never exponent notation) that reads back to the same `Double`. Loaded on first
- * use; every change rewrites the file through a temporary file in the same directory and an atomic
- * rename, so a kill leaves the old marks or the new ones. Thread-safe. File I/O happens on the
- * caller's thread, so call it off the main thread (the chat consumer does).
+ * use; every change rewrites the file through [TEMP_SUFFIX] beside it (a fixed name) and an atomic
+ * rename, so a kill leaves the old marks or the new ones; a temporary file left by a kill is
+ * deleted on load and by [clear]. Thread-safe. File I/O happens on the caller's thread, so never
+ * call it from the UI thread (the chat consumer calls it).
  *
  * A file that cannot be read or parsed counts as no marks (every chat reads as unseen, never as
  * seen): logged by exception class only. A failed write keeps the marks in memory for this
@@ -78,6 +88,8 @@ class InMemoryChatSeenStore : ChatSeenStore {
  */
 class FileChatSeenStore(private val file: File, private val log: (String) -> Unit = {}) : ChatSeenStore {
     private var loaded: HashMap<String, Double>? = null
+
+    private val temp = File(file.path + TEMP_SUFFIX)
 
     private fun marks(): HashMap<String, Double> = loaded ?: load().also { loaded = it }
 
@@ -102,6 +114,7 @@ class FileChatSeenStore(private val file: File, private val log: (String) -> Uni
     @Synchronized
     override fun clear() {
         loaded = HashMap()
+        deleteTemp()
         if (file.exists() && !file.delete()) {
             // Leave no marks behind for the next pairing, deleted or not.
             log("chat seen marks: could not delete the file")
@@ -111,6 +124,7 @@ class FileChatSeenStore(private val file: File, private val log: (String) -> Uni
 
     private fun load(): HashMap<String, Double> {
         val marks = HashMap<String, Double>()
+        deleteTemp()
         if (!file.exists()) return marks
         val root = try {
             Json.parseToJsonElement(file.readText(Charsets.UTF_8))
@@ -146,11 +160,9 @@ class FileChatSeenStore(private val file: File, private val log: (String) -> Uni
             }
             append('}')
         }
-        val dir = file.absoluteFile.parentFile
-        var temp: File? = null
+        var written = false
         try {
-            dir?.mkdirs()
-            temp = File.createTempFile(file.name, ".tmp", dir)
+            file.absoluteFile.parentFile?.mkdirs()
             FileOutputStream(temp).use { out ->
                 out.write(text.toByteArray(Charsets.UTF_8))
                 out.fd.sync()
@@ -160,17 +172,24 @@ class FileChatSeenStore(private val file: File, private val log: (String) -> Uni
             } catch (_: AtomicMoveNotSupportedException) {
                 Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
             }
-            temp = null
+            written = true
         } catch (e: IOException) {
             log("chat seen marks not saved: ${e.javaClass.simpleName}")
         } finally {
-            temp?.delete()
+            if (!written) deleteTemp()
         }
+    }
+
+    private fun deleteTemp() {
+        if (temp.exists() && !temp.delete()) log("chat seen marks: could not delete the temporary file")
     }
 
     companion object {
         /** The file name in the app's `noBackupFilesDir`: marks never go to a cloud backup. */
         const val FILE_NAME = "chat-seen.json"
+
+        /** Appended to the store's file name for the file each write goes through. */
+        const val TEMP_SUFFIX = ".tmp"
 
         /** The store the app uses, in [Context.getNoBackupFilesDir]. */
         fun inNoBackupDir(context: Context, log: (String) -> Unit = {}): FileChatSeenStore =
