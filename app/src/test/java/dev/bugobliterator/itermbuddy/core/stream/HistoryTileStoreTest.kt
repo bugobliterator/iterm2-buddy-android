@@ -61,14 +61,15 @@ class HistoryTileStoreTest {
         )
         val store get() = controller.historyTiles
 
-        /** Live on link 1, stream 1, with [config]. */
-        suspend fun live(config: StreamConfig) {
+        /** Live on link 1, stream 1, with [config]; [beforeConfig] arrive between `streamStarted` and it. */
+        suspend fun live(config: StreamConfig, beforeConfig: List<MacMessage> = emptyList()) {
             controller.accept(StreamInput.LinkUp(1, FakeMac.MAC_REVISION))
             controller.open(SESSION)
             val pending = link.requests.receive()
             val started = MacMessage.StreamStarted(1, StreamCodec.HEVC)
             controller.accept(StreamInput.Control(1, pending.requestID, started))
             pending.reply.complete(started)
+            beforeConfig.forEach { controller.accept(StreamInput.Control(1, null, it)) }
             controller.accept(StreamInput.Control(1, null, MacMessage.StreamConfigMessage(config)))
             controller.state.first { it is LiveViewState.Live }
             test.runCurrent()
@@ -226,8 +227,41 @@ class HistoryTileStoreTest {
         rig.store.onLiveTop(2000)
         assertEquals(0, rig.take().size)
         rig.store.retry(1000)
-        assertEquals(1000L, rig.take().single().fetch.firstAbsLine)
+        val retried = rig.take().single()
+        assertEquals(1000L, retried.fetch.firstAbsLine)
         assertEquals(TileState.Loading, rig.tiles[1000])
+
+        // A scroll or zoom (the wanted range changes) tries failed slots again.
+        retried.reply.complete(MacMessage.Error(JsonObject(emptyMap())))
+        runCurrent()
+        assertEquals(TileState.Failed, rig.tiles[1000])
+        rig.store.want(990, 1049)
+        val scrolled = rig.take().single()
+        assertEquals(1000L, scrolled.fetch.firstAbsLine)
+
+        // So does a selection change, wherever it is.
+        scrolled.reply.complete(MacMessage.Error(JsonObject(emptyMap())))
+        runCurrent()
+        assertEquals(TileState.Failed, rig.tiles[1000])
+        rig.store.onSelectionRange(Tiles.span(1990, 1995))
+        assertEquals(1000L, rig.take().single().fetch.firstAbsLine)
+    }
+
+    @Test
+    fun failedSlotIsRetriedOnlyWhenItsCountChanges() = runTest {
+        val rig = Rig(this)
+        rig.config(first = 1000, total = 160) // live top 1120
+        rig.store.want(1050, 1119)
+        val sent = rig.take()
+        assertEquals(listOf(1050L to 50, 1100L to 20), sent.map { it.fetch.firstAbsLine to it.fetch.lineCount })
+        sent.forEach { it.reply.complete(MacMessage.Error(JsonObject(emptyMap()))) }
+        runCurrent()
+        assertEquals(setOf<TileState>(TileState.Failed), rig.tiles.values.toSet())
+        rig.store.onLiveTop(1121)
+        val grown = rig.take().single()
+        assertEquals(1100L to 21, grown.fetch.firstAbsLine to grown.fetch.lineCount)
+        assertEquals(TileState.Failed, rig.tiles[1050])
+        assertEquals(TileState.Loading, rig.tiles[1100])
     }
 
     @Test
@@ -303,7 +337,8 @@ class HistoryTileStoreTest {
             }
             open = rig.take()
         }
-        assertEquals(8, rig.tiles.ready().size)
+        // Every slot is inside the wanted range: the ones farthest from its centre (499.5) went.
+        assertEquals((300L until 700L step 50).toList(), rig.tiles.ready())
         // The view moves down: the slots farthest from the new range go first.
         rig.store.want(1000, 1399)
         val moved = ArrayList<Long>()
@@ -389,6 +424,41 @@ class HistoryTileStoreTest {
         val head = rig.tileRequests().single().fetch
         assertEquals(1L, head.firstAbsLine)
         assertEquals(49, head.lineCount)
+    }
+
+    @Test
+    fun configResendBeforeItsExtentIsNotAClear() = runTest {
+        val rig = ControllerRig(this)
+        rig.live(Tiles.config(firstAbsLine = 0, totalLines = 1000, rows = 40))
+        rig.mediaWithLiveTop(0, 970)
+        rig.store.want(0, 199)
+        rig.tileRequests().forEach { rig.answer(it) }
+        assertEquals(listOf(0L, 50L, 100L, 150L), rig.store.tiles.value.ready())
+        // The Mac's control lane overtakes its coalescing lane: the resent config already carries
+        // the trimmed origin, then the extent for the same trim arrives with the same values.
+        rig.controller.accept(StreamInput.Control(1, null, MacMessage.StreamConfigMessage(Tiles.config(firstAbsLine = 1, totalLines = 1000, rows = 40))))
+        runCurrent()
+        assertEquals(listOf(0L, 50L, 100L, 150L), rig.store.tiles.value.ready())
+        rig.extent(1, 1000)
+        assertEquals("a trim, not a clear", listOf(50L, 100L, 150L), rig.store.tiles.value.ready())
+        assertEquals("not snapped to 961", 970L, rig.controller.activeStream.value?.liveTop)
+        val head = rig.tileRequests().single().fetch
+        assertEquals(1L to 49, head.firstAbsLine to head.lineCount)
+    }
+
+    @Test
+    fun selectionBetweenStartAndFirstConfigIsKept() = runTest {
+        val rig = ControllerRig(this)
+        val span = Tiles.span(1010, 1120)
+        rig.live(Tiles.config(firstAbsLine = 1000, totalLines = 1040, rows = 40), beforeConfig = listOf(MacMessage.SelectionRange(1, span)))
+        assertEquals(span, rig.controller.selection.value)
+        rig.store.want(1000, 1199)
+        rig.tileRequests().forEach { rig.answer(it) }
+        assertEquals(listOf(1000L, 1050L, 1100L, 1150L), rig.store.tiles.value.ready())
+        // Clearing it refetches the slots it covered: the first config kept it, with its slots.
+        rig.controller.accept(StreamInput.Control(1, null, MacMessage.SelectionRange(1, null)))
+        assertEquals(listOf(1000L, 1050L, 1100L), rig.tileRequests().map { it.fetch.firstAbsLine })
+        assertNull(rig.controller.selection.value)
     }
 
     private companion object {

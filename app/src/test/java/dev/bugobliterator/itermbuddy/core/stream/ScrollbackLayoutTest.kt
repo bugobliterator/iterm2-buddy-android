@@ -6,7 +6,7 @@ import org.junit.Test
 class ScrollbackLayoutTest {
     @Test
     fun altScreenHasNoHistory() {
-        val layout = ScrollbackLayout(firstAbsLine = 1000, liveTop = 3000, rows = 40, lineHeightPx = 10f, altScreen = true)
+        val layout = ScrollbackLayout(firstAbsLine = 1000, liveTop = 3000, totalLines = 2040, rows = 40, lineHeightPx = 10f, altScreen = true)
         assertEquals(0L, layout.historyLines)
         assertEquals(400f, layout.documentHeightPx)
         assertEquals(0f, layout.liveBandTopPx)
@@ -15,7 +15,7 @@ class ScrollbackLayoutTest {
 
     @Test
     fun liveBandSitsBelowHistory() {
-        val layout = ScrollbackLayout(firstAbsLine = 1000, liveTop = 3000, rows = 40, lineHeightPx = 10f, altScreen = false)
+        val layout = ScrollbackLayout(firstAbsLine = 1000, liveTop = 3000, totalLines = 2040, rows = 40, lineHeightPx = 10f, altScreen = false)
         assertEquals(2000L, layout.historyLines)
         assertEquals(20_000f, layout.liveBandTopPx)
         assertEquals(20_400f, layout.documentHeightPx)
@@ -26,12 +26,21 @@ class ScrollbackLayoutTest {
 
     @Test
     fun absLineAtTopIsFirstAbsLine() {
-        val layout = ScrollbackLayout(firstAbsLine = 1000, liveTop = 3000, rows = 40, lineHeightPx = 12.5f, altScreen = false)
+        val layout = ScrollbackLayout(firstAbsLine = 1000, liveTop = 3000, totalLines = 2040, rows = 40, lineHeightPx = 12.5f, altScreen = false)
         assertEquals(1000L, layout.absLineAt(0f))
         assertEquals(1000L, layout.absLineAt(-50f))
         assertEquals(1001L, layout.absLineAt(12.5f))
         assertEquals(0f, layout.tileTopPx(1000))
         // A live top behind the origin (a stale frame) leaves no history, never a negative one.
-        assertEquals(0L, ScrollbackLayout(1000, 900, 40, 10f, false).historyLines)
+        assertEquals(0L, ScrollbackLayout(1000, 900, 0, 40, 10f, false).historyLines)
+    }
+
+    @Test
+    fun extentIsTheFloorOfHistory() {
+        // A stale live top below the extent: the history is sized from the extent, as the store's.
+        val layout = ScrollbackLayout(firstAbsLine = 1000, liveTop = 1500, totalLines = 1040, rows = 40, lineHeightPx = 10f, altScreen = false)
+        assertEquals(1000L, layout.historyLines)
+        assertEquals(1000L, layout.absLineAt(0f))
+        assertEquals(2000L, layout.absLineAt(layout.liveBandTopPx))
     }
 }

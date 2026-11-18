@@ -40,7 +40,11 @@ sealed interface TileState {
         override fun toString(): String = "Ready($tile)"
     }
 
-    /** The fetch failed; the slot waits for [HistoryTileStore.retry]. */
+    /**
+     * The fetch failed. The slot is asked for again on [HistoryTileStore.retry], when the wanted
+     * range or the selection changes, or when its expected count changes (iOS retries failed tiles
+     * on every explicit re-drive, `SessionView.swift:2113, 2179-2185, 2618`).
+     */
     data object Failed : TileState
 }
 
@@ -57,7 +61,9 @@ sealed interface TileState {
  * 0 on the alternate screen (`SessionView.swift:2046-2089`).
  *
  * **Requests.** A wanted slot is requested when it is not cached at its expected count, nothing
- * is queued or in flight for it, and it has not failed. Each request takes a new per-slot token.
+ * is queued or in flight for it, and it has not failed at its current expected count (a failed
+ * slot is retried when that count changes, when the wanted range or the selection changes, or on
+ * [retry]). Each request takes a new per-slot token.
  * At most [maxInFlight] run at once, each in its own coroutine, with up to [maxQueued] waiting
  * behind them; a slot that finds the queue full is not queued (iOS rejects the incoming request,
  * `AppModel.swift:4878-4891`) and is asked for again when a request completes.
@@ -140,7 +146,8 @@ class HistoryTileStore(
     // ---- Slots ----
     private val requested = HashMap<Long, Request>()
     private val cached = HashMap<Long, Cached>()
-    private val failed = HashSet<Long>()
+    /** Failed slots, with the expected count they failed at. */
+    private val failed = HashMap<Long, Int>()
     private val evicted = HashSet<Long>()
     private val tokens = HashMap<Long, Long>()
     private var nextToken = 0L
@@ -163,7 +170,11 @@ class HistoryTileStore(
      * A `streamConfig` for stream [streamID] on link [linkId] (`AppModel.swift:4381-4401`). A new
      * generation clears the cache, starts a new throttle epoch and snaps the live top; after the
      * stream's first config it drops the selection too (the first keeps one couriered before it).
-     * A resend of the same generation is applied as an extent, if it changed one.
+     * A resend of the same generation updates only rows and the alternate screen: the origin and
+     * line count come from `streamExtent` alone, as on iOS. (The Mac sends control messages ahead
+     * of its coalescing lane, `CompanionPriorityOutbox.swift:85-92`, so a resent config carrying
+     * the current origin, `CompanionSessionStreamer.swift:448, 589`, can overtake the extent for
+     * the same trim; applying it would make that extent look like a clear.)
      */
     fun onConfig(linkId: Long, streamID: Long, config: StreamConfig) = update {
         if (generation != null && (this.linkId != linkId || this.streamID != streamID)) {
@@ -184,8 +195,6 @@ class HistoryTileStore(
             liveTop = snappedLiveTop()
             if (!initial) selectionFlow.value = null
             rebaseSelection()
-        } else if (config.firstAbsLine != origin || config.totalLines != totalLines) {
-            applyExtent(config.firstAbsLine, config.totalLines, unchangedOriginClears = false)
         }
     }
 
@@ -199,7 +208,7 @@ class HistoryTileStore(
      * @return the snapped live top on a clear, for the controller to apply too; null otherwise.
      */
     fun onExtent(firstAbsLine: Long, totalLines: Int): Long? = update {
-        if (generation == null) null else applyExtent(firstAbsLine, totalLines, unchangedOriginClears = true)
+        if (generation == null) null else applyExtent(firstAbsLine, totalLines)
     }
 
     /** The live top from the newest media frame (or the controller's snap). */
@@ -224,13 +233,16 @@ class HistoryTileStore(
         selectedSlots = newSlots
         lastEndpoints = range
         affected.forEach { invalidate(it) }
+        // An explicit re-drive: failed slots are tried again (SessionView.swift:2618).
+        failed.clear()
         if (affected.isNotEmpty()) log("history tiles: selection invalidated ${affected.size} slots")
     }
 
     /**
      * The lines the view wants: the visible range plus one viewport each way
      * (`SessionView.swift:2480-2482`). Queued requests for slots no longer wanted are dropped, and
-     * a failed slot that leaves the range is retried when it comes back (`SessionView.swift:2569-2573`).
+     * every failed slot is tried again when the range changes (a scroll or zoom re-drive,
+     * `SessionView.swift:2179-2185`).
      */
     fun want(firstAbsLine: Long, lastAbsLine: Long) = update {
         val range = minOf(firstAbsLine, lastAbsLine)..maxOf(firstAbsLine, lastAbsLine)
@@ -241,7 +253,7 @@ class HistoryTileStore(
         queue.removeAll { request ->
             (request.slot !in keep).also { if (it) requested.remove(request.slot) }
         }
-        failed.retainAll(keep)
+        failed.clear()
     }
 
     /** Asks for a failed slot again. */
@@ -278,8 +290,8 @@ class HistoryTileStore(
         if (!keepSelection) selectionFlow.value = null
     }
 
-    private fun applyExtent(first: Long, total: Int, unchangedOriginClears: Boolean): Long? {
-        val clears = total < totalLines || (unchangedOriginClears && first == origin)
+    private fun applyExtent(first: Long, total: Int): Long? {
+        val clears = total < totalLines || first == origin
         if (clears) {
             flush()
             base = first
@@ -293,8 +305,16 @@ class HistoryTileStore(
         }
         origin = first
         totalLines = total
-        val below = (cached.keys + requested.keys + failed + evicted).filter { it < first }.toSet()
-        below.forEach { invalidate(it) }
+        val below = (cached.keys + requested.keys + failed.keys + evicted + tokens.keys).filter { it < first }.toSet()
+        for (slot in below) {
+            if (slot + HISTORY_SLOT_LINES <= first) {
+                // Wholly below the origin: gone for good, token and all (a late reply finds no token).
+                drop(slot)
+                tokens.remove(slot)
+            } else {
+                invalidate(slot)
+            }
+        }
         rebaseSelection()
         return null
     }
@@ -310,15 +330,20 @@ class HistoryTileStore(
         cached.clear()
         failed.clear()
         evicted.clear()
+        tokens.clear()
     }
 
     /** Drops [slot]'s tile and supersedes any request for it. */
     private fun invalidate(slot: Long) {
+        drop(slot)
+        tokens[slot] = ++nextToken
+    }
+
+    private fun drop(slot: Long) {
         cached.remove(slot)
         failed.remove(slot)
         evicted.remove(slot)
         requested.remove(slot)?.let { queue.remove(it) }
-        tokens[slot] = ++nextToken
     }
 
     /** The selection's slots under the current geometry, with nothing to invalidate (the cache is empty). */
@@ -331,16 +356,19 @@ class HistoryTileStore(
     private fun snappedLiveTop(): Long = origin + maxOf(0, totalLines - rows)
 
     private fun historyLines(): Long {
-        if (generation == null || altScreen) return 0
-        val top = liveTop ?: snappedLiveTop()
-        return maxOf(0L, top - origin, (totalLines - rows).toLong())
+        if (generation == null) return 0
+        return historyLineCount(origin, liveTop ?: snappedLiveTop(), totalLines, rows, altScreen)
     }
 
     private fun historyEnd(): Long = origin + historyLines()
 
     private fun slotOf(line: Long): Long = base + Math.floorDiv(line - base, HISTORY_SLOT_LINES.toLong()) * HISTORY_SLOT_LINES
 
-    private fun historySlotOf(line: Long): Long? = if (line >= origin && line < historyEnd()) slotOf(line) else null
+    /**
+     * The slot of a selection line at or above the origin, uncapped by the history end: a line
+     * past it now (live rows, the alternate screen) may be history by the time its tile is drawn.
+     */
+    private fun historySlotOf(line: Long): Long? = if (line >= origin) slotOf(line) else null
 
     private fun slotsBetween(lo: Long, hi: Long): List<Long> {
         if (lo > hi) return emptyList()
@@ -350,7 +378,7 @@ class HistoryTileStore(
     private fun slotsOf(range: SelectionSpan?): Set<Long> {
         if (range == null || generation == null) return emptySet()
         val lo = maxOf(origin, minOf(range.start.absLine, range.end.absLine))
-        val hi = minOf(historyEnd() - 1, maxOf(range.start.absLine, range.end.absLine))
+        val hi = maxOf(range.start.absLine, range.end.absLine)
         return slotsBetween(lo, hi).toSet()
     }
 
@@ -375,7 +403,10 @@ class HistoryTileStore(
         }
         for (slot in wantedSlots()) {
             val count = expected(slot)
-            if (count <= 0 || slot in requested || slot in failed || slot in evicted) continue
+            if (count <= 0 || slot in requested || slot in evicted) continue
+            // A failed slot waits, unless its expected count changed (it grew) since it failed.
+            if (failed[slot] == count) continue
+            failed.remove(slot)
             val have = cached[slot]
             if (have != null && have.count == count && have.start == startOf(slot)) continue
             val full = inFlight.size >= maxInFlight
@@ -435,7 +466,7 @@ class HistoryTileStore(
             log("history tile ${request.start}+${request.count} failed: $problem")
             cached.remove(request.slot)
             // Grown while in flight: ask again at the new count rather than fail (SessionView.swift:2552-2556).
-            if (expected(request.slot) == request.count) failed += request.slot
+            if (expected(request.slot) == request.count) failed[request.slot] = request.count
             return
         }
         failed.remove(request.slot)
@@ -460,7 +491,7 @@ class HistoryTileStore(
         for (slot in wantedSlots()) {
             if (expected(slot) <= 0) continue
             shown[slot] = when {
-                slot in failed -> TileState.Failed
+                failed[slot] == expected(slot) -> TileState.Failed
                 else -> cached[slot]?.let { TileState.Ready(it.tile) } ?: TileState.Loading
             }
         }
