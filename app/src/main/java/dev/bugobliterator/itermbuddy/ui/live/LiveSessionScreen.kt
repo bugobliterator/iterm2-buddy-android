@@ -147,12 +147,14 @@ interface LiveSessionActions {
  * on the active stream's link for this session, and never undone.
  *
  * **Typing.** Input is offered only while [inputTarget] gives a target: the state is `Live` for
- * this session, the session is a terminal, and the active stream is this session's (browser
- * sessions get no keyboard yet). Then a tap on the picture or ⌨ raises the keyboard into a
+ * this session, the session is a terminal, and the active stream is this session's (a browser
+ * here is video only). Then a tap on the picture or ⌨ raises the keyboard into a
  * [TerminalInputView], with the [KeyBar] above it; the key bar's compose key opens the
  * [Composer]. Leaving that state lowers the keyboard. Every key and paste carries the target it
  * was made for, and the input sender discards it if the stream has moved on by the time it is
- * sent; held composing text is dropped when the target changes. A keyboard that was up when input
+ * sent; held composing text is dropped when the target changes (a browser session at revision 15
+ * has its own [BrowserSessionScreen][dev.bugobliterator.itermbuddy.ui.browser.BrowserSessionScreen]
+ * with a keyboard; here, below 15, it is video only). A keyboard that was up when input
  * went away (a reconnect) comes back with it. Multi-line or long commits (dictation) open the
  * composer seeded with them. Sticky modifiers, the tray and the draft are per session; the draft
  * is cleared only once its paste was handed to the sender.
@@ -197,7 +199,7 @@ interface LiveSessionActions {
  *
  * @param config the image geometry: the shown state's config, else the active stream's when it
  *   is this session's (a too-large window keeps its config for Fit).
- * @param macRevision the Mac's hello revision, for the browser note; null when not connected.
+ * @param macRevision the Mac's hello revision, for the browser note ([browserNote]); null when not connected.
  * @param macAlert the Mac alert banner's text (`macAlertBanner`), shown as a row under the top
  *   bar, inside its measured height, so the picture and Fit sit below it; null for none.
  */
@@ -342,24 +344,8 @@ private fun LiveSessionContent(
         }
     }
 
-    val ime = WindowInsets.ime
-    val imeSource = WindowInsets.imeAnimationSource
-    val imeTarget = WindowInsets.imeAnimationTarget
     var keyBarHeight by remember { mutableIntStateOf(0) }
-    val currentNavigationBottom by rememberUpdatedState(navigationBottom)
-    // What covers the canvas's bottom now, in px: the navigation bar or the keyboard (whose inset
-    // includes it), whichever is taller, plus the key bar. The key bar shows as soon as the IME
-    // starts to open, so its height comes in with the IME's progress rather than in one jump.
-    // Read only by the canvas's layer, its gestures and the overlays' layout, so the IME
-    // animation never recomposes this screen.
-    val bottomCover: () -> Float = remember(ime, imeSource, imeTarget, density) {
-        {
-            val now = ime.getBottom(density)
-            val full = maxOf(imeSource.getBottom(density), imeTarget.getBottom(density), now)
-            val progress = if (full > 0) now.toFloat() / full else 0f
-            maxOf(currentNavigationBottom, now) + keyBarHeight * progress
-        }
-    }
+    val bottomCover = rememberBottomCover(navigationBottom) { keyBarHeight }
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -583,6 +569,32 @@ private fun LiveSessionContent(
 }
 
 /**
+ * What covers the canvas's bottom now, in px: the navigation bar ([navigationBottom]) or the
+ * keyboard (whose inset includes it), whichever is taller, plus the key bar ([keyBarHeight]). The
+ * key bar shows as soon as the IME starts to open, so its height comes in with the IME's progress
+ * rather than in one jump. Read it only in the canvas's layer, its gestures and the overlays'
+ * layout, so the IME animation never recomposes the screen.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun rememberBottomCover(navigationBottom: Int, keyBarHeight: () -> Int): () -> Float {
+    val density = LocalDensity.current
+    val ime = WindowInsets.ime
+    val imeSource = WindowInsets.imeAnimationSource
+    val imeTarget = WindowInsets.imeAnimationTarget
+    val currentNavigationBottom by rememberUpdatedState(navigationBottom)
+    val currentKeyBarHeight by rememberUpdatedState(keyBarHeight)
+    return remember(ime, imeSource, imeTarget, density) {
+        {
+            val now = ime.getBottom(density)
+            val full = maxOf(imeSource.getBottom(density), imeTarget.getBottom(density), now)
+            val progress = if (full > 0) now.toFloat() / full else 0f
+            maxOf(currentNavigationBottom, now) + currentKeyBarHeight() * progress
+        }
+    }
+}
+
+/**
  * The compact bar drawn over the top of the picture (iOS keeps its bars over a full-screen canvas):
  * a translucent scrim behind the status bar and a 48 dp row with ←, the title on one line
  * (ellipsized) and [actions] (⌨, ⋮), then, when [banner] is set, the Mac alert row across the
@@ -605,7 +617,7 @@ private fun LiveTopBar(
 
 /** The Mac alert row under the bar, in the live theme's colours, its text inside the side insets. */
 @Composable
-private fun LiveAlertBanner(text: String) {
+internal fun LiveAlertBanner(text: String) {
     val colors = MaterialTheme.colorScheme
     Text(
         text = text,
@@ -651,7 +663,7 @@ private fun LiveTopBarRow(title: String, onBack: () -> Unit, actions: @Composabl
  * Pads the content by [left] and [right] (px) and by [top] and [bottom] (px, read at layout, so a
  * change such as the IME animating relayouts without recomposing).
  */
-private fun Modifier.insetBy(left: Int, top: () -> Int, right: Int, bottom: () -> Int): Modifier = layout { measurable, constraints ->
+internal fun Modifier.insetBy(left: Int, top: () -> Int, right: Int, bottom: () -> Int): Modifier = layout { measurable, constraints ->
     val horizontal = (maxOf(0, left) + maxOf(0, right)).coerceAtMost(constraints.maxWidth)
     val topPx = maxOf(0, top())
     val vertical = (topPx + maxOf(0, bottom())).coerceAtMost(constraints.maxHeight)
@@ -699,7 +711,7 @@ private fun LiveChip(onClick: () -> Unit, modifier: Modifier) {
 private const val DISABLED_ALPHA = 0.38f
 
 /** The top bar's opacity over the picture. */
-private const val TOP_BAR_ALPHA = 0.8f
+internal const val TOP_BAR_ALPHA = 0.8f
 
 /**
  * Where the live view's input goes: the active stream's link and watch for [session], only while
@@ -742,7 +754,7 @@ internal class TerminalKeyboard {
  * [translator] null drops IME calls (no input offered).
  */
 @Composable
-private fun TerminalInput(keyboard: TerminalKeyboard, translator: ImeTranslator?, modifier: Modifier) {
+internal fun TerminalInput(keyboard: TerminalKeyboard, translator: ImeTranslator?, modifier: Modifier) {
     AndroidView(
         factory = { context -> TerminalInputView(context).also { keyboard.view = it } },
         modifier = modifier.size(1.dp),
@@ -761,15 +773,16 @@ private fun TerminalInput(keyboard: TerminalKeyboard, translator: ImeTranslator?
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun KeyBarSlot(
+internal fun KeyBarSlot(
     shown: Boolean,
     modifiers: StickyModifiers,
     modifierVersion: Int,
     expanded: Boolean,
     actions: KeyBarActions,
+    browser: Boolean = false,
 ) {
     if (!shown || !WindowInsets.isImeVisible) return
-    KeyBar(modifiers, modifierVersion, expanded, actions)
+    KeyBar(modifiers, modifierVersion, expanded, actions, browser = browser)
 }
 
 /** The config whose image is shown: the Live state's, else the active stream's for this session. */
@@ -779,7 +792,7 @@ internal fun shownConfig(session: SessionSummary, live: LiveViewState, activeStr
 }
 
 @Composable
-private fun OverlayCard(overlay: Overlay, busy: Boolean, onAction: (OverlayAction) -> Unit, modifier: Modifier) {
+internal fun OverlayCard(overlay: Overlay, busy: Boolean, onAction: (OverlayAction) -> Unit, modifier: Modifier) {
     Surface(
         modifier = modifier.padding(24.dp).widthIn(max = 480.dp),
         shape = MaterialTheme.shapes.large,
@@ -815,7 +828,7 @@ internal fun actionLabel(action: OverlayAction): String = when (action) {
 
 /** Debug builds: the decoder's counters, collected only while shown. */
 @Composable
-private fun VideoStatsOverlay(source: LiveVideoSource, modifier: Modifier) {
+internal fun VideoStatsOverlay(source: LiveVideoSource, modifier: Modifier) {
     val stats by source.output.stats.collectAsStateWithLifecycle()
     Surface(modifier = modifier, color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), shape = MaterialTheme.shapes.small) {
         Text(

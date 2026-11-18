@@ -102,12 +102,14 @@ class LiveOverlayTest {
     @Test
     fun browserBeforeRevisionFifteenGetsTheNote() {
         val browser = session.copy(isBrowser = true)
-        assertEquals("Browser control comes later", browserNote(browser, macRevision = 13, phoneRevision = 15))
-        assertEquals("Browser control comes later", browserNote(browser, macRevision = null, phoneRevision = 15))
-        // Both sides need 15: this phone speaks 13 until the Browser Messages task.
-        assertEquals("Browser control comes later", browserNote(browser, macRevision = 15, phoneRevision = 13))
-        assertNull(browserNote(browser, macRevision = 15, phoneRevision = 15))
-        assertNull(browserNote(session, macRevision = 13, phoneRevision = 13))
+        assertEquals(BROWSER_NOTE, browserNote(browser, macRevision = 14))
+        assertEquals(BROWSER_NOTE, browserNote(browser, macRevision = 13))
+        // Unknown (not connected): nothing is claimed.
+        assertNull(browserNote(browser, macRevision = null))
+        // At 15 browser rows open the browser view; a browser shown here then gets no note.
+        assertNull(browserNote(browser, macRevision = 15))
+        assertNull(browserNote(session, macRevision = 13))
+        assertFalse(BROWSER_NOTE.contains("later"))
     }
 
     @Test

@@ -4,7 +4,6 @@ import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.core.stream.BROWSER_INPUT_REVISION
 import dev.bugobliterator.itermbuddy.core.stream.LiveProblem
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
-import dev.bugobliterator.itermbuddy.core.wire.ProtocolRevision
 import dev.bugobliterator.itermbuddy.core.wire.StreamEndReason
 import dev.bugobliterator.itermbuddy.video.VideoStats
 import kotlinx.coroutines.flow.StateFlow
@@ -12,8 +11,8 @@ import kotlinx.coroutines.flow.StateFlow
 /** Shown after the too-large text when Fit to phone is not offered. */
 const val MAC_SIDE_ADVICE = "Make the iTerm2 window smaller on the Mac (leave full screen) to watch it here."
 
-/** Shown over a browser session's video until browser control exists on both sides. */
-const val BROWSER_NOTE = "Browser control comes later"
+/** Shown over a browser session's video when the Mac's iTerm2 takes no browser input (revision below 15). */
+const val BROWSER_NOTE = "View only: browser control needs a newer iTerm2 on the Mac"
 
 /** What an overlay's one button does. */
 enum class OverlayAction {
@@ -105,12 +104,12 @@ fun videoVisible(state: StateFlow<LiveViewState>, stats: StateFlow<VideoStats>, 
 }
 
 /**
- * The note over a browser session's video while browser input is not available: until both
- * this phone ([phoneRevision]) and the Mac ([macRevision], null when unknown) speak revision 15.
- * Null for a terminal session.
+ * The note over a browser session's video in the live view: the Mac is known to be older than
+ * revision [BROWSER_INPUT_REVISION] ([macRevision]; null when not connected, when nothing is
+ * claimed), so the page can be watched but not driven. At 15 browser rows open the browser view
+ * instead (`SessionNavigator`). Null for a terminal session.
  */
-fun browserNote(session: SessionSummary, macRevision: Int?, phoneRevision: Int = ProtocolRevision.REVISION): String? {
-    if (!session.isBrowser) return null
-    val both = phoneRevision >= BROWSER_INPUT_REVISION && macRevision != null && macRevision >= BROWSER_INPUT_REVISION
-    return if (both) null else BROWSER_NOTE
+fun browserNote(session: SessionSummary, macRevision: Int?): String? {
+    if (!session.isBrowser || macRevision == null) return null
+    return if (macRevision >= BROWSER_INPUT_REVISION) null else BROWSER_NOTE
 }

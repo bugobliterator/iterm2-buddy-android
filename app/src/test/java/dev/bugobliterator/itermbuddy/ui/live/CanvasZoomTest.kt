@@ -212,4 +212,106 @@ class CanvasZoomTest {
         assertFalse("a selection ends either way", isCancelledLift(consumed = true, wasSelecting = true))
         assertFalse(isCancelledLift(consumed = false, wasSelecting = true))
     }
+
+    /*
+     * Browser drags (iOS `handleBrowserPan`/`accrueBrowserScroll`, `IOS/Screens/SessionView.swift:2256-2328`).
+     * A 1000×700 view with a 100 px bar: the page at (0, 100, 1000, 500); at scale 2 it pans
+     * x in [-1000, 0] and y in [-500, -100].
+     */
+    private val pageFit = visibleFitRect(1000, 500, 1000f, 700f, topInset = 100f, bottomInset = 0f)
+    private val page = GestureGeometry(pageFit, 1000f, 700f, 4f, 100f, 0f, 0f, 0f, 0f)
+
+    private fun drag(kept: KeptZoom, panX: Float, panY: Float, pointers: Int = 1, sawPinch: Boolean = false) =
+        browserGestureStep(kept, page, 0f, 500f, 400f, panX, panY, 1f, pointers, sawPinch)
+
+    @Test
+    fun browserDragAtFitScrollsThePageBothWays() {
+        val step = drag(KeptZoom(ZoomState.FIT, 0f), 10f, -20f)
+        assertEquals(10f, step.scrollX, eps)
+        assertEquals(-20f, step.scrollY, eps)
+        assertEquals(ZoomState.FIT, step.kept.state)
+        assertFalse(step.sawPinch)
+    }
+
+    @Test
+    fun zoomedHorizontalDragOnlyPans() {
+        val step = drag(KeptZoom(ZoomState(2f, -500f, -300f), 0f), 50f, 0f)
+        assertEquals(-450f, step.kept.state.offsetX, eps)
+        assertEquals(0f, step.scrollX, eps)
+        assertEquals(0f, step.scrollY, eps)
+        // Past the left edge it still never scrolls the page sideways.
+        val atEdge = drag(KeptZoom(ZoomState(2f, 0f, -300f), 0f), 80f, 0f)
+        assertEquals(0f, atEdge.kept.state.offsetX, eps)
+        assertEquals(0f, atEdge.scrollX, eps)
+    }
+
+    @Test
+    fun zoomedVerticalDragScrollsThePageOnlyPastTheEdge() {
+        val middle = drag(KeptZoom(ZoomState(2f, -500f, -300f), 0f), 0f, 100f)
+        assertEquals(-200f, middle.kept.state.offsetY, eps)
+        assertEquals(0f, middle.scrollY, eps)
+        // 30 px pans to the top edge; the other 20 scroll the page up (finger down).
+        val partly = drag(KeptZoom(ZoomState(2f, -500f, -130f), 0f), 0f, 50f)
+        assertEquals(-100f, partly.kept.state.offsetY, eps)
+        assertEquals(20f, partly.scrollY, eps)
+        val atBottom = drag(KeptZoom(ZoomState(2f, -500f, -500f), 0f), 0f, -40f)
+        assertEquals(-40f, atBottom.scrollY, eps)
+        assertEquals(0f, atBottom.scrollX, eps)
+    }
+
+    @Test
+    fun aPinchZoomsAndNeverScrollsUntilTheGestureEnds() {
+        val pinch = browserGestureStep(KeptZoom(ZoomState.FIT, 0f), page, 0f, 500f, 400f, 5f, 5f, 1.5f, 2, false)
+        assertTrue(pinch.sawPinch)
+        assertTrue("the first pinch event cancels the scroll", pinch.pinchStarted)
+        assertEquals(1.5f, pinch.kept.state.scale, eps)
+        assertEquals(0f, pinch.scrollX, eps)
+        assertEquals(0f, pinch.scrollY, eps)
+        // One finger left after the pinch: still no scroll, and no second cancel.
+        val after = drag(pinch.kept, 0f, 30f, pointers = 1, sawPinch = true)
+        assertTrue(after.sawPinch)
+        assertFalse(after.pinchStarted)
+        assertEquals(0f, after.scrollY, eps)
+    }
+
+    @Test
+    fun flingOnlyAtFitAndNotAfterAPinch() {
+        assertTrue(browserFlings(1f, sawPinch = false))
+        assertTrue(browserFlings(1.001f, sawPinch = false))
+        assertFalse(browserFlings(1.01f, sawPinch = false))
+        assertFalse(browserFlings(1f, sawPinch = true))
+    }
+
+    @Test
+    fun browserPointsAreEncodedImagePixels() {
+        // A 2000×1000 page drawn 1000 px wide: two image pixels per view pixel at fit.
+        assertEquals(2f, browserImagePxPerViewPx(2000, pageFit)!!, eps)
+        assertNull(browserImagePxPerViewPx(2000, FitRect.EMPTY))
+        assertNull(browserImagePxPerViewPx(0, pageFit))
+        // A tap on the page maps to its pixel; one off the page (the area below it) is dropped.
+        val tap = browserTapPoint(250f, 350f, ZoomState.FIT, pageFit, 2000, 1000)!!
+        assertEquals(500f, tap.first, eps)
+        assertEquals(500f, tap.second, eps)
+        assertNull(browserTapPoint(250f, 650f, ZoomState.FIT, pageFit, 2000, 1000))
+        // A drag that starts off the page scrolls the page at its nearest edge.
+        val scroll = browserScrollPoint(250f, 650f, ZoomState.FIT, pageFit, 2000, 1000)!!
+        assertEquals(500f, scroll.first, eps)
+        assertEquals(999f, scroll.second, eps)
+        // Zoomed: the pan-start point follows the zoom.
+        val zoomed = browserScrollPoint(0f, 100f, ZoomState(2f, -500f, -100f), pageFit, 2000, 1000)!!
+        assertEquals(500f, zoomed.first, eps)
+        assertEquals(0f, zoomed.second, eps)
+        assertNull(browserScrollPoint(0f, 0f, ZoomState.FIT, FitRect.EMPTY, 2000, 1000))
+    }
+
+    @Test
+    fun withoutADoubleTapWindowEveryTapIsImmediate() {
+        // A browser has no double-tap zoom (iOS LiveCanvas has none): a click is sent at the lift.
+        val arbiter = PressArbiter(holdMillis = 300, doubleTapMillis = 0, slop = 8f)
+        assertTrue(arbiter.down(10f, 10f, 0, selectable = false).isEmpty())
+        assertEquals(listOf(PressAction.Tap(10f, 10f)), arbiter.up(10f, 10f, 50))
+        assertTrue(arbiter.down(12f, 10f, 80, selectable = false).isEmpty())
+        assertEquals("a quick second tap is a second click", listOf(PressAction.Tap(12f, 10f)), arbiter.up(12f, 10f, 120))
+        assertNull(arbiter.deadline)
+    }
 }
