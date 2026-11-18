@@ -74,15 +74,28 @@ class MentionDraftTest {
         val draft = askDraft()
         val token = draft.tokens.single()
         // Gboard backspaces into "Code Review" by re-composing the word: the whole token is
-        // replaced with what is left of its name.
-        for (remnant in listOf("Code Revie", "Revie", "Code", "Code Reviews", "Cxde Review")) {
+        // replaced with what a backspace leaves of its name, a strict prefix.
+        for (remnant in listOf("Code Revie", "Code Re", "Code", "Co")) {
             val edited = draft.applyEdit(token.start, token.end, remnant)
             assertEquals(remnant, "Ask  to review", edited.text)
             assertTrue(remnant, edited.tokens.isEmpty())
         }
-        // Typing over a selected token keeps what was typed.
-        assertEquals("Ask x to review", draft.applyEdit(token.start, token.end, "x").text)
-        assertEquals("Ask Deploy shell to review", draft.applyEdit(token.start, token.end, "Deploy shell").text)
+        // A letter typed at the token's end comes back as the whole name and more: the token
+        // stays and the letter follows it.
+        val typedAfter = draft.applyEdit(token.start, token.end, "Code Reviews")
+        assertEquals("Ask ${token.let { "@" + it.guid }}s to review", typedAfter.text)
+        assertEquals(listOf(token), typedAfter.tokens)
+        // Typing over a selected token keeps what was typed: never a remnant.
+        for (typed in listOf("x", "v", "C", "Revie", "Cxde Review", "Deploy shell")) {
+            val edited = draft.applyEdit(token.start, token.end, typed)
+            assertEquals(typed, "Ask $typed to review", edited.text)
+            assertTrue(typed, edited.tokens.isEmpty())
+        }
+        // The whole name again is not a strict prefix: it replaces the token as text.
+        assertEquals("Ask Code Review to review", draft.applyEdit(token.start, token.end, "Code Review").text)
+        // A two-character name: one character left is not a remnant.
+        val short = MentionDraft.EMPTY.insertMention(0, guid, "zs")
+        assertEquals("z ", short.applyEdit(0, short.tokens.single().end, "z").text)
         // Only an edit over exactly the token: text beside it is the owner's.
         assertEquals("Code Revie to review", draft.applyEdit(0, token.end, "Code Revie").text)
     }

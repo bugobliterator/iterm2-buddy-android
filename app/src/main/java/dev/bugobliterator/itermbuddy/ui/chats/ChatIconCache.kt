@@ -11,6 +11,7 @@ import kotlin.coroutines.CoroutineContext
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -111,6 +112,8 @@ class ChatIconCache<T : Any>(
             startedIn = generation
             inFlight[ref.key] ?: startDecode(ref)
         }
+        // Started here, outside the lock: under an immediate dispatcher the decode runs at once.
+        decode.start()
         val decoded = try {
             decode.await()
         } catch (e: CancellationException) {
@@ -125,11 +128,14 @@ class ChatIconCache<T : Any>(
         return if (decoded == null || decoded.byteCount > maxBytes) null else decoded.image
     }
 
-    /** Starts [ref]'s decode, kept when it completes whoever still waits. Under [lock]. */
+    /**
+     * Creates [ref]'s decode, not started (the caller starts it outside the lock), kept when it
+     * completes whoever still waits. Under [lock].
+     */
     @OptIn(ExperimentalCoroutinesApi::class)
     private fun startDecode(ref: ChatIconRef): Deferred<DecodedImage<T>?> {
         val startedIn = generation
-        val decode = decodeScope.async {
+        val decode = decodeScope.async(start = CoroutineStart.LAZY) {
             permits.withPermit {
                 try {
                     decoder.decode(ref.bytes.duplicate())

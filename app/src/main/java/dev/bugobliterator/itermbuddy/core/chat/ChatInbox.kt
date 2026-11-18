@@ -70,7 +70,15 @@ class ChatInbox(
     private class Incoming(val input: ChatInput, val bytes: Long) : Item
 
     /** Work posted by the chat feature itself (a request's outcome): no slot, in order with the inputs. */
-    private class Posted(val block: suspend () -> Unit, val onDropped: () -> Unit) : Item
+    private class Posted(val block: suspend () -> Unit, onDropped: () -> Unit) : Item {
+        private val dropped = AtomicBoolean()
+        private val onDroppedOnce = onDropped
+
+        /** Tells the poster its block will never run; at most once, however it was found dropped. */
+        fun dropped() {
+            if (dropped.compareAndSet(false, true)) onDroppedOnce()
+        }
+    }
 
     private data class Usage(val items: Int, val bytes: Long, val stopped: Boolean = false)
 
@@ -78,7 +86,11 @@ class ChatInbox(
 
     private val stoppedLogged = AtomicBoolean()
 
-    private val items = Channel<Item>(Channel.UNLIMITED)
+    /**
+     * Posted work the consumer never runs is told so: still queued when the channel is
+     * cancelled, posted after, or taken by a receive that was cancelled before it resumed.
+     */
+    private val items = Channel<Item>(Channel.UNLIMITED, onUndeliveredElement = { (it as? Posted)?.dropped() })
 
     /** The most inputs the inbox has held at once, for tests that need its bound reached. */
     internal val highWater = AtomicInteger()
@@ -111,13 +123,8 @@ class ChatInbox(
         }
         consumer.invokeOnCompletion {
             usage.update { it.copy(stopped = true) }
-            // Nothing more will run: posted work still queued, or posted from now on, is dropped
-            // and told so.
-            items.close()
-            while (true) {
-                val item = items.tryReceive().getOrNull() ?: break
-                if (item is Posted) item.onDropped()
-            }
+            // Nothing more will run: posted work still queued is dropped and told so.
+            items.cancel()
         }
     }
 
@@ -153,7 +160,8 @@ class ChatInbox(
      * consumer).
      */
     fun post(onDropped: () -> Unit = {}, block: suspend () -> Unit) {
-        if (items.trySend(Posted(block, onDropped)).isFailure) onDropped()
+        val posted = Posted(block, onDropped)
+        if (items.trySend(posted).isFailure) posted.dropped()
     }
 
     private suspend fun reserve(bytes: Long, input: ChatInput) {

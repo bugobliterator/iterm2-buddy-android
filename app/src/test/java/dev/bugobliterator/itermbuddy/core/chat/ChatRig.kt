@@ -120,8 +120,8 @@ internal class ChatRig(
         override suspend fun send(message: PhoneMessage, onLink: Long?) {
             if (message is PhoneMessage.Publish) {
                 publishLinks += onLink
-                if (failPublishes) throw RequestNotSentException("the frame could not be sent")
                 publishGate?.await()
+                if (failPublishes) throw RequestNotSentException("the frame could not be sent")
             }
             client.send(message, onLink)
         }
