@@ -1,5 +1,5 @@
 {
   "direction" : "macToPhone",
   "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: Optional(10), payload: WireFixtures.CompanionHostMessage.chatCreated(entry: WireFixtures.CompanionChatListEntry(chat: WireFixtures.Chat(id: \"2F3E4D5C-6B7A-4980-A1B2-C3D4E5F60718\", title: \"Orchestrator\", creationDate: 2026-11-18 11:16:40 +0000, lastModifiedDate: 2026-11-18 11:16:40 +0000, orchestrationEnabled: true, terminalSessionGuid: nil, browserSessionGuid: nil, permissions: \"\", vectorStore: nil, modelName: Optional(\"example-model\"), modelVendor: nil, blobProtocol: nil, claimedScopes: [], watchers: [], icon: nil), snippet: nil, muted: Optional(false))))",
-  "json" : {"payload":{"chatCreated":{"entry":{"chat":{"claimedScopes":[],"creationDate":1795000600000,"id":"2F3E4D5C-6B7A-4980-A1B2-C3D4E5F60718","lastModifiedDate":1795000600000,"modelName":"example-model","orchestrationEnabled":true,"permissions":"","title":"Orchestrator","watchers":[]},"muted":false}}},"requestID":10}
+  "json" : {"payload":{"chatCreated":{"entry":{"chat":{"claimedScopes":[],"creationDate":1795000600000,"id":"2F3E4D5C-6B7A-4980-A1B2-C3D4E5F60718","lastModifiedDate":1795000600003,"modelName":"example-model","orchestrationEnabled":true,"permissions":"","title":"Orchestrator","watchers":[]},"muted":false}}},"requestID":10}
 }

@@ -1,4 +1,86 @@
 {
+  "canonical" : [
+    {
+      "canonical" : "ptys_7K2M9Q4R8T1VH",
+      "input" : "ptys_7K2M9Q4R8T1VH",
+      "name" : "canonical"
+    },
+    {
+      "canonical" : "ptys_7K2M9Q4R8T1VH",
+      "input" : "ptys_7k2m9q4r8t1vh",
+      "name" : "lowercase"
+    },
+    {
+      "canonical" : "ptys_7K2M9Q4R8T1VH",
+      "input" : "PTYS_7K2M9Q4R8T1VH",
+      "name" : "uppercase-prefix"
+    },
+    {
+      "canonical" : "ptys_7K2M9Q4R8T1VH",
+      "input" : "ptys_7K2M9Q4R8TlVH",
+      "name" : "lowercase-l-for-one"
+    },
+    {
+      "canonical" : "ptys_7K2M9Q4R8T1VH",
+      "input" : "ptys_7K2M9Q4R8TIVH",
+      "name" : "uppercase-i-for-one"
+    },
+    {
+      "canonical" : "ptys_7K2M9Q4R8T1VH",
+      "input" : "ptys_7K2M9Q4R8TLVH",
+      "name" : "uppercase-l-for-one"
+    },
+    {
+      "canonical" : "ptys_7K2M9Q4R8T1VH",
+      "input" : "ptys_7K2M9Q4R8TiVH",
+      "name" : "lowercase-i-for-one"
+    },
+    {
+      "canonical" : "ptys_3HX6W0ZD5N2BT",
+      "input" : "ptys_3HX6WOZD5N2BT",
+      "name" : "uppercase-o-for-zero"
+    },
+    {
+      "canonical" : "ptys_3HX6W0ZD5N2BT",
+      "input" : "ptys_3HX6WoZD5N2BT",
+      "name" : "lowercase-o-for-zero"
+    },
+    {
+      "canonical" : null,
+      "input" : "ptys_7K2M9Q4R8T1UH",
+      "name" : "u-is-not-in-the-alphabet"
+    },
+    {
+      "canonical" : null,
+      "input" : "ptys_7K2M9Q4R8T1V0",
+      "name" : "bad-check-character"
+    },
+    {
+      "canonical" : null,
+      "input" : "ptys_7K2M9Q4R8T1V",
+      "name" : "too-short"
+    },
+    {
+      "canonical" : null,
+      "input" : "ptys_7K2M9Q4R8T1VH0",
+      "name" : "too-long"
+    },
+    {
+      "canonical" : null,
+      "input" : "ptyx_7K2M9Q4R8T1VH",
+      "name" : "wrong-prefix"
+    },
+    {
+      "canonical" : null,
+      "input" : "1D2C3B4A-5968-4776-A5B4-C3D2E1F00F1E",
+      "name" : "uuid"
+    },
+    {
+      "canonical" : null,
+      "input" : "",
+      "name" : "empty"
+    }
+  ],
   "cases" : [
     {
       "atSignOptional" : false,
@@ -359,6 +441,293 @@
       ],
       "name" : "no-mentions",
       "text" : "Nothing to see here: @ alone, @session: and @wg- too."
+    }
+  ],
+  "protect" : [
+    {
+      "indentedCodeBlocks" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 0,
+          "protected" : true
+        },
+        {
+          "identifier" : "ptys_3HX6W0ZD5N2BT",
+          "length" : 19,
+          "location" : 24,
+          "protected" : true
+        }
+      ],
+      "name" : "plain-paragraph-is-protected",
+      "protectedText" : "iTermMentionNONCEX0Z and iTermMentionNONCEX1Z should pair up.",
+      "text" : "@ptys_7K2M9Q4R8T1VH and @ptys_3HX6W0ZD5N2BT should pair up."
+    },
+    {
+      "indentedCodeBlocks" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 5,
+          "protected" : false
+        },
+        {
+          "identifier" : "ptys_3HX6W0ZD5N2BT",
+          "length" : 19,
+          "location" : 46,
+          "protected" : true
+        }
+      ],
+      "name" : "inline-code-span",
+      "protectedText" : "Run `@ptys_7K2M9Q4R8T1VH` literally, then ask iTermMentionNONCEX0Z.",
+      "text" : "Run `@ptys_7K2M9Q4R8T1VH` literally, then ask @ptys_3HX6W0ZD5N2BT."
+    },
+    {
+      "indentedCodeBlocks" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 9,
+          "protected" : false
+        },
+        {
+          "identifier" : "ptys_3HX6W0ZD5N2BT",
+          "length" : 19,
+          "location" : 39,
+          "protected" : true
+        }
+      ],
+      "name" : "double-backtick-code-span",
+      "protectedText" : "Run ``a `@ptys_7K2M9Q4R8T1VH` b`` then iTermMentionNONCEX0Z.",
+      "text" : "Run ``a `@ptys_7K2M9Q4R8T1VH` b`` then @ptys_3HX6W0ZD5N2BT."
+    },
+    {
+      "indentedCodeBlocks" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 17,
+          "protected" : true
+        }
+      ],
+      "name" : "unclosed-backtick",
+      "protectedText" : "A stray ` before iTermMentionNONCEX0Z here.",
+      "text" : "A stray ` before @ptys_7K2M9Q4R8T1VH here."
+    },
+    {
+      "indentedCodeBlocks" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 13,
+          "protected" : true
+        }
+      ],
+      "name" : "code-span-does-not-cross-a-blank-line",
+      "protectedText" : "Open `quote\n\niTermMentionNONCEX0Z` closed.",
+      "text" : "Open `quote\n\n@ptys_7K2M9Q4R8T1VH` closed."
+    },
+    {
+      "indentedCodeBlocks" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_3HX6W0ZD5N2BT",
+          "length" : 19,
+          "location" : 7,
+          "protected" : true
+        },
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 31,
+          "protected" : false
+        },
+        {
+          "identifier" : "ptys_8M3B5X1QJ7TW1",
+          "length" : 19,
+          "location" : 61,
+          "protected" : true
+        }
+      ],
+      "name" : "fenced-block",
+      "protectedText" : "Before iTermMentionNONCEX0Z\n```\n@ptys_7K2M9Q4R8T1VH\n```\nafter iTermMentionNONCEX1Z",
+      "text" : "Before @ptys_3HX6W0ZD5N2BT\n```\n@ptys_7K2M9Q4R8T1VH\n```\nafter @ptys_8M3B5X1QJ7TW1"
+    },
+    {
+      "indentedCodeBlocks" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 4,
+          "protected" : false
+        },
+        {
+          "identifier" : "ptys_3HX6W0ZD5N2BT",
+          "length" : 19,
+          "location" : 24,
+          "protected" : false
+        }
+      ],
+      "name" : "unterminated-fence-runs-to-the-end",
+      "protectedText" : "~~~\n@ptys_7K2M9Q4R8T1VH\n@ptys_3HX6W0ZD5N2BT",
+      "text" : "~~~\n@ptys_7K2M9Q4R8T1VH\n@ptys_3HX6W0ZD5N2BT"
+    },
+    {
+      "indentedCodeBlocks" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 12,
+          "protected" : false
+        },
+        {
+          "identifier" : "ptys_3HX6W0ZD5N2BT",
+          "length" : 19,
+          "location" : 38,
+          "protected" : true
+        }
+      ],
+      "name" : "link-destination",
+      "protectedText" : "[the shell](@ptys_7K2M9Q4R8T1VH) and [iTermMentionNONCEX0Z](https://example.com)",
+      "text" : "[the shell](@ptys_7K2M9Q4R8T1VH) and [@ptys_3HX6W0ZD5N2BT](https://example.com)"
+    },
+    {
+      "indentedCodeBlocks" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 25,
+          "protected" : false
+        },
+        {
+          "identifier" : "ptys_3HX6W0ZD5N2BT",
+          "length" : 19,
+          "location" : 50,
+          "protected" : true
+        }
+      ],
+      "name" : "autolink",
+      "protectedText" : "See <https://example.com/@ptys_7K2M9Q4R8T1VH> and iTermMentionNONCEX0Z.",
+      "text" : "See <https://example.com/@ptys_7K2M9Q4R8T1VH> and @ptys_3HX6W0ZD5N2BT."
+    },
+    {
+      "indentedCodeBlocks" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 24,
+          "protected" : false
+        },
+        {
+          "identifier" : "ptys_3HX6W0ZD5N2BT",
+          "length" : 18,
+          "location" : 48,
+          "protected" : true
+        }
+      ],
+      "name" : "bare-url",
+      "protectedText" : "See https://example.com/@ptys_7K2M9Q4R8T1VH and iTermMentionNONCEX0Z.",
+      "text" : "See https://example.com/@ptys_7K2M9Q4R8T1VH and ptys_3HX6W0ZD5N2BT."
+    },
+    {
+      "indentedCodeBlocks" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 18,
+          "location" : 4,
+          "protected" : true
+        }
+      ],
+      "name" : "bare-stable-id-is-protected",
+      "protectedText" : "Ask iTermMentionNONCEX0Z to run the tests.",
+      "text" : "Ask ptys_7K2M9Q4R8T1VH to run the tests."
+    },
+    {
+      "indentedCodeBlocks" : false,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 4,
+          "protected" : true
+        },
+        {
+          "identifier" : "ptys_3HX6W0ZD5N2BT",
+          "length" : 19,
+          "location" : 24,
+          "protected" : true
+        }
+      ],
+      "name" : "indented-line-without-option",
+      "protectedText" : "    iTermMentionNONCEX0Z\niTermMentionNONCEX1Z",
+      "text" : "    @ptys_7K2M9Q4R8T1VH\n@ptys_3HX6W0ZD5N2BT"
+    },
+    {
+      "indentedCodeBlocks" : true,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 4,
+          "protected" : false
+        },
+        {
+          "identifier" : "ptys_3HX6W0ZD5N2BT",
+          "length" : 19,
+          "location" : 24,
+          "protected" : true
+        }
+      ],
+      "name" : "indented-line-with-option",
+      "protectedText" : "    @ptys_7K2M9Q4R8T1VH\niTermMentionNONCEX0Z",
+      "text" : "    @ptys_7K2M9Q4R8T1VH\n@ptys_3HX6W0ZD5N2BT"
+    },
+    {
+      "indentedCodeBlocks" : true,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 1,
+          "protected" : false
+        }
+      ],
+      "name" : "tab-indented-code-with-option",
+      "protectedText" : "\t@ptys_7K2M9Q4R8T1VH code",
+      "text" : "\t@ptys_7K2M9Q4R8T1VH code"
+    },
+    {
+      "indentedCodeBlocks" : true,
+      "mentions" : [
+        {
+          "identifier" : "ptys_7K2M9Q4R8T1VH",
+          "length" : 19,
+          "location" : 3,
+          "protected" : true
+        }
+      ],
+      "name" : "tab-list-item-is-not-code",
+      "protectedText" : "\t- iTermMentionNONCEX0Z item",
+      "text" : "\t- @ptys_7K2M9Q4R8T1VH item"
+    },
+    {
+      "indentedCodeBlocks" : false,
+      "mentions" : [
+
+      ],
+      "name" : "no-mentions",
+      "protectedText" : "Nothing here.",
+      "text" : "Nothing here."
     }
   ],
   "split" : [
