@@ -1,5 +1,10 @@
 package dev.bugobliterator.itermbuddy.core.stream
 
+import dev.bugobliterator.itermbuddy.core.input.InputSender
+import dev.bugobliterator.itermbuddy.core.input.InputTarget
+import dev.bugobliterator.itermbuddy.core.input.Key
+import dev.bugobliterator.itermbuddy.core.input.KeyEvent
+import dev.bugobliterator.itermbuddy.core.input.isInputTarget
 import dev.bugobliterator.itermbuddy.core.wire.BrowserNavigationState
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
@@ -22,7 +27,7 @@ import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.time.Duration.Companion.milliseconds
 
-/** The browser driver against a [ScriptedStreamLink], in virtual time. */
+/** The browser driver through a real [InputSender] against a [ScriptedStreamLink], in virtual time. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class BrowserDriverTest {
     private class Rig(val test: TestScope, revision: Int = 15) {
@@ -32,12 +37,13 @@ class BrowserDriverTest {
         val navigation = MutableStateFlow<BrowserNavigationState?>(null)
         val macRevision = MutableStateFlow(revision)
         val logs = CopyOnWriteArrayList<String>()
+        val input = InputSender(link, test.backgroundScope, isCurrent = { isInputTarget(active.value, it) }, log = { logs += it })
         val driver = BrowserDriver(
-            link,
+            input,
             active,
             editing,
             navigation,
-            macRevision = { macRevision.value },
+            macRevision = macRevision,
             scope = test.backgroundScope,
             nowMillis = { test.testScheduler.currentTime },
             log = { logs += it },
@@ -180,12 +186,13 @@ class BrowserDriverTest {
     @Test
     fun nothingSentBelowRevisionFifteen() = runTest {
         val rig = Rig(this, revision = 14)
-        assertFalse(rig.driver.inputActive)
+        assertFalse(rig.driver.inputActive.value)
         exerciseEverything(rig)
         assertEquals(emptyList<PhoneMessage>(), rig.sent())
         // The same driver goes live once a revision 15 Mac is connected.
         rig.macRevision.value = 15
-        assertTrue(rig.driver.inputActive)
+        runCurrent()
+        assertTrue(rig.driver.inputActive.value)
         rig.driver.back()
         assertEquals(listOf(PhoneMessage.BrowserGoBack(1)), rig.sent())
     }
@@ -194,14 +201,92 @@ class BrowserDriverTest {
     fun nothingSentForATerminalStreamOrWithoutAStream() = runTest {
         val rig = Rig(this)
         rig.active.value = browserStream(1, 1).copy(config = terminalConfig())
-        assertFalse("a terminal stream takes no browser input (iOS browserInputActive)", rig.driver.inputActive)
+        runCurrent()
+        assertFalse("a terminal stream takes no browser input (iOS browserInputActive)", rig.driver.inputActive.value)
         exerciseEverything(rig)
         rig.active.value = browserStream(1, 1).copy(config = null)
-        assertFalse("no config yet", rig.driver.inputActive)
+        runCurrent()
+        assertFalse("no config yet", rig.driver.inputActive.value)
         exerciseEverything(rig)
         rig.active.value = null
         exerciseEverything(rig)
         assertEquals(emptyList<PhoneMessage>(), rig.sent())
+    }
+
+    @Test
+    fun tapAndTypedKeyArriveInCallOrder() = runTest {
+        val rig = Rig(this)
+        val gate = CompletableDeferred<Unit>()
+        rig.link.sendGate = gate
+        val target = InputTarget(1, 1, "guid-browser")
+        val x = KeyEvent(Key.Text("x"))
+        // Keyboard up in field A; tap field B and type straight away while an earlier key is held.
+        rig.input.key(target, KeyEvent(Key.Text("a")))
+        runCurrent()
+        rig.driver.tap(10.0, 20.0)
+        rig.input.key(target, x)
+        gate.complete(Unit)
+        assertEquals(
+            listOf(
+                PhoneMessage.SendKey("guid-browser", KeyEvent(Key.Text("a"))),
+                PhoneMessage.BrowserTap(1, 10.0, 20.0),
+                PhoneMessage.SendKey("guid-browser", x),
+            ),
+            rig.sent(),
+        )
+    }
+
+    @Test
+    fun queuedScrollStepsMergeUntilSomethingElseIsQueued() = runTest {
+        val rig = Rig(this)
+        val gate = CompletableDeferred<Unit>()
+        rig.link.sendGate = gate
+        rig.driver.back()
+        runCurrent()
+        // Three ticks' steps queue behind the held back: one merged scroll.
+        rig.driver.scroll(0f, 3f, 1f, 1f, 7f, 8f)
+        advanceTimeBy(40.milliseconds)
+        runCurrent()
+        rig.driver.scroll(0f, 4f, 1f, 1f, 7f, 8f)
+        advanceTimeBy(40.milliseconds)
+        runCurrent()
+        rig.driver.scroll(2f, 5f, 1f, 1f, 7f, 8f)
+        advanceTimeBy(40.milliseconds)
+        runCurrent()
+        // A tap queued after it ends the merge; a later step at another point is its own.
+        rig.driver.tap(1.0, 1.0)
+        rig.driver.scroll(0f, 6f, 1f, 1f, 7f, 8f)
+        advanceTimeBy(40.milliseconds)
+        runCurrent()
+        rig.driver.scroll(0f, 1f, 1f, 1f, 9f, 9f)
+        advanceTimeBy(40.milliseconds)
+        gate.complete(Unit)
+        assertEquals(
+            listOf(
+                PhoneMessage.BrowserGoBack(1),
+                PhoneMessage.BrowserScroll(1, 7.0, 8.0, 2.0, 12.0),
+                PhoneMessage.BrowserTap(1, 1.0, 1.0),
+                PhoneMessage.BrowserScroll(1, 7.0, 8.0, 0.0, 6.0),
+                PhoneMessage.BrowserScroll(1, 9.0, 9.0, 0.0, 1.0),
+            ),
+            rig.sent(),
+        )
+    }
+
+    @Test
+    fun inputActiveFollowsConfigAndRevision() = runTest {
+        val rig = Rig(this)
+        runCurrent()
+        assertTrue(rig.driver.inputActive.value)
+        rig.active.value = null
+        runCurrent()
+        assertFalse(rig.driver.inputActive.value)
+        rig.active.value = browserStream(1, 3)
+        runCurrent()
+        assertTrue(rig.driver.inputActive.value)
+        rig.macRevision.value = 14
+        runCurrent()
+        assertFalse(rig.driver.inputActive.value)
     }
 
     @Test

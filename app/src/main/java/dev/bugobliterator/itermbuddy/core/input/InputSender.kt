@@ -26,12 +26,18 @@ fun isInputTarget(active: ActiveStream?, target: InputTarget): Boolean =
         active.sessionGuid == target.sessionGuid
 
 /**
- * The one ordered path for keys, pastes and scroll-wheel notches to the Mac: one unbounded queue, one consumer in
- * [scope], so input is sent in the order [key], [paste], [typeThenReturn] and [scrollWheel] were called (per
- * calling thread; the calls are thread-safe).
+ * The one ordered path for keys, pastes, scroll-wheel notches and browser input to the Mac: one unbounded queue,
+ * one consumer in [scope], so input is sent in the order [key], [paste], [typeThenReturn], [scrollWheel] and
+ * [streamInput] were called (per calling thread; the calls are thread-safe). iOS sends a browser tap and the key
+ * typed after it from the main actor in call order (`IOS/App/AppModel.swift:4674-4715`), so a key typed straight
+ * after a tap on another field lands in that field.
  *
  * - **Stale input.** At dequeue, an item whose target is no longer current ([isCurrent]: another
  *   link, another watch, another session) is discarded, and the running count is logged.
+ * - **Stream-scoped input** ([streamInput], the browser driver's) is also discarded at dequeue when
+ *   its own check (the stream it was made for is still the active browser stream) fails. A
+ *   `browserScroll` queued right behind another for the same target, stream and point, while that
+ *   one is still queued, is merged into it (deltas summed), so a slow link gets fewer, larger steps.
  * - **Bounded.** Each send is bound to its target's link (`onLink`) and to [sendBound]; a send that
  *   times out or fails is logged and skipped, and the queue goes on in order.
  * - **Paste** (the composer's) is one `pasteText`: iTerm2's paste path, bracketed when the app
@@ -88,7 +94,21 @@ class InputSender(
         override val label: String get() = "scroll wheel"
     }
 
+    /**
+     * A stream-scoped [message] (browser input) sent when [stillActive] at dequeue; [taken] and
+     * [message] are touched under [lock], so a scroll can be merged into it until the consumer takes it.
+     */
+    private class StreamItem(override val target: InputTarget, var message: PhoneMessage, val stillActive: () -> Boolean) : Item {
+        var taken = false
+        override val label: String get() = "browser ${message::class.simpleName}"
+    }
+
     private val queue = Channel<Item>(Channel.UNLIMITED)
+
+    private val lock = Any()
+
+    /** The item enqueued last, for merging scrolls; under [lock]. */
+    private var lastEnqueued: Item? = null
 
     /** Items discarded as stale; touched by the consumer only. */
     private var discarded = 0L
@@ -117,14 +137,36 @@ class InputSender(
         enqueue(WheelItem(target, PhoneMessage.ReportScrollWheel(streamID, up, lines)))
     }
 
+    /**
+     * Stream-scoped input for [target] (a browser stream's tap, scroll or control), in order with
+     * keys; dropped at dequeue unless [target] is current and [stillActive] holds then.
+     */
+    fun streamInput(target: InputTarget, message: PhoneMessage, stillActive: () -> Boolean) {
+        synchronized(lock) {
+            val last = lastEnqueued
+            if (message is PhoneMessage.BrowserScroll && last is StreamItem && !last.taken && last.target == target) {
+                val queued = last.message
+                if (queued is PhoneMessage.BrowserScroll && queued.streamID == message.streamID && queued.x == message.x && queued.y == message.y) {
+                    last.message = queued.copy(deltaX = queued.deltaX + message.deltaX, deltaY = queued.deltaY + message.deltaY)
+                    return
+                }
+            }
+            enqueue(StreamItem(target, message, stillActive))
+        }
+    }
+
     private fun enqueue(item: Item) {
-        // Unlimited: this fails only once the consumer's scope has ended.
-        if (queue.trySend(item).isFailure) log("input sender stopped; dropped ${item.label}")
+        synchronized(lock) {
+            lastEnqueued = item
+            // Unlimited: this fails only once the consumer's scope has ended.
+            if (queue.trySend(item).isFailure) log("input sender stopped; dropped ${item.label}")
+        }
     }
 
     private suspend fun process(item: Item) {
         val target = item.target
-        if (!isCurrent(target)) {
+        val message = if (item is StreamItem) synchronized(lock) { item.taken = true; item.message } else null
+        if (!isCurrent(target) || (item is StreamItem && !item.stillActive())) {
             InputTrace.current.log { "sender: discarded stale ${traceItem(item)} for ${target.sessionGuid} link ${target.linkId} watch ${target.watchEpoch}" }
             discarded++
             log("discarded stale ${item.label} for ${target.sessionGuid} on link ${target.linkId} watch ${target.watchEpoch}; $discarded discarded in all")
@@ -136,6 +178,7 @@ class InputSender(
             is PasteItem -> send(PhoneMessage.PasteText(target.sessionGuid, item.text), target, item.label)
             is TypeItem -> typeThenReturn(item)
             is WheelItem -> send(item.message, target, item.label)
+            is StreamItem -> send(checkNotNull(message), target, item.label)
         }
     }
 
@@ -165,6 +208,7 @@ class InputSender(
         is PasteItem -> "paste ${codePoints(item.text)}"
         is TypeItem -> "type-then-Return ${codePoints(item.text)}"
         is WheelItem -> "scroll wheel ${if (item.message.up) "up" else "down"} ${item.message.lines}"
+        is StreamItem -> item.label
     }
 
     /** Sends [message] on [target]'s link within [sendBound]; false (logged) on a timeout or failure. */
