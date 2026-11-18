@@ -241,11 +241,15 @@ fun CommandContent.markdownDescription(): String = when (this) {
 /** True when [markdownDescription] cut this command's argument, so the full text is worth showing. */
 val CommandContent.argumentWasCut: Boolean
     get() = when (this) {
-        is CommandContent.ExecuteCommand -> graphemeCount(escapedForMarkdownCode(command)) > CODE_ARGUMENT_MAX_CHARACTERS
-        is CommandContent.InsertTextAtCursor -> graphemeCount(escapedForMarkdownCode(text)) > CODE_ARGUMENT_MAX_CHARACTERS
-        is CommandContent.GetManPage -> graphemeCount(escapedForMarkdownCode(cmd)) > CODE_ARGUMENT_MAX_CHARACTERS
+        is CommandContent.ExecuteCommand -> isCut(command)
+        is CommandContent.InsertTextAtCursor -> isCut(text)
+        is CommandContent.GetManPage -> isCut(cmd)
         else -> false
     }
+
+/** Counts at most one cluster past the cut, so a long argument is not scanned to its end. */
+private fun isCut(argument: String): Boolean =
+    graphemeBoundaries(escapedForMarkdownCode(argument), CODE_ARGUMENT_MAX_CHARACTERS + 1).size > CODE_ARGUMENT_MAX_CHARACTERS
 
 private fun codeArgument(argument: String): String =
     escapedForMarkdownCode(argument).truncatedWithTrailingEllipsis(CODE_ARGUMENT_MAX_CHARACTERS)
@@ -259,7 +263,7 @@ internal fun escapedForMarkdownCode(text: String): String = text.replace("`", "\
  * throws a [WireDecodeException] naming [path] and keys only.
  */
 internal fun decodeCommandContent(content: JsonObject, path: String): CommandContent {
-    val case = content.keys.singleOrNull() ?: throw WireDecodeException("$path must have exactly one key")
+    val case = content.knownCase(COMMAND_CASES, path)
     val body = content[case] as? JsonObject ?: throw WireDecodeException("$path.$case is not an object")
     val argumentsPath = "$path.$case"
     val arguments = body.obj(argumentsPath, "_0")
@@ -298,6 +302,25 @@ internal fun decodeCommandContent(content: JsonObject, path: String): CommandCon
             CommandContent.ReadWebPage
         }
         "restartSession" -> CommandContent.RestartSession
-        else -> throw WireDecodeException("$path has an unknown case")
+        else -> throw WireDecodeException("$path has an unhandled case")
     }
+}
+
+/** The 26 `RemoteCommand.Content` case names (`RemoteCommand.swift:171-196`). */
+private val COMMAND_CASES = setOf(
+    "isAtPrompt", "executeCommand", "getLastExitStatus", "getCommandHistory", "getLastCommand",
+    "getCommandBeforeCursor", "searchCommandHistory", "getCommandOutput", "getScreenContents",
+    "getTerminalSize", "getShellType", "detectSSHSession", "getRemoteHostname", "getUserIdentity",
+    "getCurrentDirectory", "setClipboard", "insertTextAtCursor", "deleteCurrentLine", "getManPage",
+    "createFile", "searchBrowser", "loadURL", "webSearch", "getURL", "readWebPage", "restartSession",
+)
+
+/**
+ * The single key of a synthesized-enum object, checked against [known] before it is used in any
+ * error path, so an exception never quotes a key the Mac made up.
+ */
+internal fun JsonObject.knownCase(known: Set<String>, path: String): String {
+    val case = keys.singleOrNull() ?: throw WireDecodeException("$path must have exactly one key, has $size")
+    if (case !in known) throw WireDecodeException("$path has an unknown case")
+    return case
 }

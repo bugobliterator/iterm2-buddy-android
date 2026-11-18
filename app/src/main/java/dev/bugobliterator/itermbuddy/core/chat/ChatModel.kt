@@ -1,6 +1,7 @@
 package dev.bugobliterator.itermbuddy.core.chat
 
 import dev.bugobliterator.itermbuddy.core.wire.isCanonicalUppercaseUuid
+import java.nio.ByteBuffer
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -52,10 +53,10 @@ enum class SessionState(val raw: String) {
 /**
  * The fields of upstream `Chat` (`Chat.swift:14-88`) the phone uses; the rest (`permissions`,
  * `watchers`, `modelName`, ...) are read past, not validated. Dates are milliseconds since 1970.
- * [icon] is the chat's PNG, held as a private copy. Equality compares content, the icon's bytes
+ * The icon is the chat's PNG, held privately ([copyIcon], [iconView]). Equality compares content, the icon's bytes
  * included; [toString] shows lengths only.
  */
-class ChatSummary(
+class ChatSummary private constructor(
     val id: String,
     val title: String,
     val createdMillis: Double,
@@ -64,12 +65,30 @@ class ChatSummary(
     val terminalSessionGuid: String?,
     val browserSessionGuid: String?,
     val claimedScopes: List<String>,
-    icon: ByteArray?,
+    private val iconBytes: ByteArray?,
+    @Suppress("UNUSED_PARAMETER") adopted: Adopted,
 ) {
-    private val iconBytes: ByteArray? = icon?.copyOf()
+    /** Holds its own copy of [icon]. */
+    constructor(
+        id: String,
+        title: String,
+        createdMillis: Double,
+        lastModifiedMillis: Double,
+        orchestrationEnabled: Boolean,
+        terminalSessionGuid: String?,
+        browserSessionGuid: String?,
+        claimedScopes: List<String>,
+        icon: ByteArray?,
+    ) : this(
+        id, title, createdMillis, lastModifiedMillis, orchestrationEnabled, terminalSessionGuid, browserSessionGuid,
+        claimedScopes, icon?.copyOf(), Adopted,
+    )
 
-    /** A copy of the icon's bytes, or null when the chat has none. */
-    val icon: ByteArray? get() = iconBytes?.copyOf()
+    /** A fresh copy of the icon's bytes, or null when the chat has none. */
+    fun copyIcon(): ByteArray? = iconBytes?.copyOf()
+
+    /** The icon's bytes as a read-only view, without copying, or null when the chat has none. */
+    fun iconView(): ByteBuffer? = iconBytes?.let { ByteBuffer.wrap(it).asReadOnlyBuffer() }
 
     /** The icon's size in bytes, without copying it. */
     val iconSize: Int? get() = iconBytes?.size
@@ -97,6 +116,22 @@ class ChatSummary(
     companion object {
         /** The prefix of a synthetic single-session scope (`Chat.swift:59-68`). */
         const val SESSION_SCOPE_PREFIX = "session:"
+
+        /** Takes ownership of [icon] without copying: the caller must not keep or change it. */
+        internal fun adopting(
+            id: String,
+            title: String,
+            createdMillis: Double,
+            lastModifiedMillis: Double,
+            orchestrationEnabled: Boolean,
+            terminalSessionGuid: String?,
+            browserSessionGuid: String?,
+            claimedScopes: List<String>,
+            icon: ByteArray?,
+        ): ChatSummary = ChatSummary(
+            id, title, createdMillis, lastModifiedMillis, orchestrationEnabled, terminalSessionGuid, browserSessionGuid,
+            claimedScopes, icon, Adopted,
+        )
     }
 }
 
@@ -123,15 +158,17 @@ data class ChatMessage(
     val hidden: Boolean get() = body is MessageBody.Hidden || body is MessageBody.Commit
 
     /**
-     * Rendered as a request card (`MessageBubbleView.swift:216-375`): a classic command request,
-     * a select-session request, and the client-local workgroup-permission, enable-orchestration
-     * and offer-link prompts.
+     * Rendered as a request card (`MessageBubbleView.swift:216-379`): a classic command request,
+     * a select-session request, the client-local workgroup-permission, enable-orchestration and
+     * offer-link prompts, and the orchestration-permission-granted card with its Revoke button
+     * (`MessageBubbleView.swift:367-379`), which neither blocks nor is abandoned.
      */
     val isInteractiveRequest: Boolean
         get() = when (body) {
             is MessageBody.ClassicCommand, is MessageBody.SelectSessionRequest -> true
             is MessageBody.ClientNotice -> body.action is ClientAction.WorkgroupPermissionRequest ||
-                body.action is ClientAction.EnableOrchestrationRequest || body.action is ClientAction.OfferLink
+                body.action is ClientAction.EnableOrchestrationRequest || body.action is ClientAction.OfferLink ||
+                body.action is ClientAction.OrchestrationPermissionGranted
             else -> false
         }
 

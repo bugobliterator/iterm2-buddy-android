@@ -19,7 +19,7 @@ class HistoryDecodeMemoryTest {
     @Test
     fun capSizedHistoryDecodesInABoundedHeap() {
         val java = File(System.getProperty("java.home"), "bin/java").path
-        val process = ProcessBuilder(
+        val builder = ProcessBuilder(
             java,
             "-Xmx$BOUNDED_HEAP_MEBIBYTES" + "m",
             "-XX:+UseSerialGC",
@@ -27,11 +27,20 @@ class HistoryDecodeMemoryTest {
             System.getProperty("java.class.path"),
             CapSizedHistoryDecode::class.java.name,
             CHAT_HISTORY_CAP_BYTES.toString(),
-        ).redirectErrorStream(true).start()
-        val output = process.inputStream.bufferedReader().readText()
-        assertTrue("the child JVM did not finish", process.waitFor(5, TimeUnit.MINUTES))
-        assertEquals("child output: ${output.lines().filterNot { it.startsWith("Picked up") }}", 0, process.exitValue())
-        assertTrue(output, output.contains(CapSizedHistoryDecode.DONE))
+        ).redirectErrorStream(true)
+        // The child writes to a private temp file, so a full pipe can never block it while we wait.
+        val log = File.createTempFile("history-decode", ".log")
+        try {
+            val process = builder.redirectOutput(log).start()
+            val finished = process.waitFor(5, TimeUnit.MINUTES)
+            if (!finished) process.destroyForcibly()
+            val output = log.readText()
+            assertTrue("the child JVM did not finish", finished)
+            assertEquals("child output: ${output.lines().filterNot { it.startsWith("Picked up") }}", 0, process.exitValue())
+            assertTrue(output, output.contains(CapSizedHistoryDecode.DONE))
+        } finally {
+            log.delete()
+        }
     }
 
     @Test
@@ -59,7 +68,7 @@ class HistoryDecodeMemoryTest {
         const val CHAT_HISTORY_CAP_BYTES = 8 shl 20
 
         /** Peak heap a cap-sized decode must fit in, input bytes included (the Pixel's app limit is 256 MiB). */
-        const val BOUNDED_HEAP_MEBIBYTES = 96
+        const val BOUNDED_HEAP_MEBIBYTES = 86
 
         /** Bytes allocated per input byte by the whole decode, garbage included. */
         const val MAX_ALLOCATED_PER_INPUT_BYTE = 20.0
