@@ -13,12 +13,26 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
- * The chat inbox's bound: [inboxItems] inputs **and** [inboxBytes] bytes, whichever fills first.
- * An input's bytes are its frame's size: [ChatInput.Payload.size] for a raw frame,
+ * The chat feature's memory bounds, all injectable.
+ *
+ * The inbox: [inboxItems] inputs **and** [inboxBytes] bytes, whichever fills first. An input's
+ * bytes are its frame's size: [ChatInput.Payload.size] for a raw frame,
  * [ChatInput.Message.frameBytes] for a decoded one, none for markers and
  * [ChatInput.PayloadTooLarge] (whose bytes are gone). Default 4096 items and 16 MiB.
+ *
+ * The repository: transcripts are kept for open conversations and the [closedTranscripts] most
+ * recently closed (default 3); a transcript's attachment bytes are under [attachments].
  */
-data class ChatBudgets(val inboxItems: Int = 4096, val inboxBytes: Long = DEFAULT_INBOX_BYTES)
+data class ChatBudgets(
+    val inboxItems: Int = 4096,
+    val inboxBytes: Long = DEFAULT_INBOX_BYTES,
+    val closedTranscripts: Int = 3,
+    val attachments: AttachmentBudgets = AttachmentBudgets(),
+) {
+    init {
+        require(closedTranscripts >= 0) { "closedTranscripts must not be negative" }
+    }
+}
 
 /**
  * The [ChatSink] the session's receive loop delivers to: [accept] only enqueues and returns, and
