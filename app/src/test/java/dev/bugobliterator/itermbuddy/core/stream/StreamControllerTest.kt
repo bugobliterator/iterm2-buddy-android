@@ -1268,6 +1268,189 @@ class StreamControllerTest {
         assertEquals(2L, h.active?.streamID)
     }
 
+    // ---- History tiles ----
+
+    /** When false, `fetchHistoryTile` requests are recorded and not answered. */
+    private class TileAnswers(@Volatile var answering: Boolean = true)
+
+    /** Answers every `fetchHistoryTile` at once, while [TileAnswers.answering], with all the lines it asked for. */
+    private fun Harness.answerTiles(): TileAnswers {
+        val answers = TileAnswers()
+        mac.onRequest("fetchHistoryTile") { if (answers.answering) Tiles.tilePayload(Tiles.fetchBody(it)) else null }
+        return answers
+    }
+
+    private fun Harness.tileFetches(): List<JsonObject> = mac.receivedBodies("fetchHistoryTile")
+
+    private fun Harness.readyTiles(): List<Long> = controller.historyTiles.tiles.value.filterValues { it is TileState.Ready }.keys.toList()
+
+    /** Live on stream 1 with the fixture config's extent replaced; the keyframe carries the snapped live top. */
+    private suspend fun Harness.openLiveWith(first: Long, total: Int, rows: Int) {
+        mac.configOnStart = false
+        connect()
+        controller.open(A)
+        test.runCurrent()
+        mac.configOnStart = true
+        mac.sendStreamConfig(
+            1,
+            mapOf("firstAbsLine" to JsonPrimitive(first), "totalLines" to JsonPrimitive(total), "rows" to JsonPrimitive(rows)),
+        )
+        mac.sendMedia(frame(1, 0, keyframe = true, liveTop = first + total - rows))
+        test.runCurrent()
+        check(state is LiveViewState.Live) { "not live: $state" }
+    }
+
+    @Test
+    fun generationChangeResetsStore() = runTest {
+        val h = Harness(this)
+        val answers = h.answerTiles()
+        h.openLiveWith(first = 0, total = 3040, rows = 40)
+        assertEquals(3000L, h.active?.liveTop)
+        h.controller.historyTiles.want(0, 2999)
+        advanceTimeBy(1000)
+        assertEquals((0L until 3000L step 50).toList(), h.readyTiles())
+        answers.answering = false
+        val before = h.tileFetches().size
+        h.mac.sendStreamConfig(
+            1,
+            mapOf(
+                "generationId" to JsonPrimitive(2),
+                "firstAbsLine" to JsonPrimitive(0),
+                "totalLines" to JsonPrimitive(100),
+                "rows" to JsonPrimitive(40),
+            ),
+        )
+        runCurrent()
+        assertEquals(emptyList<Long>(), h.readyTiles())
+        assertEquals(60L, h.active?.liveTop)
+        h.controller.historyTiles.want(0, 200)
+        runCurrent()
+        val fetched = h.tileFetches().drop(before)
+        assertEquals(listOf(0L to 50L, 50L to 10L), fetched.map { it.getValue("firstAbsLine").jsonPrimitive.long to it.getValue("lineCount").jsonPrimitive.long })
+        assertEquals(setOf(2L), fetched.map { it.getValue("generationId").jsonPrimitive.long }.toSet())
+    }
+
+    @Test
+    fun selectionRangeReachesStoreAndFlow() = runTest {
+        val h = Harness(this)
+        h.openLive()
+        val span = Tiles.span(4010, 4011)
+        h.mac.sendMessage(Tiles.selectionRangePayload(1, span), null)
+        runCurrent()
+        assertEquals(span, h.controller.selection.value)
+        assertEquals(span, h.controller.historyTiles.selection.value)
+        h.mac.sendMessage(Tiles.selectionRangePayload(9, Tiles.span(1, 2)), null)
+        runCurrent()
+        assertEquals("another stream's selection is ignored", span, h.controller.selection.value)
+        h.mac.sendMessage(Tiles.selectionRangePayload(1, null), null)
+        runCurrent()
+        assertNull(h.controller.selection.value)
+    }
+
+    @Test
+    fun streamSwitchClearsTilesAndSelection() {
+        for (transition in listOf("pause", "link", "ended", "open")) switchClearsTilesAndSelection(transition)
+    }
+
+    private fun switchClearsTilesAndSelection(transition: String) = runTest {
+        val h = Harness(this)
+        h.answerTiles()
+        h.openLiveWith(first = 0, total = 1040, rows = 40)
+        h.controller.historyTiles.want(900, 999)
+        runCurrent()
+        assertEquals(transition, listOf(900L, 950L), h.readyTiles())
+        h.mac.sendMessage(Tiles.selectionRangePayload(1, Tiles.span(910, 920)), null)
+        runCurrent()
+        assertNotNull(h.controller.selection.value)
+        // The next stream's start is answered late, so the check below runs before its streamStarted.
+        h.mac.delayReply("startSessionStream", 5.seconds)
+        when (transition) {
+            "pause" -> {
+                h.controller.pause()
+                runCurrent()
+                assertCleared(h, transition)
+                h.controller.resume()
+            }
+            "link" -> {
+                h.mac.dropSocket()
+                h.awaitConnected(2)
+            }
+            "ended" -> h.mac.sendStreamEnded(1, "sessionClosed")
+            "open" -> h.controller.open(B)
+        }
+        runCurrent()
+        assertCleared(h, transition)
+        val fetchesAtSwitch = h.tileFetches().size
+        advanceTimeBy(6.seconds)
+        val next = h.active
+        if (transition == "ended") {
+            assertNull(next)
+            assertEquals(transition, fetchesAtSwitch, h.tileFetches().size)
+            return@runTest
+        }
+        assertNotNull(transition, next)
+        assertEquals("nothing was asked for the old stream: the fixture config has no history at 900", fetchesAtSwitch, h.tileFetches().size)
+        h.controller.historyTiles.want(3900, 3999)
+        runCurrent()
+        val after = h.tileFetches().drop(fetchesAtSwitch)
+        assertEquals(transition, 2, after.size)
+        assertEquals(transition, setOf(next!!.streamID), after.map { it.getValue("streamID").jsonPrimitive.long }.toSet())
+    }
+
+    private fun assertCleared(h: Harness, transition: String) {
+        assertEquals(transition, emptyMap<Long, TileState>(), h.controller.historyTiles.tiles.value)
+        assertNull(transition, h.controller.selection.value)
+    }
+
+    @Test
+    fun timeoutFailsAfterTwentySeconds() = runTest {
+        val h = Harness(this, clientTimeouts = ClientTimeouts(rpc = 15.seconds))
+        h.answerTiles().answering = false
+        h.openLiveWith(first = 0, total = 1040, rows = 40)
+        h.controller.historyTiles.want(0, 49)
+        runCurrent()
+        assertEquals(1, h.tileFetches().size)
+        advanceTimeBy(19_900)
+        assertEquals(TileState.Loading, h.controller.historyTiles.tiles.value[0])
+        advanceTimeBy(200)
+        assertEquals(TileState.Failed, h.controller.historyTiles.tiles.value[0])
+        assertTrue("the link stays up", h.state is LiveViewState.Live)
+    }
+
+    @Test
+    fun replyAtNineteenSecondsIsReady() = runTest {
+        val h = Harness(this, clientTimeouts = ClientTimeouts(rpc = 15.seconds))
+        h.mac.onRequest("fetchHistoryTile") { envelope ->
+            val requestID = envelope.getValue("requestID").jsonPrimitive.long
+            backgroundScope.launch {
+                delay(19.seconds)
+                h.mac.sendMessage(Tiles.tilePayload(Tiles.fetchBody(envelope)), requestID)
+            }
+            null
+        }
+        h.openLiveWith(first = 0, total = 1040, rows = 40)
+        h.controller.historyTiles.want(0, 49)
+        advanceTimeBy(19_100)
+        assertTrue(h.controller.historyTiles.tiles.value[0] is TileState.Ready)
+    }
+
+    @Test
+    fun historyTileReplyDuringMediaBurst() = runTest {
+        val h = Harness(this)
+        h.answerTiles()
+        h.openLiveWith(first = 0, total = 1040, rows = 40)
+        val submitsBefore = h.video.submits.size
+        val burst = launch { repeat(2000) { h.mac.sendMedia(frame(1, 33L * (it + 1), liveTop = 1000)) } }
+        h.controller.historyTiles.want(0, 299)
+        advanceTimeBy(10.seconds)
+        assertTrue(burst.isCompleted)
+        assertEquals(6, h.tileFetches().size)
+        assertEquals((0L until 300L step 50).toList(), h.readyTiles())
+        assertEquals(2000, h.video.submits.size - submitsBefore)
+        assertEquals(33L * 2000, h.ackPts().last())
+        assertTrue(h.state is LiveViewState.Live)
+    }
+
     /** Brings [controller] to Live on link 1, stream 1, over [link]: the reply goes through the sink first, as the session delivers it. */
     private suspend fun makeLive(controller: StreamController, link: ScriptedStreamLink) {
         controller.accept(StreamInput.LinkUp(1, FakeMac.MAC_REVISION))
