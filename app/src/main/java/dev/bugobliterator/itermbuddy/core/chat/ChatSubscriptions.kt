@@ -6,150 +6,284 @@ package dev.bugobliterator.itermbuddy.core.chat
  */
 data class SubscriptionPlan(val subscribe: List<String>, val unsubscribe: List<String>)
 
+/** How a subscribe request ended, as [ChatSubscriptions.settled] is told. */
+enum class SubscribeOutcome {
+    /** Its reply frame arrived whole (a history taken by the sink, decodable or not, or a `PayloadTooLarge`). */
+    ANSWERED,
+
+    /** The Mac answered with an error (an `aiUnavailable` refusal, say). */
+    ERROR,
+
+    /**
+     * The phone stopped waiting. The Mac installed the subscription before it began the history
+     * (`HB:1411-1427`), so that history may still be arriving: the chat stays unanswered.
+     */
+    TIMEOUT,
+}
+
+/**
+ * One subscribe request, from [ChatSubscriptions.started] (or [ChatSubscriptions.take]) to
+ * [ChatSubscriptions.settled]. Compared by identity: a ticket from an older request never settles
+ * a newer one.
+ */
+class SubscribeTicket internal constructor(val chatID: String) {
+    override fun toString(): String = "SubscribeTicket($chatID)"
+}
+
+/**
+ * The process's oversized chats, kept by the chat repository across links (owner decision: a chat
+ * found too large is not resubscribed for the rest of the process).
+ *
+ * - [tooLarge]: a history over the chat cap landed for it (a history `PayloadTooLarge`), or it was
+ *   the only subscribe unanswered when a link ended on a frame over the Noise cap.
+ * - [suspects]: two or more subscribes were unanswered when a link ended on such a frame. On later
+ *   links each suspect is subscribed first and alone ([ChatSubscriptions]), until it is answered
+ *   (cleared) or ends a link by itself (too large).
+ *
+ * [tryAgain] (the owner's Try again) clears both for a chat. Single-threaded (the chat consumer's).
+ */
+class OversizedChats {
+    private val tooLargeChats = LinkedHashSet<String>()
+    private val suspectChats = LinkedHashSet<String>()
+
+    val tooLarge: Set<String> get() = tooLargeChats.toSet()
+    val suspects: Set<String> get() = suspectChats.toSet()
+
+    internal fun isSuspect(chatID: String): Boolean = chatID in suspectChats
+
+    /** A history over the chat cap landed for [chatID]. */
+    internal fun foundTooLarge(chatID: String) {
+        suspectChats -= chatID
+        tooLargeChats += chatID
+    }
+
+    /** [chatID]'s subscribe was answered: it did not end a link. */
+    internal fun answered(chatID: String) {
+        suspectChats -= chatID
+    }
+
+    /**
+     * A link ended on a frame over the Noise cap with [unanswered] subscribes out: one is the
+     * culprit; several become suspects. None names nothing (the frame was something else).
+     */
+    internal fun linkEndedOversized(unanswered: Set<String>) {
+        when (unanswered.size) {
+            0 -> Unit
+            1 -> foundTooLarge(unanswered.single())
+            else -> suspectChats += unanswered
+        }
+    }
+
+    /** The owner's Try again: [chatID] is subscribed again on the next plan. */
+    fun tryAgain(chatID: String) {
+        tooLargeChats -= chatID
+        suspectChats -= chatID
+    }
+
+    /** Unpair: forgets everything. */
+    fun clear() {
+        tooLargeChats.clear()
+        suspectChats.clear()
+    }
+}
+
 /**
  * Which chats to subscribe and unsubscribe on one link. The chat repository makes one per link
- * (subscriptions live and die with the Mac's bridge, `AM:2427-2438`), hands it the process's
- * [suspects], and calls [plan] whenever the list, the navigation, the link or AI availability
- * changes. Pure bookkeeping: it sends nothing, holds chat IDs only, and is single-threaded (the
- * chat consumer's).
+ * (subscriptions live and die with the Mac's bridge, `AM:2427-2438`) over the process's
+ * [oversized] chats, and calls [plan] then [take] whenever the list, the navigation, the link or
+ * AI availability changes. Bookkeeping only: it sends nothing, holds chat IDs only, and is
+ * single-threaded (the chat consumer's).
  *
  * The repository reports, for each chat:
- * - [started] for each subscribe it sends from a plan, at once (planning again before that plans
- *   the same chats again);
- * - [subscribed] when a `History`, or a history `PayloadTooLarge`, for it lands from the sink on
- *   this link: subscribed state is derived from the sink, never from the request's outcome;
- * - [settled] when its subscribe request ends, however it ended (history taken, timeout, error);
- * - [unsubscribed] for each unsubscribe it sends from a plan.
+ * - [take] (or [started] and [unsubscribed]) for what it sends from a plan, in the same step;
+ * - [subscribed] when a `History`, or a history `PayloadTooLarge` (`tooLarge = true`), for it
+ *   lands from the sink on this link: subscribed state comes from the sink, never from the
+ *   request's outcome;
+ * - [settled] with the request's [SubscribeTicket] and [SubscribeOutcome] when it ends;
+ * - [linkEnded] when the link goes down.
  *
  * Rules:
  * - A chat subscribed or subscribing on this link is never planned again on it: the Mac installs
  *   a subscription before it sends the history (`HB:1411-1427`), so a subscribe that timed out on
  *   the phone is still installed and its history still lands. Only [tryAgain] (the owner's Try
- *   again) and [aiDropped] plan it once more.
+ *   again), [aiDropped] and a refusal while AI was off plan it once more.
  * - At most `concurrency` subscribe requests are out at once, counted from [started] until
- *   [subscribed] or [settled], whichever comes first; and one chat never has two out.
- * - A suspect (a chat in flight when a link ended on an oversized frame) is planned only alone,
- *   with nothing else out, after every other wanted chat has been tried; nothing else is planned
- *   while one is out.
- * - An unsubscribe is planned only for a chat subscribed on this link and no longer wanted, i.e.
- *   neither open nor listed ([wanted]). The Mac's subscription is not reference-counted
- *   (`HB:489-493`), so an unsubscribe for a wanted chat would cut it.
+ *   [settled]; one chat never has two out.
+ * - A chat is **unanswered** from [started] until its history lands or its request is answered
+ *   or refused; a timeout does not answer it. [outstanding] is the unanswered set, and is what
+ *   names the culprit when the link ends on a frame over the Noise cap, which can be long after
+ *   the phone's 15 s subscribe timeout (32 MiB has to arrive first).
+ * - Owner decision: suspects go **first and alone**. Right after the link comes up each wanted
+ *   suspect is planned on its own, with nothing else out, before any other chat; nothing at all
+ *   is planned while a suspect is unanswered.
+ * - Nothing is subscribed while AI is off (the Mac refuses it, `HB:2276-2330`).
+ * - An unsubscribe is planned only for a chat subscribed on this link that was in a list given
+ *   to [wanted] on this link and has left it (and is not open). A chat that is only open, never
+ *   listed yet, is never cut: the list may not have arrived. The Mac's subscription is not
+ *   reference-counted (`HB:489-493`), so an unsubscribe for a wanted chat would cut it.
  */
-class ChatSubscriptions {
+class ChatSubscriptions(private val oversized: OversizedChats) {
     /** Started or subscribed on this link (since the last [aiDropped]); never planned again. */
     private val attempted = LinkedHashSet<String>()
 
     /** A `History` (or a history `PayloadTooLarge`) landed on this link. */
     private val subscribed = LinkedHashSet<String>()
 
-    /** Subscribe requests out: started, neither subscribed nor settled yet. */
-    private val inFlight = LinkedHashSet<String>()
+    /** Requests out (started, not settled), in start order; their chats are not planned. */
+    private val requests = LinkedHashMap<SubscribeTicket, String>()
 
-    /**
-     * Requests that were in flight when the Mac dropped every subscription ([aiDropped]): the Mac
-     * refuses them, but each holds its slot, and its chat is not planned, until it [settled].
-     */
-    private val dropped = LinkedHashSet<String>()
+    /** Started on this link, with no history, answer or refusal yet. */
+    private val unanswered = LinkedHashSet<String>()
 
-    private val suspected = HashSet<String>()
+    /** Chats seen in a list given to [wanted] on this link. */
+    private val everListed = HashSet<String>()
+
+    /** False after [aiDropped] or a plan with AI off, until a plan with AI on. */
+    private var aiOn = true
+
+    /** Chats refused while AI was off: planned again when it is back. */
+    private val refusedWhileOff = HashSet<String>()
 
     /** Chats subscribed on this link, in the order their histories landed. */
     val subscribedChats: Set<String> get() = subscribed.toSet()
 
-    /**
-     * Every subscribe request still out, in the order started. When a link ends on an oversized
-     * frame, these are the suspects for the next link; when there is only one, it is the culprit.
-     */
-    val outstanding: Set<String> get() = LinkedHashSet<String>(inFlight).apply { addAll(dropped) }
+    /** The unanswered chats, in start order (see [ChatSubscriptions]). */
+    val outstanding: Set<String> get() = unanswered.toSet()
 
     /**
      * The chats this link should have, in order (owner decision: every chat is watched): the
-     * [open] conversations first, then **every** listed chat in the Mac's order, without
-     * duplicates, minus [tooLarge] ones. A too-large chat already subscribed on this link stays
-     * wanted: its history was over the cap but the Mac installed the subscription, which still
-     * feeds its live state (the activity tracker treats that `PayloadTooLarge` as a history), so
-     * it is not cut while it is open or listed. It is never planned again either way.
+     * [open] conversations first, then **every** chat in [entries] (an authoritative list from the
+     * Mac) in the Mac's order, without duplicates, minus too-large ones. A too-large chat already
+     * subscribed on this link stays wanted: its history was over the cap but the Mac installed the
+     * subscription, which still feeds its live state (the activity tracker treats that
+     * `PayloadTooLarge` as a history), so it is not cut while it is open or listed. It is never
+     * planned again either way.
      */
-    fun wanted(open: List<String>, entries: List<ChatListEntry>, tooLarge: Set<String>): List<String> {
+    fun wanted(open: List<String>, entries: List<ChatListEntry>): List<String> {
         val wanted = LinkedHashSet<String>()
         for (chatID in open) wanted += chatID
-        for (entry in entries) wanted += entry.chat.id
+        for (entry in entries) {
+            wanted += entry.chat.id
+            everListed += entry.chat.id
+        }
+        val tooLarge = oversized.tooLarge
         return wanted.filter { it !in tooLarge || it in subscribed }
     }
 
     /**
      * The minimal diff from this link's state to [wanted]: the wanted chats not yet tried on this
-     * link, in [wanted]'s order, as far as `concurrency` allows (suspects alone and last); and the
-     * subscribed chats no longer wanted. Changes nothing.
+     * link, in [wanted]'s order, as far as `concurrency` and the suspect rule allow, and none while
+     * AI is off; and the subscribed chats that left the list. Changes nothing but the AI state:
+     * the first plan with [aiAvailable] after AI was off makes the chats refused meanwhile wanted
+     * again.
      */
-    fun plan(wanted: List<String>, concurrency: Int): SubscriptionPlan {
+    fun plan(wanted: List<String>, concurrency: Int, aiAvailable: Boolean): SubscriptionPlan {
         require(concurrency >= 1) { "concurrency must be at least 1" }
+        if (aiAvailable && !aiOn) {
+            attempted -= refusedWhileOff
+            refusedWhileOff.clear()
+        }
+        aiOn = aiAvailable
         val wantedSet = wanted.toHashSet()
-        val unsubscribe = subscribed.filter { it !in wantedSet }
-        return SubscriptionPlan(planSubscribes(wanted, concurrency), unsubscribe)
+        val unsubscribe = subscribed.filter { it !in wantedSet && it in everListed }
+        val subscribe = if (aiAvailable) planSubscribes(wanted, concurrency) else emptyList()
+        return SubscriptionPlan(subscribe, unsubscribe)
     }
 
     private fun planSubscribes(wanted: List<String>, concurrency: Int): List<String> {
-        val out = inFlight.size + dropped.size
-        if (out >= concurrency || inFlight.any { it in suspected } || dropped.any { it in suspected }) return emptyList()
-        val candidates = wanted.filter { it !in attempted && it !in inFlight && it !in dropped }.distinct()
-        val ordinary = candidates.filter { it !in suspected }
-        if (ordinary.isNotEmpty()) return ordinary.take(concurrency - out)
-        if (out > 0) return emptyList()
-        return candidates.take(1)
+        if (unanswered.any(oversized::isSuspect)) return emptyList()
+        val busy = requests.values.toHashSet()
+        val candidates = wanted.filter { it !in attempted && it !in busy }.distinct()
+        val suspect = candidates.firstOrNull(oversized::isSuspect)
+        if (suspect != null) return if (requests.isEmpty() && unanswered.isEmpty()) listOf(suspect) else emptyList()
+        val free = concurrency - requests.size
+        return if (free > 0) candidates.take(free) else emptyList()
     }
 
-    /** A subscribe for [chatID] was sent from a plan on this link. */
-    fun started(chatID: String) {
+    /**
+     * Records [plan] as sent: [started] for each subscribe, [unsubscribed] for each unsubscribe.
+     * @return the subscribe tickets, in [SubscriptionPlan.subscribe]'s order.
+     */
+    fun take(plan: SubscriptionPlan): List<SubscribeTicket> {
+        plan.unsubscribe.forEach(::unsubscribed)
+        return plan.subscribe.map(::started)
+    }
+
+    /** A subscribe for [chatID] was sent on this link. Prefer [take]. */
+    fun started(chatID: String): SubscribeTicket {
+        val ticket = SubscribeTicket(chatID)
         attempted += chatID
-        inFlight += chatID
+        unanswered += chatID
+        requests[ticket] = chatID
+        return ticket
     }
 
-    /** A `History` or a history `PayloadTooLarge` for [chatID] landed on this link. */
-    fun subscribed(chatID: String) {
+    /**
+     * A `History` for [chatID] landed on this link, or a history `PayloadTooLarge` ([tooLarge]),
+     * which also makes it too large for the process.
+     */
+    fun subscribed(chatID: String, tooLarge: Boolean = false) {
         attempted += chatID
         subscribed += chatID
-        inFlight -= chatID
+        unanswered -= chatID
+        if (tooLarge) oversized.foundTooLarge(chatID) else oversized.answered(chatID)
     }
 
-    /** The subscribe request for [chatID] ended, however; frees its slot. Idempotent. */
-    fun settled(chatID: String) {
-        if (!inFlight.remove(chatID)) dropped -= chatID
+    /**
+     * The request [ticket] ended with [outcome]: frees its slot. A ticket already settled, or
+     * from another link, is ignored. [SubscribeOutcome.TIMEOUT] leaves the chat unanswered.
+     */
+    fun settled(ticket: SubscribeTicket, outcome: SubscribeOutcome) {
+        val chatID = requests.remove(ticket) ?: return
+        when (outcome) {
+            SubscribeOutcome.TIMEOUT -> Unit
+            SubscribeOutcome.ANSWERED -> answered(chatID)
+            SubscribeOutcome.ERROR -> {
+                answered(chatID)
+                if (!aiOn) refusedWhileOff += chatID
+            }
+        }
     }
 
-    /** An unsubscribe for [chatID] was sent from a plan: the chat is planned again if wanted again. */
+    private fun answered(chatID: String) {
+        // A newer request for the chat may be out after a Try again; it stays unanswered.
+        if (requests.values.none { it == chatID }) unanswered -= chatID
+        oversized.answered(chatID)
+    }
+
+    /** An unsubscribe for [chatID] was sent: the chat is planned again if wanted again. Prefer [take]. */
     fun unsubscribed(chatID: String) {
         subscribed -= chatID
         attempted -= chatID
     }
 
     /**
-     * The owner's Try again: [chatID] is planned once more on this link, after any request for it
-     * still out has [settled].
+     * The owner's Try again: [chatID] is no longer too large or a suspect, and is planned once more
+     * on this link, after any request for it still out has settled.
      */
     fun tryAgain(chatID: String) {
+        oversized.tryAgain(chatID)
         attempted -= chatID
         subscribed -= chatID
     }
 
     /**
-     * The process's suspects (see [ChatSubscriptions]), replacing any given before. The repository
-     * removes a suspect once its history lands and marks the only one left out too large.
+     * AI was turned off: the Mac dropped every subscription and does not restore them when AI
+     * comes back (`HB:2250-2269`, `AM:4470-4486`), so every chat is planned again once a plan says
+     * AI is available. Requests still out keep their slots until they settle (the Mac refuses
+     * them while AI is off) and stay unanswered until then.
      */
-    fun suspects(ids: Set<String>) {
-        suspected.clear()
-        suspected += ids
+    fun aiDropped() {
+        aiOn = false
+        subscribed.clear()
+        attempted.clear()
     }
 
     /**
-     * AI was turned off: the Mac dropped every subscription and does not restore them when AI
-     * comes back (`HB:2250-2269`, `AM:4470-4486`), so every chat is planned again. Requests still
-     * out keep their slots until they settle (the Mac refuses them while AI is off).
+     * The link ended; this instance is done. On a frame over the Noise cap ([messageTooLarge]),
+     * the unanswered chats name the culprit or become suspects in [oversized].
      */
-    fun aiDropped() {
-        subscribed.clear()
-        attempted.clear()
-        dropped += inFlight
-        inFlight.clear()
+    fun linkEnded(messageTooLarge: Boolean) {
+        if (messageTooLarge) oversized.linkEndedOversized(unanswered.toSet())
     }
 }
