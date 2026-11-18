@@ -40,4 +40,12 @@ class ChatTimestampsTest {
         assertEquals("4.11.26", stamp("2026-11-04T12:00:00Z", locale = Locale.GERMANY))
         assertEquals("1/2/24", stamp("2024-01-02T12:00:00Z"))
     }
+
+    @Test
+    fun refreshAlignsToTheNextMinute() {
+        assertEquals(60_000L, nextStampRefreshDelay(now, 60_000))
+        assertEquals(59_999L, nextStampRefreshDelay(now + 1, 60_000))
+        assertEquals(1L, nextStampRefreshDelay(now + 59_999, 60_000))
+        assertEquals(500L, nextStampRefreshDelay(1_500, 1_000))
+    }
 }

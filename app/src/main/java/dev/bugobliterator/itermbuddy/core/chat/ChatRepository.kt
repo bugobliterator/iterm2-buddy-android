@@ -84,6 +84,14 @@ sealed interface ConversationState {
 data class ChatRow(val entry: ChatListEntry, val state: AgentState, val unread: Boolean)
 
 /**
+ * The chat list, its rows and AI availability as one value, published together, so a reader
+ * never sees a new list with the previous rows. [toString] shows counts only.
+ */
+data class ChatListSnapshot(val list: ChatListState, val rows: List<ChatRow>, val aiAvailable: Boolean) {
+    override fun toString(): String = "ChatListSnapshot(list=$list, rows=${rows.size}, aiAvailable=$aiAvailable)"
+}
+
+/**
  * The repository's bounds, all injectable: request bounds as iOS's (`AM:2223`, `AM:2939`), the
  * send echo and delete waits used by later actions, how often an open transcript's snapshot may
  * be republished while it streams ([snapshotInterval]), and the activity tracker's timings
@@ -188,6 +196,19 @@ class ChatRepository(
 
     /** The list's rows with each chat's state and unread mark, in the Mac's order. */
     val rows: StateFlow<List<ChatRow>> = rowsFlow.asStateFlow()
+
+    private val snapshotFlow = MutableStateFlow(ChatListSnapshot(ChatListState.Loading, emptyList(), aiAvailable = true))
+
+    /** [list], [rows] and [aiAvailable] as one value, published at the same time as each of them. */
+    val listSnapshot: StateFlow<ChatListSnapshot> = snapshotFlow.asStateFlow()
+
+    private val linkGenerationFlow = MutableStateFlow(0L)
+
+    /**
+     * Bumped on every chat link up the repository accepts (0 before the first). A reader sees a
+     * change even when it missed the link's states in between, so it never misses a reconnect.
+     */
+    val linkGeneration: StateFlow<Long> = linkGenerationFlow.asStateFlow()
 
     private val aiFlow = MutableStateFlow(true)
 
@@ -465,6 +486,7 @@ class ChatRepository(
         newestDeliveryAuthor.clear()
         cost = LinkCost(up.linkId, nowMillis())
         log("chat link up ${up.linkId}: revision ${up.macRevision}, ai ${up.aiAvailable}")
+        linkGenerationFlow.value += 1
         if (ai) requestList()
         planNeeded = true
     }
@@ -1092,6 +1114,7 @@ class ChatRepository(
             val mark = seen.seen(chatID)
             ChatRow(entry, state, unread = state == AgentState.DONE || (mark != null && entry.chat.lastModifiedMillis > mark))
         }
+        snapshotFlow.value = ChatListSnapshot(listFlow.value, rowsFlow.value, ai)
         for ((chatID, flow) in conversationFlows) {
             val next = conversationState(chatID, now)
             if (next != flow.value) flow.value = next

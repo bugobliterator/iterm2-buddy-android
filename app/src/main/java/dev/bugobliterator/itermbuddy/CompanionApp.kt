@@ -43,6 +43,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -193,7 +194,8 @@ class CompanionApp : Application() {
                     log = { Log.i(CHAT_TAG, it) },
                 )
             },
-            iconDecoder = BitmapImageDecoder(),
+            // The row shows icons at 44 dp: decode them to that size in pixels.
+            iconDecoder = BitmapImageDecoder((44 * resources.displayMetrics.density).roundToInt()),
             log = { Log.w(TAG, it) },
             chatLog = { Log.i(CHAT_TAG, it) },
         )

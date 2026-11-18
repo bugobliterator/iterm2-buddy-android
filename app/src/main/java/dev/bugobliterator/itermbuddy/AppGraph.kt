@@ -15,13 +15,20 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamLink
 import dev.bugobliterator.itermbuddy.core.stream.StreamSink
 import dev.bugobliterator.itermbuddy.ui.SessionNavigator
 import dev.bugobliterator.itermbuddy.ui.chats.ChatIconCache
+import dev.bugobliterator.itermbuddy.ui.chats.ChatListContent
+import dev.bugobliterator.itermbuddy.ui.chats.chatListContents
 import dev.bugobliterator.itermbuddy.ui.chats.ChatSearch
 import dev.bugobliterator.itermbuddy.ui.chats.ImageBytesDecoder
 import dev.bugobliterator.itermbuddy.ui.chats.noteSnippetMentions
 import dev.bugobliterator.itermbuddy.ui.live.ComposerDrafts
 import dev.bugobliterator.itermbuddy.ui.live.LiveInputMemories
 import dev.bugobliterator.itermbuddy.ui.sessions.SessionSearch
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
@@ -40,9 +47,10 @@ import kotlinx.coroutines.launch
  * - [navigator] drives [controller]'s `open`/`close`, and reads the Mac's revision from [client]'s
  *   state to choose the browser view (at open, and again as the revision changes);
  * - [mentions] resolves @-mentions through the client; the chat list's snippets are noted with
- *   it on each list change, and again after its retry gate reopens on each link up and when AI
- *   comes back on ([noteSnippetMentions]);
- * - [chatIcons] holds the chat list's decoded icons;
+ *   it on each list change, and again after its retry gate reopens on each chat link up
+ *   ([ChatRepository.linkGeneration]) and when AI comes back on ([noteSnippetMentions]);
+ * - [chatList] is the Chats root's content ([chatListContents], computed off the main thread
+ *   while collected); [chatIcons] holds its decoded icons;
  * - [search], [chatSearch], [drafts] and [inputMemories] hold what the owner typed in the UI, app-scoped;
  * - on every unpair (local, Mac-sent, or a re-scan), [navigator] is reset (closing the stream),
  *   [repository] and [chats] cleared (the chat repository clears its seen marks itself, on its
@@ -60,6 +68,7 @@ class HomeGraph(
     val mentions: MentionResolver,
     val chatSearch: ChatSearch,
     val chatIcons: ChatIconCache<ImageBitmap>,
+    val chatList: StateFlow<ChatListContent>,
 )
 
 /**
@@ -73,6 +82,7 @@ class HomeGraph(
  * @param iconDecoder decodes chat icons (the app passes `BitmapImageDecoder`; tests decode nothing).
  * @param log for a failed unpair cleanup.
  * @param chatLog the mention resolver's diagnostics (counts and failure kinds only).
+ * @param listContext where [HomeGraph.chatList] is computed.
  */
 fun wireHome(
     scope: CoroutineScope,
@@ -83,6 +93,7 @@ fun wireHome(
     iconDecoder: ImageBytesDecoder<ImageBitmap> = ImageBytesDecoder { null },
     log: (String) -> Unit = {},
     chatLog: (String) -> Unit = {},
+    listContext: CoroutineContext = Dispatchers.Default,
 ): HomeGraph {
     val sink = ForwardingStreamSink()
     val chatSink = ForwardingChatSink()
@@ -100,14 +111,15 @@ fun wireHome(
     val mentions = MentionResolver(client, scope, chatLog)
     val chatSearch = ChatSearch()
     val chatIcons = ChatIconCache(iconDecoder)
-    // A link up (the client turning Connected) or AI coming back on reopens the resolver's retry
-    // gate (AM:2349-2351). A reconnect too fast for the state flow to show may be missed: its
-    // misses then stay raw until the next trigger, never wrong.
-    val linkUps = client.state.map { it is ClientState.Connected }.distinctUntilChanged().filter { it }
-    val aiBackOn = chats.aiAvailable.drop(1).filter { it }
+    // Each chat link up or AI coming back on reopens the resolver's retry gate (AM:2349-2351).
+    // The generation only grows, so a reconnect too fast to see in between is still a change.
+    val linkUps = chats.linkGeneration.drop(1).map { }
+    val aiBackOn = chats.aiAvailable.drop(1).filter { it }.map { }
     scope.launch {
-        noteSnippetMentions(chats.rows, merge(linkUps, aiBackOn).map { }, mentions::reopenRetryGate) { mentions.note(it) }
+        noteSnippetMentions(chats.rows, merge(linkUps, aiBackOn), mentions::reopenRetryGate) { mentions.note(it) }
     }
+    val chatList = chatListContents(chats.listSnapshot, chats.macRevision, chatSearch.query, mentions.resolutions, listContext)
+        .stateIn(scope, SharingStarted.WhileSubscribed(LIST_SHARING_STOP_MILLIS), ChatListContent.Loading)
     clearOnUnpair(
         client.paired,
         scope,
@@ -119,8 +131,11 @@ fun wireHome(
         ),
         log,
     )
-    return HomeGraph(client, controller, repository, chats, navigator, search, drafts, inputMemories, mentions, chatSearch, chatIcons)
+    return HomeGraph(client, controller, repository, chats, navigator, search, drafts, inputMemories, mentions, chatSearch, chatIcons, chatList)
 }
+
+/** How long [HomeGraph.chatList] keeps computing after its last collector (rotation) leaves. */
+private const val LIST_SHARING_STOP_MILLIS = 5_000L
 
 /** The client's stream sink before the controller exists; forwards every input once it does. */
 private class ForwardingStreamSink : StreamSink {

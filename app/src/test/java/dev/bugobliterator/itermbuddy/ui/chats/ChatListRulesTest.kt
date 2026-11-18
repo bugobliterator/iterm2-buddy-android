@@ -7,11 +7,21 @@ import dev.bugobliterator.itermbuddy.core.chat.ChatRow
 import dev.bugobliterator.itermbuddy.core.chat.ChatSummary
 import dev.bugobliterator.itermbuddy.core.chat.DEFUNCT_SESSION_TEXT
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolution
+import dev.bugobliterator.itermbuddy.core.chat.ChatListSnapshot
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 
 /** The chat list's rules: search, rendered snippets, row actions, state labels and what the list shows. */
 class ChatListRulesTest {
@@ -141,6 +151,75 @@ class ChatListRulesTest {
         val noMatch = chatListContent(loaded, rows, true, 15, "  zebra ", emptyMap())
         assertEquals(ChatListContent.NoMatch("zebra", refreshing = false, refreshFailed = false), noMatch)
         assertEquals("No chats match \"zebra\".", (noMatch as ChatListContent.NoMatch).text)
+    }
+
+    @Test
+    fun rowsBehindTheListShowLoadingNeverEmpty() {
+        // Entries listed but rows not yet built for them: Loading, never a "No chats yet" flash.
+        val loaded = ChatListState.Loaded(rows.map { it.entry }, refreshing = false)
+        assertEquals(ChatListContent.Loading, chatListContent(loaded, emptyList(), true, 15, "", emptyMap()))
+        assertEquals(ChatListContent.Loading, chatListContent(loaded, listOf(deploy), true, 15, "", emptyMap()))
+        // No entries: Empty, whatever rows linger.
+        val none = ChatListState.Loaded(emptyList(), refreshing = false)
+        assertEquals(ChatListContent.Empty(refreshing = false, refreshFailed = false), chatListContent(none, rows, true, 15, "", emptyMap()))
+    }
+
+    @Test
+    fun unchangedRowsKeepTheirModels() {
+        val hashed = mutableListOf<Int>()
+        val presenter = ChatListPresenter { bytes -> bytes?.let { hashed += it.remaining(); chatIconRef(it) } }
+        fun withIcon(id: String, icon: String, state: AgentState = AgentState.IDLE, modified: Double = 2.0) = ChatRow(
+            ChatListEntry(ChatSummary(id, "title $id", 1.0, modified, false, null, null, emptyList(), icon.toByteArray()), "snippet $id", false),
+            state,
+            false,
+        )
+        val first = listOf(withIcon("a", "icon-a"), withIcon("b", "icon-bb"))
+        fun present(rows: List<ChatRow>) =
+            (presenter.present(ChatListState.Loaded(rows.map { it.entry }, false), rows, true, 15, "", resolutions) as ChatListContent.Rows).rows
+        val before = present(first)
+        assertEquals(listOf(6, 7), hashed)
+        // The same rows again (a new list value, new arrays): the same model instances, nothing hashed.
+        val again = present(listOf(withIcon("a", "icon-a"), withIcon("b", "icon-bb")))
+        assertSame(before[0], again[0])
+        assertSame(before[1], again[1])
+        assertEquals(listOf(6, 7), hashed)
+        // A row whose state and time moved gets a new model, but its unchanged icon is not hashed again.
+        val moved = present(listOf(withIcon("a", "icon-a", AgentState.WORKING, modified = 3.0), withIcon("b", "icon-bb")))
+        assertNotSame(before[0], moved[0])
+        assertSame(before[0].icon, moved[0].icon)
+        assertSame(before[1], moved[1])
+        assertEquals(listOf(6, 7), hashed)
+        // A new icon is hashed.
+        val newIcon = present(listOf(withIcon("a", "icon-new"), withIcon("b", "icon-bb")))
+        assertNotEquals(before[0].icon, newIcon[0].icon)
+        assertEquals(listOf(6, 7, 8), hashed)
+    }
+
+    @Test
+    fun contentIsComputedOffTheCallingThread() = runTest {
+        val executor = Executors.newSingleThreadExecutor { Thread(it, "chat-list-test") }
+        try {
+            val threads = CopyOnWriteArrayList<Thread>()
+            val listThread = executor.submit<Thread> { Thread.currentThread() }.get()
+            val withIcon = ChatRow(
+                ChatListEntry(ChatSummary("i", "Icon chat", 1.0, 2.0, false, null, null, emptyList(), byteArrayOf(1, 2)), null, false),
+                AgentState.IDLE,
+                false,
+            )
+            val snapshot = ChatListSnapshot(ChatListState.Loaded(listOf(withIcon.entry), false), listOf(withIcon), aiAvailable = true)
+            val content = chatListContents(
+                flowOf(snapshot),
+                flowOf(15),
+                flowOf(""),
+                flowOf(emptyMap()),
+                executor.asCoroutineDispatcher(),
+                iconRef = { threads += Thread.currentThread(); chatIconRef(it) },
+            ).first()
+            assertEquals(listOf("i"), (content as ChatListContent.Rows).rows.map { it.chatID })
+            assertEquals(listOf(listThread), threads)
+        } finally {
+            executor.shutdown()
+        }
     }
 
     @Test
