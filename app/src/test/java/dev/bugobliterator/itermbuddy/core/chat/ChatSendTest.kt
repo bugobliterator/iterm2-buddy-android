@@ -7,11 +7,22 @@ import dev.bugobliterator.itermbuddy.core.chat.ChatRig.Companion.chatId
 import dev.bugobliterator.itermbuddy.core.chat.ChatRig.Companion.envelope
 import dev.bugobliterator.itermbuddy.core.sessions.SessionsRig
 import dev.bugobliterator.itermbuddy.fakemac.FakeChatMac
+import dev.bugobliterator.itermbuddy.core.stream.StreamLink
+import dev.bugobliterator.itermbuddy.core.wire.MacMessage
+import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.ui.conversation.ChatDrafts
+import dev.bugobliterator.itermbuddy.ui.conversation.ConversationPresenter
 import dev.bugobliterator.itermbuddy.ui.conversation.ComposerSendStep
 import dev.bugobliterator.itermbuddy.ui.conversation.composerSendStep
 import dev.bugobliterator.itermbuddy.ui.conversation.send
 import java.util.UUID
+import kotlin.time.Duration
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -137,17 +148,29 @@ class ChatSendTest {
     }
 
     @Test
-    fun failedSendIsMarkedNotDeliveredAndKeepsDraft() = runTest {
+    fun failedSendWithdrawsTheEchoAndKeepsDraft() = runTest {
         val rig = openRig()
+        val count = rig.shown().messages.size
         rig.failPublishes = true
         val drafts = ChatDrafts()
         drafts.set(A, draft("Deploy now"))
         val outcome = drafts.send(A) { rig.repository.send(A, it) }
         assertEquals(SendOutcome.NotSendable(NotSendableReason.SEND_FAILED), outcome)
         assertEquals("the draft is kept", "Deploy now", drafts.get(A).serialised())
-        settle()
+        // Nothing reached the Mac: the draft is the only copy (owner decision), no bubble.
         val shown = rig.shown()
-        assertEquals(EchoState.NOT_DELIVERED, shown.echoes[shown.idOf("Deploy now")])
+        assertEquals(count, shown.messages.size)
+        assertTrue(shown.messages.none { (it.body as? MessageBody.PlainText)?.text == "Deploy now" })
+        assertTrue(shown.echoes.isEmpty())
+        settle()
+        assertEquals(count, rig.shown().messages.size)
+
+        // Its own-send mark went with it: the agent's next bump is news.
+        rig.sendSample("delivery-agent-opening.json", A)
+        rig.chats = listOf(A to MAC_TIME + 500)
+        rig.pushList()
+        settle()
+        assertTrue("the failed send did not swallow the agent's bump", rig.repository.rows.value.single().unread)
 
         // Sent: the draft clears.
         rig.failPublishes = false
@@ -155,6 +178,130 @@ class ChatSendTest {
         assertTrue(drafts.get(A).isBlank)
         // Not sent because the draft was empty: nothing changes.
         assertEquals(SendOutcome.Empty, drafts.send(A) { rig.repository.send(A, it) })
+    }
+
+    @Test
+    fun ownSendSetsTheSeenMark() = runTest {
+        val rig = openRig()
+        assertEquals(SendOutcome.Sent, rig.repository.send(A, draft("mine")))
+        settle()
+        // The list's bump for the send is the owner's own, not news.
+        rig.chats = listOf(A to MAC_TIME + 500)
+        rig.pushList()
+        settle()
+        assertFalse(rig.repository.rows.value.single().unread)
+        rig.sendSample("delivery-agent-opening.json", A)
+        rig.chats = listOf(A to MAC_TIME + 900)
+        rig.pushList()
+        settle()
+        assertTrue("a later change is news", rig.repository.rows.value.single().unread)
+    }
+
+    @Test
+    fun consumerKeepsDrainingWhileAPublishWaits() = runTest {
+        val rig = openRig()
+        val gate = CompletableDeferred<Unit>()
+        rig.publishGate = gate
+        val sending = async { rig.repository.send(A, draft("behind the lock")) }
+        runCurrent()
+        assertFalse("the write waits", sending.isCompleted)
+        // Meanwhile the Mac's messages are still consumed and published.
+        rig.sendSample("delivery-agent-opening.json", A)
+        settle()
+        assertTrue(rig.shown().messages.any { it.uniqueID == OPENING_ID })
+        assertEquals(EchoState.SENDING, rig.shown().echoes[rig.shown().idOf("behind the lock")])
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(SendOutcome.Sent, sending.await())
+    }
+
+    @Test
+    fun sendAnswersWhenTheConsumerStops() = runTest {
+        val job = Job()
+        val scope = CoroutineScope(StandardTestDispatcher(testScheduler) + job)
+        val link = object : StreamLink {
+            override suspend fun send(message: PhoneMessage, onLink: Long?) = Unit
+
+            override suspend fun request(message: PhoneMessage, onLink: Long?, timeout: Duration?, onSent: (Long) -> Unit): MacMessage =
+                error("no requests")
+        }
+        val repository = ChatRepository(link, scope, InMemoryChatSeenStore(), nowMillis = { testScheduler.currentTime })
+        // Posted while the consumer is alive, dropped when it stops before running it.
+        val sending = async(start = CoroutineStart.UNDISPATCHED) { repository.send(A, draft("hello")) }
+        job.cancel()
+        runCurrent()
+        assertEquals(SendOutcome.NotSendable(NotSendableReason.NOT_CONNECTED), sending.await())
+        // And after it stopped.
+        assertEquals(SendOutcome.NotSendable(NotSendableReason.NOT_CONNECTED), repository.send(A, draft("again")))
+    }
+
+    @Test
+    fun historyOnThePublishLinkKeepsItSending() = runTest {
+        val rig = openRig()
+        rig.repository.send(A, draft("Still on its way"))
+        runCurrent()
+        val id = rig.shown().idOf("Still on its way")
+        // A resubscribe on the same link, before the echo is due: its history may predate the publish.
+        rig.repository.retry(A)
+        settle()
+        val shown = rig.shown()
+        assertEquals(2, rig.subscribesFor(A))
+        assertEquals("put back at the end", id, shown.messages.last().uniqueID)
+        assertEquals(EchoState.SENDING, shown.echoes[id])
+        advanceTimeBy(10.seconds)
+        runCurrent()
+        assertEquals(EchoState.NOT_DELIVERED, rig.shown().echoes[id])
+        // Once overdue, a history on the same link finds it not delivered at once.
+        rig.repository.send(A, draft("Overdue"))
+        advanceTimeBy(11.seconds)
+        runCurrent()
+        rig.repository.retry(A)
+        settle()
+        assertEquals(EchoState.NOT_DELIVERED, rig.shown().echoes[rig.shown().idOf("Overdue")])
+    }
+
+    @Test
+    fun deliveryAfterDiscardBringsItBack() = runTest {
+        val rig = openRig()
+        rig.repository.send(A, draft("Discarded"))
+        advanceTimeBy(15.seconds)
+        runCurrent()
+        val id = rig.shown().idOf("Discarded")
+        assertEquals(EchoState.NOT_DELIVERED, rig.shown().echoes[id])
+        rig.repository.discardUnsent(A, id)
+        settle()
+        assertTrue(rig.shown().messages.none { it.uniqueID == id })
+        assertNull(rig.shown().echoes[id])
+        // The Mac had it after all: it reappears, delivered, at the end.
+        rig.echo(rig.publishes().single())
+        settle()
+        assertEquals(id, rig.shown().messages.last().uniqueID)
+        assertEquals(EchoState.DELIVERED, rig.shown().echoes[id])
+    }
+
+    @Test
+    fun composerReasonForEveryState() = runTest {
+        assertEquals(NotSendableReason.TOO_LARGE, ConversationState.TooLarge.whyNotSendable)
+        assertEquals(NotSendableReason.LOAD_FAILED, ConversationState.Failed(retryable = true).whyNotSendable)
+        assertEquals(NotSendableReason.AI_UNAVAILABLE, ConversationState.Failed(retryable = false).whyNotSendable)
+        assertEquals(
+            NotSendableReason.TOO_LARGE,
+            ConversationPresenter().present(A, ConversationState.TooLarge, null, null, 12, null, null, emptyMap()).whyNotSendable,
+        )
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME)
+        rig.repository.open(B)
+        settle()
+        assertEquals("not connected", ConversationState.Loading(NotSendableReason.NOT_CONNECTED), rig.repository.conversation(B).value)
+        rig.neverAnswer += B
+        rig.connect()
+        settle()
+        assertEquals("not listed: deleted", ConversationState.Loading(NotSendableReason.DELETED), rig.repository.conversation(B).value)
+        rig.repository.open(A)
+        settle()
+        rig.chatMac.flipAi(false)
+        settle()
+        assertEquals(NotSendableReason.AI_UNAVAILABLE, rig.repository.conversation(A).value.whyNotSendable)
     }
 
     @Test
@@ -190,13 +337,20 @@ class ChatSendTest {
         assertEquals("the retry replaces the bubble", published.last(), shown.idOf("Try this"))
         assertEquals(EchoState.SENDING, shown.echoes[published.last()])
         assertNull(shown.echoes[original])
+        // A retry whose write fails puts the original back, not delivered.
+        rig.failPublishes = true
+        advanceTimeBy(15.seconds)
+        runCurrent()
+        val copy = published.last()
+        assertEquals(SendOutcome.NotSendable(NotSendableReason.SEND_FAILED), rig.repository.retrySend(A, copy))
+        assertEquals(EchoState.NOT_DELIVERED, rig.shown().echoes[copy])
+        assertEquals(copy, rig.shown().idOf("Try this"))
+        rig.failPublishes = false
         // Only a message not delivered can be retried.
-        assertEquals(SendOutcome.NotSendable(NotSendableReason.NOT_RETRYABLE), rig.repository.retrySend(A, published.last()))
+        assertEquals(SendOutcome.NotSendable(NotSendableReason.NOT_RETRYABLE), rig.repository.retrySend(A, original))
         assertEquals(2, rig.publishes().size)
 
         // Delete drops a bubble that was not delivered, and only such a bubble.
-        advanceTimeBy(15.seconds)
-        runCurrent()
         rig.repository.discardUnsent(A, published.last())
         settle()
         assertTrue(rig.shown().messages.none { it.uniqueID == published.last() })
@@ -375,5 +529,6 @@ class ChatSendTest {
         val A = chatId(201)
         val B = chatId(202)
         const val SAMPLE = FakeChatMac.SAMPLE_CHAT
+        const val OPENING_ID = "11111111-2222-4333-8444-000000000501"
     }
 }

@@ -1,6 +1,9 @@
 package dev.bugobliterator.itermbuddy.ui.conversation
 
 import dev.bugobliterator.itermbuddy.core.chat.AgentState
+import dev.bugobliterator.itermbuddy.core.chat.Attachment
+import dev.bugobliterator.itermbuddy.core.chat.AttachmentKind
+import dev.bugobliterator.itermbuddy.core.chat.Subpart
 import dev.bugobliterator.itermbuddy.core.chat.ChatMessage
 import dev.bugobliterator.itermbuddy.core.chat.ClientAction
 import dev.bugobliterator.itermbuddy.core.chat.CommandContent
@@ -286,6 +289,35 @@ class TranscriptItemsTest {
         assertEquals(EchoState.DELIVERED, (delivered.newest as TranscriptItem.Bubble).echo)
         assertEquals(FollowAction.NONE, followAction(wasAtBottom = false, before = sending, after = delivered))
         assertEquals(null, (macTyped.newest as TranscriptItem.Bubble).echo)
+
+        // An old send a history puts back, not delivered, is not a new send: no pin from up the list.
+        val old = message(MessageBody.PlainText("Sent before the drop"), Participant.USER)
+        transcript.applyDelivery(old, chat)
+        val putBack = transcriptTail(
+            cache.items(transcript.messages(), typing = false, resolutions = emptyMap(), echoes = mapOf(old.uniqueID to EchoState.NOT_DELIVERED)),
+        )
+        assertEquals(FollowAction.PILL, followAction(wasAtBottom = false, before = delivered, after = putBack))
+    }
+
+    @Test
+    fun attachmentBytesAreNotComparedToFollow() {
+        val image = Attachment(inline = true, id = "img", kind = AttachmentKind.File("shot.png", "image/png", 4, byteArrayOf(1, 2, 3, 4)))
+        val reply = message(MessageBody.Multipart(listOf(Subpart.Markdown("Here"), Subpart.AttachmentPart(image))))
+        val cache = TranscriptItemCache()
+        val before = transcriptTail(cache.items(conversation() + reply, typing = false, resolutions = emptyMap()))
+        // The same reply from a new history: new byte arrays of the same size.
+        val again = reply.copy(
+            body = MessageBody.Multipart(
+                listOf(Subpart.Markdown("Here"), Subpart.AttachmentPart(image.copy(kind = AttachmentKind.File("shot.png", "image/png", 4, byteArrayOf(1, 2, 3, 4))))),
+            ),
+        )
+        val after = transcriptTail(cache.items(conversation() + again, typing = false, resolutions = emptyMap()))
+        assertEquals(before.newestSignature, after.newestSignature)
+        assertEquals(FollowAction.NONE, followAction(wasAtBottom = false, before = before, after = after))
+        // More text streamed into it is news.
+        val grown = again.copy(body = MessageBody.Multipart(listOf(Subpart.Markdown("Here it is"), Subpart.AttachmentPart(image))))
+        val streamed = transcriptTail(cache.items(conversation() + grown, typing = false, resolutions = emptyMap()))
+        assertEquals(FollowAction.PILL, followAction(wasAtBottom = false, before = after, after = streamed))
     }
 
     @Test

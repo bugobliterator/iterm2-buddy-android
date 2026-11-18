@@ -289,9 +289,9 @@ class MessageBubbleRulesTest {
         assertEquals("Couldn’t refresh. Showing the last loaded messages.", STALE_CONVERSATION_TEXT)
         assertTrue(body.items.last() === TranscriptItem.Typing)
 
-        assertFalse(present(ConversationState.Loading, revision = 4).showsMute)
-        assertEquals("Chat", present(ConversationState.Loading, chat = null).title)
-        assertEquals(ConversationBody.Loading, present(ConversationState.Loading).body)
+        assertFalse(present(ConversationState.Loading(), revision = 4).showsMute)
+        assertEquals("Chat", present(ConversationState.Loading(), chat = null).title)
+        assertEquals(ConversationBody.Loading, present(ConversationState.Loading()).body)
         assertEquals(ConversationBody.TooLarge, present(ConversationState.TooLarge).body)
         assertEquals(ConversationBody.Failed(retryable = true), present(ConversationState.Failed(retryable = true)).body)
         assertEquals("This chat is too large to open on this phone.", TOO_LARGE_CONVERSATION_TEXT)

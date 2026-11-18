@@ -70,6 +70,24 @@ class MentionDraftTest {
     }
 
     @Test
+    fun keyboardRecomposingATokenDeletesIt() {
+        val draft = askDraft()
+        val token = draft.tokens.single()
+        // Gboard backspaces into "Code Review" by re-composing the word: the whole token is
+        // replaced with what is left of its name.
+        for (remnant in listOf("Code Revie", "Revie", "Code", "Code Reviews", "Cxde Review")) {
+            val edited = draft.applyEdit(token.start, token.end, remnant)
+            assertEquals(remnant, "Ask  to review", edited.text)
+            assertTrue(remnant, edited.tokens.isEmpty())
+        }
+        // Typing over a selected token keeps what was typed.
+        assertEquals("Ask x to review", draft.applyEdit(token.start, token.end, "x").text)
+        assertEquals("Ask Deploy shell to review", draft.applyEdit(token.start, token.end, "Deploy shell").text)
+        // Only an edit over exactly the token: text beside it is the owner's.
+        assertEquals("Code Revie to review", draft.applyEdit(0, token.end, "Code Revie").text)
+    }
+
+    @Test
     fun editsBeforeATokenShiftIt() {
         val draft = askDraft()
         val original = draft.tokens.single()

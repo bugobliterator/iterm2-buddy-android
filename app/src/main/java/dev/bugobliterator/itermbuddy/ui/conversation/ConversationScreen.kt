@@ -177,7 +177,7 @@ class ConversationPresenter {
     ): ConversationContent {
         val chat = entry?.chat
         val body = when (state) {
-            ConversationState.Loading -> ConversationBody.Loading
+            is ConversationState.Loading -> ConversationBody.Loading
             ConversationState.TooLarge -> ConversationBody.TooLarge
             is ConversationState.Failed -> ConversationBody.Failed(state.retryable)
             is ConversationState.Shown -> ConversationBody.Shown(
@@ -202,9 +202,7 @@ class ConversationPresenter {
             goToSession = goToSession(chat, tree, live),
             workgroups = workgroups,
             sendable = (state as? ConversationState.Shown)?.sendable == true,
-            whyNotSendable = (state as? ConversationState.Shown)?.whyNotSendable ?: NotSendableReason.NOT_LOADED.takeIf {
-                state !is ConversationState.Shown
-            },
+            whyNotSendable = state.whyNotSendable,
             warnsOfPendingRequest = state is ConversationState.Shown && warnsOfPendingRequest(activity, state.messages),
         )
     }
