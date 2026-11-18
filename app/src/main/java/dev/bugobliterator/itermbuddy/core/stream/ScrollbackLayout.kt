@@ -41,6 +41,13 @@ data class ScrollbackLayout(
     /** The top of a history tile whose first line is [tileFirstAbsLine]. */
     fun tileTopPx(tileFirstAbsLine: Long): Float = (tileFirstAbsLine - topAbsLine) * lineHeightPx
 
+    /**
+     * The bottom of a tile of [lineCount] lines from [tileFirstAbsLine]: the top of the line after
+     * it, computed from the line number (not top + height), so a tile ending at the live top ends
+     * exactly at [liveBandTopPx], with no seam however the line height rounds.
+     */
+    fun tileBottomPx(tileFirstAbsLine: Long, lineCount: Int): Float = tileTopPx(tileFirstAbsLine + lineCount)
+
     /** The absolute line at document y [documentYPx], clamped to the document. */
     fun absLineAt(documentYPx: Float): Long {
         if (lineHeightPx <= 0f) return topAbsLine

@@ -26,8 +26,8 @@ fun isInputTarget(active: ActiveStream?, target: InputTarget): Boolean =
         active.sessionGuid == target.sessionGuid
 
 /**
- * The one ordered path for keys and pastes to the Mac: one unbounded queue, one consumer in
- * [scope], so input is sent in the order [key], [paste] and [typeThenReturn] were called (per
+ * The one ordered path for keys, pastes and scroll-wheel notches to the Mac: one unbounded queue, one consumer in
+ * [scope], so input is sent in the order [key], [paste], [typeThenReturn] and [scrollWheel] were called (per
  * calling thread; the calls are thread-safe).
  *
  * - **Stale input.** At dequeue, an item whose target is no longer current ([isCurrent]: another
@@ -84,6 +84,10 @@ class InputSender(
         override val label: String get() = "typed draft then Return"
     }
 
+    private class WheelItem(override val target: InputTarget, val message: PhoneMessage.ReportScrollWheel) : Item {
+        override val label: String get() = "scroll wheel"
+    }
+
     private val queue = Channel<Item>(Channel.UNLIMITED)
 
     /** Items discarded as stale; touched by the consumer only. */
@@ -103,6 +107,16 @@ class InputSender(
     fun typeThenReturn(target: InputTarget, text: String) =
         enqueue(if (isMultiLineDraft(text)) PasteItem(target, text) else TypeItem(target, text))
 
+    /**
+     * Mouse-wheel notches for the alternate screen (`reportScrollWheel`), in order with keys: [up]
+     * reveals older content, [lines] (at least 1) is the notch count of one drag step, as iOS sends
+     * them (`IOS/Screens/SessionView.swift:2445-2448`, `IOS/App/AppModel.swift:4657-4660`).
+     */
+    fun scrollWheel(target: InputTarget, streamID: Long, up: Boolean, lines: Int) {
+        if (lines <= 0) return
+        enqueue(WheelItem(target, PhoneMessage.ReportScrollWheel(streamID, up, lines)))
+    }
+
     private fun enqueue(item: Item) {
         // Unlimited: this fails only once the consumer's scope has ended.
         if (queue.trySend(item).isFailure) log("input sender stopped; dropped ${item.label}")
@@ -121,6 +135,7 @@ class InputSender(
             is KeyItem -> send(PhoneMessage.SendKey(target.sessionGuid, item.event), target, item.label)
             is PasteItem -> send(PhoneMessage.PasteText(target.sessionGuid, item.text), target, item.label)
             is TypeItem -> typeThenReturn(item)
+            is WheelItem -> send(item.message, target, item.label)
         }
     }
 
@@ -149,6 +164,7 @@ class InputSender(
         is KeyItem -> "key ${traceKeyEvent(item.event)}"
         is PasteItem -> "paste ${codePoints(item.text)}"
         is TypeItem -> "type-then-Return ${codePoints(item.text)}"
+        is WheelItem -> "scroll wheel ${if (item.message.up) "up" else "down"} ${item.message.lines}"
     }
 
     /** Sends [message] on [target]'s link within [sendBound]; false (logged) on a timeout or failure. */

@@ -25,6 +25,27 @@ const val DEFAULT_ENCODED_TILE_BYTES: Long = 32L * 1024 * 1024
 /** Lines per history slot (`IOS/Screens/SessionView.swift:1370`). */
 const val HISTORY_SLOT_LINES = 50
 
+/**
+ * The active stream's history extent as [HistoryTileStore] has applied it, for the scrollback
+ * view's document ([layout]): the origin and line count from the config and every `streamExtent`,
+ * the live top from the newest frame (or the snap). [contentEpoch] changes whenever cached tiles
+ * stop being valid content (a new generation, a clear, a new stream), so the view drops pictures
+ * drawn for an older one; a trim or a selection change keeps it. Holds no terminal content.
+ */
+data class HistoryGeometry(
+    val streamID: Long,
+    val generationId: Long,
+    val firstAbsLine: Long,
+    val totalLines: Int,
+    val rows: Int,
+    val altScreen: Boolean,
+    val liveTop: Long,
+    val contentEpoch: Long,
+) {
+    /** The document for lines [lineHeightPx] tall. */
+    fun layout(lineHeightPx: Float): ScrollbackLayout = ScrollbackLayout(firstAbsLine, liveTop, totalLines, rows, lineHeightPx, altScreen)
+}
+
 /** One history slot as the scrollback view shows it. */
 sealed interface TileState {
     /** Not fetched yet, or being fetched. */
@@ -98,6 +119,11 @@ class HistoryTileStore(
 
     /** Slots by their first absolute line: the wanted ones, and any others still cached. */
     val tiles: StateFlow<Map<Long, TileState>> = tilesFlow.asStateFlow()
+
+    private val geometryFlow = MutableStateFlow<HistoryGeometry?>(null)
+
+    /** The extent the store has applied; null with no stream or before its first config. */
+    val geometry: StateFlow<HistoryGeometry?> = geometryFlow.asStateFlow()
 
     private val selectionFlow = MutableStateFlow<SelectionSpan?>(null)
 
@@ -497,5 +523,8 @@ class HistoryTileStore(
         }
         for ((slot, have) in cached) if (slot !in shown) shown[slot] = TileState.Ready(have.tile)
         tilesFlow.value = shown
+        geometryFlow.value = generation?.let {
+            HistoryGeometry(streamID, it, origin, totalLines, rows, altScreen, liveTop ?: snappedLiveTop(), epoch)
+        }
     }
 }

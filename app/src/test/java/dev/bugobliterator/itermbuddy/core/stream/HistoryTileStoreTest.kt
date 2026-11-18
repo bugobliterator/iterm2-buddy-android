@@ -97,6 +97,35 @@ class HistoryTileStoreTest {
     }
 
     @Test
+    fun geometryFollowsConfigExtentAndLiveTop() = runTest {
+        val rig = Rig(this)
+        assertNull(rig.store.geometry.value)
+        rig.config(first = 1000, total = 1040)
+        val initial = checkNotNull(rig.store.geometry.value)
+        assertEquals(HistoryGeometry(1, 1, 1000, 1040, 40, false, 2000, initial.contentEpoch), initial)
+        assertEquals(1000L, initial.layout(10f).historyLines)
+
+        rig.store.onLiveTop(2010)
+        assertEquals(2010L, rig.store.geometry.value?.liveTop)
+
+        // A trim: same content epoch, so tiles drawn for it stay valid.
+        rig.store.onExtent(1100, 1050)
+        val trimmed = checkNotNull(rig.store.geometry.value)
+        assertEquals(1100L, trimmed.firstAbsLine)
+        assertEquals(1050, trimmed.totalLines)
+        assertEquals(initial.contentEpoch, trimmed.contentEpoch)
+
+        // A clear: a new content epoch and the snapped live top.
+        rig.store.onExtent(1100, 50)
+        val cleared = checkNotNull(rig.store.geometry.value)
+        assertEquals(1110L, cleared.liveTop)
+        assertTrue(cleared.contentEpoch != initial.contentEpoch)
+
+        rig.store.clear()
+        assertNull(rig.store.geometry.value)
+    }
+
+    @Test
     fun wantedRangeRequestsAlignedTiles() = runTest {
         val rig = Rig(this)
         rig.config(first = 1000, total = 1040)

@@ -43,4 +43,22 @@ class ScrollbackLayoutTest {
         assertEquals(1000L, layout.absLineAt(0f))
         assertEquals(2000L, layout.absLineAt(layout.liveBandTopPx))
     }
+
+    @Test
+    fun noGapBetweenTilesAndLiveBand() {
+        // 1280×800 letterboxed in a 1080×2000 view: 675 px tall for 40 rows, 16.875 px a line.
+        val fitHeight = 675f
+        val rows = 40
+        val layout = ScrollbackLayout(firstAbsLine = 1003, liveTop = 1240, totalLines = 277, rows = rows, lineHeightPx = fitHeight / rows, altScreen = false)
+        assertEquals(237L, layout.historyLines)
+        // Slots at 1003 + 50·i; the last one holds the 37 lines up to the live top.
+        val tiles = (1003L until 1240L step 50).map { it to minOf(50L, 1240L - it).toInt() }
+        assertEquals(1203L to 37, tiles.last())
+        var previousBottom = 0f
+        for ((first, lineCount) in tiles) {
+            assertEquals("tiles abut", previousBottom, layout.tileTopPx(first))
+            previousBottom = layout.tileBottomPx(first, lineCount)
+        }
+        assertEquals(layout.liveBandTopPx, previousBottom)
+    }
 }
