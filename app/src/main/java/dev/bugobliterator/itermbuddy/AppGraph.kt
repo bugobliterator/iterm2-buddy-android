@@ -24,6 +24,7 @@ import dev.bugobliterator.itermbuddy.ui.chats.chatListContents
 import dev.bugobliterator.itermbuddy.ui.chats.ChatSearch
 import dev.bugobliterator.itermbuddy.ui.chats.ImageBytesDecoder
 import dev.bugobliterator.itermbuddy.ui.chats.noteSnippetMentions
+import dev.bugobliterator.itermbuddy.ui.conversation.ChatDrafts
 import dev.bugobliterator.itermbuddy.ui.conversation.ConversationContent
 import dev.bugobliterator.itermbuddy.ui.conversation.ConversationMentions
 import dev.bugobliterator.itermbuddy.ui.conversation.conversationContents
@@ -64,7 +65,7 @@ import kotlinx.coroutines.launch
  *   and close the chat in [chats], reopen the mention retry gate, and watch the chat's bound
  *   session with [boundSessions], which probes it again on each chat link up and when the chat's
  *   binding changes in the list; [inlineImages] holds decoded inline images (48 MiB);
- * - [search], [chatSearch], [drafts] and [inputMemories] hold what the owner typed in the UI, app-scoped;
+ * - [search], [chatSearch], [drafts], [chatDrafts] and [inputMemories] hold what the owner typed in the UI, app-scoped;
  * - on every unpair (local, Mac-sent, or a re-scan), [navigator] is reset (closing the stream),
  *   [repository] and [chats] cleared (the chat repository clears its seen marks itself, on its
  *   consumer), the mentions, bound-session verdicts, icons and images forgotten, and the searches,
@@ -85,6 +86,7 @@ class HomeGraph(
     val chatList: StateFlow<ChatListContent>,
     val boundSessions: BoundSessionProbe,
     val inlineImages: ChatIconCache<ImageBitmap>,
+    val chatDrafts: ChatDrafts,
     private val contentContext: CoroutineContext,
 ) {
     /** Opens [chatID]'s conversation (a navigator push): subscribed, gate reopened, bound session probed. */
@@ -177,6 +179,7 @@ fun wireHome(
     }
     val boundSessions = BoundSessionProbe(client, scope, log = chatLog)
     val inlineImages = ChatIconCache(imageDecoder, INLINE_IMAGE_BUDGET_BYTES)
+    val chatDrafts = ChatDrafts()
     // A new link probes the open conversations' bound sessions again; a binding that changes in
     // the list (or first appears there) is probed once.
     scope.launch { chats.linkGeneration.drop(1).collect { boundSessions.linkUp() } }
@@ -194,13 +197,13 @@ fun wireHome(
         // barrier against inputs from earlier links, so no mark still queued lands after the wipe.
         listOf(
             navigator::reset, repository::clear, chats::clear, mentions::clear, boundSessions::clear, chatIcons::clear,
-            inlineImages::clear, search::clear, chatSearch::clear, drafts::clear, inputMemories::clear,
+            inlineImages::clear, search::clear, chatSearch::clear, drafts::clear, chatDrafts::clear, inputMemories::clear,
         ),
         log,
     )
     return HomeGraph(
         client, controller, repository, chats, navigator, search, drafts, inputMemories, mentions, chatSearch, chatIcons, chatList,
-        boundSessions, inlineImages, listContext,
+        boundSessions, inlineImages, chatDrafts, listContext,
     )
 }
 

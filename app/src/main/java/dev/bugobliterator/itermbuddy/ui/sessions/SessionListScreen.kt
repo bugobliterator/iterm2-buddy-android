@@ -77,7 +77,7 @@ fun SessionListScreen(
                     Centered { Text(text, style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center) }
                 } else {
                     LazyColumn(modifier = Modifier.fillMaxSize()) {
-                        itemsIndexed(rows) { _, row -> RowFor(row, onOpen) }
+                        itemsIndexed(rows) { _, row -> SessionRowLine(row, onOpen) }
                     }
                 }
             }
@@ -95,8 +95,9 @@ private fun Centered(content: @Composable () -> Unit) {
     ) { content() }
 }
 
+/** One row of the session tree as the Sessions list shows it; a session row calls [onOpen] when tapped. */
 @Composable
-private fun RowFor(row: SessionRow, onOpen: (SessionSummary, String) -> Unit) {
+internal fun SessionRowLine(row: SessionRow, onOpen: (SessionSummary, String) -> Unit) {
     when (row) {
         is SessionRow.Window -> Text(
             text = row.title.uppercase(Locale.ROOT),
