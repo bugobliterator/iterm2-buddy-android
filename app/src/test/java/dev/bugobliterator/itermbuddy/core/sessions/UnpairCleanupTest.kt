@@ -121,6 +121,7 @@ class UnpairCleanupTest {
         assertTrue(conversation.value is ConversationState.Shown)
         assertNotNull(rig.chatSeen.seen(chatID))
         assertEquals("open but never on screen", AgentState.DONE, rig.chats.activity.value[chatID])
+        rig.graph.chatSearch.set("widget")
 
         if (fromMac) {
             rig.mac.sendUnpaired()
@@ -136,6 +137,9 @@ class UnpairCleanupTest {
         assertEquals(ConversationState.Loading, conversation.value)
         assertNull(rig.chats.macRevision.value)
         assertNull("the seen marks belong to the old pairing", rig.chatSeen.seen(chatID))
+        assertEquals("", rig.graph.chatSearch.query.value)
+        assertEquals(emptyMap<String, Any>(), rig.graph.mentions.resolutions.value)
+        assertEquals(0L, rig.graph.chatIcons.heldBytes)
     }
 
     @Test

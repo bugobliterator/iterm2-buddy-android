@@ -19,6 +19,7 @@ import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
 import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.core.stream.fitToPhone
 import dev.bugobliterator.itermbuddy.store.KeystorePairingStore
+import dev.bugobliterator.itermbuddy.ui.chats.BitmapImageDecoder
 import dev.bugobliterator.itermbuddy.ui.live.ComposerDrafts
 import dev.bugobliterator.itermbuddy.ui.live.LiveInputMemories
 import dev.bugobliterator.itermbuddy.video.HevcVideoOutput
@@ -192,7 +193,9 @@ class CompanionApp : Application() {
                     log = { Log.i(CHAT_TAG, it) },
                 )
             },
+            iconDecoder = BitmapImageDecoder(),
             log = { Log.w(TAG, it) },
+            chatLog = { Log.i(CHAT_TAG, it) },
         )
         input = InputSender(
             link = home.client,
