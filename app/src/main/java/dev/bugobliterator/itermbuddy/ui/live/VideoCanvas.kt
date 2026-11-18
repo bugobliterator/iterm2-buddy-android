@@ -117,8 +117,9 @@ class LiveVideoSource(val output: HevcVideoOutput, val state: StateFlow<LiveView
  * [documentFit]: [drawHistory] paints the history above the band (given the band's left, top and
  * width as the surface is placed, so the last history line meets the band's first), and zoom,
  * pan, the clamp and the keyboard lift all treat the document as the content. The kept zoom
- * remembers the history height it was made for and is shown through [followDocument], so growth
- * keeps the live band pinned only when it was at the bottom. [onDocumentView] hears what is shown
+ * remembers the history height it was made for and is rebased on every change of it
+ * ([rebaseKept]), so growth keeps the live band pinned only when it was at the bottom at that
+ * change. [onDocumentView] hears what is shown
  * ([documentView]) on every change, outside composition; each change of [jumpToLive] scrolls the
  * band back to the bottom ([scrollToLive]).
  *
@@ -179,6 +180,11 @@ fun VideoCanvas(
             documentView(shownZoom(kept, g, inset), g.fit, g.history, g.viewH, inset)
         }.collect { currentOnDocumentView(it) }
     }
+    LaunchedEffect(zoomKey) {
+        // Rebase the kept zoom on every change of the history height, so whether the band was at
+        // the bottom is judged at each change, not only at the last gesture (see rebaseKept).
+        snapshotFlow { geometry.history }.collect { kept = rebaseKept(kept, geometry) }
+    }
     LaunchedEffect(zoomKey, jumpToLive) {
         if (jumpToLive == 0) return@LaunchedEffect
         val g = geometry
@@ -206,19 +212,10 @@ fun VideoCanvas(
                     },
                     onEnd = { currentWheel?.reset() },
                 ) { centroid, pan, gestureZoom, pointers ->
-                    val g = geometry
-                    val inset = currentInset()
-                    val shown = shownZoom(kept, g, inset)
-                    if (pointers > 1) multiTouch = true
-                    val accumulator = currentWheel
-                    if (accumulator != null && !multiTouch) {
-                        val drag = wheelDrag(shown, pan.x, pan.y, g.docFit, g.viewW, g.viewH, inset, g.top, g.left, g.right)
-                        kept = KeptZoom(drag.state, inset, g.history)
-                        val notches = accumulator.drag(drag.pastEdgeY)
-                        if (notches.isNotEmpty()) currentOnWheel(notches.first(), notches.size)
-                    } else {
-                        kept = KeptZoom(applyGesture(shown, centroid.x, centroid.y, gestureZoom, pan.x, pan.y, g.docFit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right), inset, g.history)
-                    }
+                    val step = gestureStep(kept, geometry, currentInset(), centroid.x, centroid.y, pan.x, pan.y, gestureZoom, pointers, multiTouch, currentWheel)
+                    multiTouch = step.multiTouch
+                    kept = step.kept
+                    if (step.notches.isNotEmpty()) currentOnWheel(step.notches.first(), step.notches.size)
                 }
             }
             .pointerInput(zoomKey) {
@@ -294,43 +291,6 @@ private fun VideoSurface(output: HevcVideoOutput, modifier: Modifier) {
             if (attached.getAndSet(null) != null) output.detachSurface()
         }
     }
-}
-
-/** What the gesture detectors read at each event: the current fit, view size, maximum scale and history height. */
-private class GestureGeometry(
-    val fit: FitRect,
-    val viewW: Float,
-    val viewH: Float,
-    val max: Float,
-    val top: Float,
-    val restBottom: Float,
-    val left: Float,
-    val right: Float,
-    val history: Float,
-) {
-    /** The content zoom and pan work on: the band with the history above it ([documentFit]). */
-    val docFit: FitRect = documentFit(fit, history)
-}
-
-/**
- * A zoom as the owner left it, with the bottom inset (px) it was made for (null: the resting one)
- * and the history height (px) it was made for (null: whatever it is now).
- */
-internal data class KeptZoom(val state: ZoomState, val inset: Float?, val history: Float? = null)
-
-/**
- * What is shown: [kept] moved with the document from its history height to the current one
- * ([followDocument]), then lifted from its inset to [inset] ([liftForKeyboard]), clamped for [geometry].
- */
-private fun shownZoom(kept: KeptZoom, geometry: GestureGeometry, inset: Float): ZoomState {
-    val keptInset = kept.inset ?: geometry.restBottom
-    val keptHistory = kept.history ?: geometry.history
-    val followed = if (keptHistory == geometry.history) {
-        kept.state
-    } else {
-        followDocument(kept.state, geometry.fit, geometry.viewW, geometry.viewH, keptHistory, geometry.history, keptInset, geometry.top, geometry.left, geometry.right)
-    }
-    return liftForKeyboard(followed, geometry.docFit, geometry.viewW, geometry.viewH, keptInset, inset, geometry.top, geometry.left, geometry.right)
 }
 
 /**

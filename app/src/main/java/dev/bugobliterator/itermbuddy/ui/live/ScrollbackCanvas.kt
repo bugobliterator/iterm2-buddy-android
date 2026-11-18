@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -26,6 +27,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.bugobliterator.itermbuddy.core.stream.DecodedTileCache
 import dev.bugobliterator.itermbuddy.core.stream.HISTORY_SLOT_LINES
@@ -84,10 +87,12 @@ class ScrollbackControl {
  * **Tiles.** What is shown ([DocumentView]) gives the wanted lines ([wantedLines]: the visible ones
  * and one viewport each way), passed to [HistoryTileStore.want] and, with every change of the
  * tiles or the geometry, to a [ScrollbackTiles] that decodes PNGs on a background dispatcher, at
- * most two at once, through a [DecodedTileCache] (96 MiB, displayed bitmaps included). Every time
- * the history is drawn, the drawn tiles are reported ([ScrollbackTiles.displayed]); when no history
- * is drawn (the alternate screen, a cleared or ended stream) nothing is reported displayed, and
- * leaving the view closes the holder, dropping every bitmap.
+ * most two at once, through a [DecodedTileCache] (96 MiB, displayed bitmaps included). Only the
+ * slots on screen ([visibleSlots], derived so the draw reruns only when that set changes) are
+ * drawn, and every time the history is drawn exactly the pictures drawn are reported
+ * ([ScrollbackTiles.displayed]), so pictures off screen can be evicted for room. When no history
+ * is drawn (the alternate screen, a cleared or ended stream) nothing is reported displayed; when
+ * the app stops the holder is reset, and leaving the view closes it, dropping every bitmap.
  *
  * **↓ Live.** [control] offers it while history shows and the band's bottom is out of view;
  * growth keeps the band pinned only while it is at the bottom ([followDocument]).
@@ -139,12 +144,28 @@ fun ScrollbackCanvas(
         ScrollbackTiles(DecodedTileCache<ImageBitmap>(), scope, Dispatchers.Default, ::decodedPngBytes, { tile -> decodePng(tile) })
     }
     DisposableEffect(holder) { onDispose { holder.close() } }
-    val drawn = holder.drawn.collectAsStateWithLifecycle()
-    // What is shown, written per frame while scrolling and read only by the flow below.
+    // In the background no bitmap is kept; back in front, what is wanted decodes again.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { holder.reset() }
+    LifecycleEventEffect(Lifecycle.Event.ON_START) { holder.refresh() }
+    // Read in the draw only to redraw on a change; the draw takes the holder's current list.
+    val drawnSignal = holder.drawn.collectAsStateWithLifecycle()
+    // What is shown, written per frame while scrolling and read only by the flow and the derived slots below.
     var view by remember { mutableStateOf<DocumentView?>(null) }
     val currentLayout by rememberUpdatedState(layout)
     val currentTiles by rememberUpdatedState(tiles)
     val currentGeometry by rememberUpdatedState(geometry)
+    // The slots on screen: the draw is invalidated only when this set changes, not per frame.
+    val visibleSlots by remember {
+        derivedStateOf {
+            val shown = currentLayout
+            val now = view
+            if (shown == null || now == null || shown.historyLines == 0L) {
+                emptySet()
+            } else {
+                visibleSlots(shown, now, currentTiles.keys)
+            }
+        }
+    }
     LaunchedEffect(holder) {
         snapshotFlow { currentLayout?.takeIf { it.historyLines > 0 }?.let { shown -> view?.let { wantedLines(shown, it) } } }
             .combine(snapshotFlow { currentTiles to currentGeometry }) { wanted, (tiles, geometry) -> Triple(wanted, tiles, geometry) }
@@ -176,10 +197,13 @@ fun ScrollbackCanvas(
         rightInset = rightInset,
         historyHeightPx = historyPx,
         drawHistory = { bandLeft, bandTop, bandWidth ->
+            drawnSignal.value
             val shown = currentLayout
-            val pictures = drawn.value
-            if (shown != null) drawHistory(shown, currentTiles, pictures, bandLeft, bandTop, bandWidth)
-            holder.displayed(if (shown == null) emptyList() else pictures.map { it.tile })
+            val slots = visibleSlots
+            // Only what is on screen is drawn and reported, so the rest can be evicted for room.
+            val pictures = if (shown == null) emptyList() else holder.drawn.value.filter { it.slot in slots }
+            if (shown != null) drawHistory(shown, slots, currentTiles, pictures, bandLeft, bandTop, bandWidth)
+            holder.displayed(pictures.map { it.tile })
         },
         onDocumentView = {
             view = it
@@ -193,12 +217,15 @@ fun ScrollbackCanvas(
 }
 
 /**
- * The history above a band at ([bandLeft], [bandTop]), [bandWidth] wide: placeholders for slots
- * with no picture, then the pictures, each at its own lines. Rows are rounded from line numbers, so
- * neighbouring tiles share an edge and the last meets the band.
+ * The history above a band at ([bandLeft], [bandTop]), [bandWidth] wide, for the visible [slots]:
+ * first each slot's expected span as a placeholder (dark; reddish when it failed), so a refetching
+ * tail or a tile not decoded yet never shows a hole, then the [pictures] over it, each at its own
+ * lines. Rows are rounded from line numbers, so neighbouring tiles share an edge and the last
+ * meets the band.
  */
 private fun DrawScope.drawHistory(
     layout: ScrollbackLayout,
+    slots: Set<Long>,
     tiles: Map<Long, TileState>,
     pictures: List<DrawnTile<ImageBitmap>>,
     bandLeft: Float,
@@ -207,15 +234,13 @@ private fun DrawScope.drawHistory(
 ) {
     val top = bandTop - layout.liveBandTopPx
     val historyEnd = layout.firstAbsLine + layout.historyLines
-    val withPicture = pictures.mapTo(HashSet()) { it.slot }
-    for ((slot, state) in tiles) {
-        if (state is TileState.Ready || slot in withPicture) continue
+    for (slot in slots) {
         val first = maxOf(slot, layout.firstAbsLine)
         val end = minOf(slot + HISTORY_SLOT_LINES, historyEnd)
         if (end <= first) continue
         val y = top + layout.tileTopPx(first)
         drawRect(
-            color = if (state == TileState.Failed) FAILED_TILE else LOADING_TILE,
+            color = if (tiles[slot] == TileState.Failed) FAILED_TILE else LOADING_TILE,
             topLeft = Offset(bandLeft, y),
             size = Size(bandWidth, top + layout.tileTopPx(end) - y),
         )
