@@ -174,7 +174,7 @@ class ConversationPresenter {
             ConversationState.TooLarge -> ConversationBody.TooLarge
             is ConversationState.Failed -> ConversationBody.Failed(state.retryable)
             is ConversationState.Shown -> ConversationBody.Shown(
-                cache.items(state.messages, showsTyping(activity), resolutions),
+                cache.items(state.messages, showsTyping(activity), resolutions, state.echoes),
                 listOfNotNull(
                     STALE_CONVERSATION_TEXT.takeIf { state.stale },
                     ChatRepository.DELETED_CHAT_NOTICE.takeIf { state.deleted },

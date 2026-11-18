@@ -41,6 +41,15 @@ sealed interface ChatListState {
     data object AiUnavailable : ChatListState
 }
 
+/**
+ * Where a message the owner sent from this phone stands. [SENDING]: published, its echo not back
+ * yet. [NOT_DELIVERED]: the send failed, no echo came within [ChatTimeouts.echo], or a history
+ * that replaced the transcript lacked it; shown with Retry and Delete (an Android addition: iOS
+ * leaves a silent phantom, `AM:3120-3135`). [DELIVERED]: the Mac's `delivery` with its
+ * `uniqueID` came back (`HB:1812-1823`), or a history held it.
+ */
+enum class EchoState { SENDING, NOT_DELIVERED, DELIVERED }
+
 /** One conversation as the conversation screen shows it. */
 sealed interface ConversationState {
     data object Loading : ConversationState
@@ -53,8 +62,11 @@ sealed interface ConversationState {
      * [ChatRepository.DELETED_CHAT_NOTICE]. [sendable]: connected, AI available, not deleted, and
      * a history for this chat received on the current link.
      *
-     * Equality compares [version] and the flags only, never the messages: the version names the
-     * snapshot, so a republish of the same snapshot is equal at no cost.
+     * [echoes]: the messages in [messages] sent from this phone, by `uniqueID`, with where each
+     * stands.
+     *
+     * Equality compares [version], the flags and [echoes] only, never the messages: the version
+     * names the snapshot, so a republish of the same snapshot is equal at no cost.
      */
     class Shown(
         val messages: List<ChatMessage>,
@@ -62,15 +74,17 @@ sealed interface ConversationState {
         val stale: Boolean,
         val deleted: Boolean,
         val sendable: Boolean,
+        val echoes: Map<String, EchoState> = emptyMap(),
     ) : ConversationState {
         override fun equals(other: Any?): Boolean =
             other is Shown && other.version == version && other.stale == stale && other.deleted == deleted &&
-                other.sendable == sendable
+                other.sendable == sendable && other.echoes == echoes
 
-        override fun hashCode(): Int = listOf(version, stale, deleted, sendable).hashCode()
+        override fun hashCode(): Int = listOf(version, stale, deleted, sendable, echoes).hashCode()
 
         override fun toString(): String =
-            "Shown(messages=${messages.size}, version=$version, stale=$stale, deleted=$deleted, sendable=$sendable)"
+            "Shown(messages=${messages.size}, version=$version, stale=$stale, deleted=$deleted, sendable=$sendable, " +
+                "echoes=${echoes.size})"
     }
 
     /** The history could not be loaded; [retryable] offers Try again (false while AI is off). */

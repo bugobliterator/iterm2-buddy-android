@@ -16,6 +16,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
@@ -67,8 +69,8 @@ fun chatIconRef(bytes: ByteBuffer?): ChatIconRef? {
  *
  * A decode belongs to the cache, not to its caller: at most [maxConcurrentDecodes] run at once
  * (each holds a whole image's bytes), callers asking for the same key share one decode, and a
- * decode whose caller left (a row scrolled away) still completes and is kept. [clear] drops what
- * the decodes still out bring back. Thread-safe. Nothing is logged; [toString] shows counts only.
+ * decode whose caller left (a row scrolled away) still completes and is kept. [clear] cancels the
+ * decodes still out and drops what any of them brings back; a [load] waiting across it gets null. Thread-safe. Nothing is logged; [toString] shows counts only.
  */
 class ChatIconCache<T : Any>(
     private val decoder: ImageBytesDecoder<T>,
@@ -102,12 +104,24 @@ class ChatIconCache<T : Any>(
 
     /** The icon for [ref], decoding it off the caller's thread when needed; null for the default glyph. */
     suspend fun load(ref: ChatIconRef): T? {
+        val startedIn: Long
         val decode = synchronized(lock) {
             images[ref.key]?.let { return it.image }
             if (ref.key in unusable) return null
+            startedIn = generation
             inFlight[ref.key] ?: startDecode(ref)
         }
-        val decoded = decode.await()
+        val decoded = try {
+            decode.await()
+        } catch (e: CancellationException) {
+            // [clear] cancelled the decode (an unpair): nothing for this caller. Its own
+            // cancellation is passed on.
+            currentCoroutineContext().ensureActive()
+            if (decode.isCancelled) return null
+            throw e
+        }
+        // Cleared while this caller waited: the image belongs to the previous pairing.
+        if (synchronized(lock) { generation != startedIn }) return null
         return if (decoded == null || decoded.byteCount > maxBytes) null else decoded.image
     }
 
@@ -155,9 +169,10 @@ class ChatIconCache<T : Any>(
         }
     }
 
-    /** Drops every icon (unpair). */
+    /** Drops every icon (unpair) and cancels the decodes still out: a caller waiting on one gets null. */
     fun clear() = synchronized(lock) {
         generation++
+        inFlight.values.forEach { it.cancel() }
         inFlight.clear()
         images.clear()
         unusable.clear()

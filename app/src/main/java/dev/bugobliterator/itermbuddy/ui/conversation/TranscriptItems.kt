@@ -2,6 +2,7 @@ package dev.bugobliterator.itermbuddy.ui.conversation
 
 import dev.bugobliterator.itermbuddy.core.chat.AgentState
 import dev.bugobliterator.itermbuddy.core.chat.ChatMessage
+import dev.bugobliterator.itermbuddy.core.chat.EchoState
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolution
 import dev.bugobliterator.itermbuddy.core.chat.MessageBody
 import dev.bugobliterator.itermbuddy.core.chat.Participant
@@ -19,9 +20,18 @@ const val TYPING_ITEM_KEY = "typing-indicator"
 sealed interface TranscriptItem {
     val key: String
 
-    /** A message bubble: the owner's ([fromUser]) right, the agent's left. */
-    class Bubble(val message: ChatMessage, val fromUser: Boolean, val blocks: List<BubbleBlock>, override val key: String) : TranscriptItem {
-        override fun toString(): String = "Bubble(key=$key, fromUser=$fromUser, blocks=${blocks.size})"
+    /**
+     * A message bubble: the owner's ([fromUser]) right, the agent's left. [echo] is set only for a
+     * message sent from this phone: where it stands.
+     */
+    class Bubble(
+        val message: ChatMessage,
+        val fromUser: Boolean,
+        val blocks: List<BubbleBlock>,
+        override val key: String,
+        val echo: EchoState? = null,
+    ) : TranscriptItem {
+        override fun toString(): String = "Bubble(key=$key, fromUser=$fromUser, blocks=${blocks.size}, echo=$echo)"
     }
 
     /** A centred notice: a client-local notice or a watcher event (`IOS/Views/MessageBubbleView.swift:19-26`). */
@@ -52,7 +62,8 @@ fun transcriptItems(
     messages: List<ChatMessage>,
     typing: Boolean,
     resolutions: Map<String, MentionResolution> = emptyMap(),
-): List<TranscriptItem> = TranscriptItemCache().items(messages, typing, resolutions)
+    echoes: Map<String, EchoState> = emptyMap(),
+): List<TranscriptItem> = TranscriptItemCache().items(messages, typing, resolutions, echoes)
 
 /**
  * Builds the conversation's rows, reusing the previous ones: a message that is the same instance
@@ -63,13 +74,23 @@ fun transcriptItems(
  * rest bubbles. Single-threaded: one cache per collector, off the main thread.
  */
 class TranscriptItemCache {
-    private class Built(val message: ChatMessage, val item: TranscriptItem, val mentions: Set<String>)
+    private class Built(val message: ChatMessage, val item: TranscriptItem, val mentions: Set<String>, val echo: EchoState?)
 
     private var previous: Map<String, Built> = emptyMap()
     private var previousResolutions: Map<String, MentionResolution> = emptyMap()
     private var built: MutableList<ChatMessage> = ArrayList()
 
-    fun items(messages: List<ChatMessage>, typing: Boolean, resolutions: Map<String, MentionResolution>): List<TranscriptItem> {
+    /**
+     * The rows for [messages]; [echoes] (`ConversationState.Shown.echoes`) marks the messages sent
+     * from this phone. A row is reused only when its message, the resolutions of its mentions and
+     * its echo state are unchanged.
+     */
+    fun items(
+        messages: List<ChatMessage>,
+        typing: Boolean,
+        resolutions: Map<String, MentionResolution>,
+        echoes: Map<String, EchoState> = emptyMap(),
+    ): List<TranscriptItem> {
         val next = HashMap<String, Built>(messages.size * 2)
         val items = ArrayList<TranscriptItem>(messages.size + 1)
         val seen = HashMap<String, Int>()
@@ -77,10 +98,12 @@ class TranscriptItemCache {
             if (message.hidden) continue
             val repeats = seen.merge(message.uniqueID, 1, Int::plus)!!
             val key = if (repeats == 1) message.uniqueID else "${message.uniqueID}#$repeats"
+            // A duplicate ID is a Mac row of its own, never this phone's echo.
+            val echo = if (repeats == 1) echoes[message.uniqueID] else null
             val prior = previous[key]
-            val reusable = prior != null && prior.message === message &&
+            val reusable = prior != null && prior.message === message && prior.echo == echo &&
                 (resolutions === previousResolutions || prior.mentions.all { resolutions[it] == previousResolutions[it] })
-            val entry = if (reusable) prior else build(message, key, resolutions).also { if (prior?.message !== message) built += message }
+            val entry = if (reusable) prior else build(message, key, resolutions, echo).also { if (prior?.message !== message) built += message }
             next[key] = entry
             items += entry.item
         }
@@ -97,7 +120,7 @@ class TranscriptItemCache {
         return taken
     }
 
-    private fun build(message: ChatMessage, key: String, resolutions: Map<String, MentionResolution>): Built {
+    private fun build(message: ChatMessage, key: String, resolutions: Map<String, MentionResolution>, echo: EchoState?): Built {
         val asked = HashSet<String>()
         val resolve: (String) -> MentionResolution? = { identifier ->
             asked += identifier
@@ -107,9 +130,9 @@ class TranscriptItemCache {
             message.isInteractiveRequest -> TranscriptItem.RequestCard(message, requestCard(message, resolve), key)
             message.body is MessageBody.ClientNotice || message.body is MessageBody.WatcherEvent ->
                 TranscriptItem.Notice(message, bubbleBlocks(message, resolve), key)
-            else -> TranscriptItem.Bubble(message, message.author == Participant.USER, bubbleBlocks(message, resolve), key)
+            else -> TranscriptItem.Bubble(message, message.author == Participant.USER, bubbleBlocks(message, resolve), key, echo)
         }
-        return Built(message, item, asked)
+        return Built(message, item, asked, echo)
     }
 
     override fun toString(): String = "TranscriptItemCache(items=${previous.size})"
@@ -117,8 +140,7 @@ class TranscriptItemCache {
 
 /**
  * The end of the transcript that scrolling follows: [newest] is the newest row other than the
- * typing dots (compared by identity, so a streamed delta, a new instance, is a change), and
- * whether the dots show.
+ * typing dots, and whether the dots show.
  */
 class TranscriptTail(val newest: TranscriptItem?, val typing: Boolean) {
     override fun toString(): String = "TranscriptTail(newest=${newest?.key}, typing=$typing)"
@@ -140,20 +162,33 @@ enum class FollowAction {
     PILL,
 }
 
+/** The message a row shows, or null for the typing dots. */
+private val TranscriptItem.shownMessage: ChatMessage?
+    get() = when (this) {
+        is TranscriptItem.Bubble -> message
+        is TranscriptItem.Notice -> message
+        is TranscriptItem.RequestCard -> message
+        TranscriptItem.Typing -> null
+    }
+
 /**
  * How the transcript follows a change from [before] to [after], given whether it was at the
- * bottom before the change. At the bottom, any change at the end (a new row, a streamed delta,
- * the dots coming or going) keeps the newest row in view; the owner's own new message (an echo)
- * scrolls to it from anywhere, as sending does in a chat; scrolled up, a new or grown newest row
- * shows the pill instead, and the dots alone do nothing. The first rows ([before] null) need
- * nothing: the list starts at the bottom.
+ * bottom before the change. The newest row changed when its key did or its message did (by
+ * value: a history that replaced the transcript with the same messages, or a row rebuilt for a
+ * mention's resolution, is not news; a streamed delta is). At the bottom, any change at the end
+ * (a new row, a streamed delta, the dots coming or going) keeps the newest row in view; a new
+ * message sent from this phone (its echo) scrolls to it from anywhere, as sending does in a chat,
+ * but the owner's words typed on the Mac do not; scrolled up, a new or grown newest row shows the
+ * pill instead, and the dots alone do nothing. The first rows ([before] null) need nothing: the
+ * list starts at the bottom.
  */
 fun followAction(wasAtBottom: Boolean, before: TranscriptTail?, after: TranscriptTail): FollowAction {
     if (before == null) return FollowAction.NONE
-    val newestChanged = before.newest !== after.newest
-    if (!newestChanged && before.typing == after.typing) return FollowAction.NONE
     val newest = after.newest
-    val ownNewMessage = newestChanged && newest is TranscriptItem.Bubble && newest.fromUser && newest.key != before.newest?.key
+    val newKey = before.newest?.key != newest?.key
+    val newestChanged = newKey || before.newest?.shownMessage != newest?.shownMessage
+    if (!newestChanged && before.typing == after.typing) return FollowAction.NONE
+    val ownNewMessage = newKey && newest is TranscriptItem.Bubble && newest.echo != null
     return when {
         wasAtBottom || ownNewMessage -> FollowAction.PIN
         newestChanged -> FollowAction.PILL
