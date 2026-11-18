@@ -421,11 +421,4 @@ class StreamMessagesTest {
             MacMessage.Unsupported("messagesRemoved", Json.parseToJsonElement("""{"messagesRemoved":{"a":"$secret","b":1}}""").jsonObject).toString(),
         )
     }
-
-    @Test
-    fun advertisedRevisionIsThirteen() {
-        val hello = PhoneMessage.Hello().payload().getValue("hello").jsonObject
-        assertEquals("13", hello.getValue("revision").jsonPrimitive.content)
-        assertEquals("11", hello.getValue("minimumPeer").jsonPrimitive.content)
-    }
 }

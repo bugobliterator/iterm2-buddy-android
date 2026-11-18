@@ -10,7 +10,10 @@ import dev.bugobliterator.itermbuddy.core.relay.JoinSigner
 import dev.bugobliterator.itermbuddy.core.relay.RegisterResult
 import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
 import dev.bugobliterator.itermbuddy.core.relay.UnreachableKind
+import dev.bugobliterator.itermbuddy.core.stream.StreamInput
+import dev.bugobliterator.itermbuddy.core.stream.StreamSink
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
+import dev.bugobliterator.itermbuddy.core.wire.MacStatus
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.core.wire.ProtocolRevision
 import dev.bugobliterator.itermbuddy.core.wire.decodeEnvelope
@@ -25,6 +28,7 @@ import dev.bugobliterator.itermbuddy.store.advancePairing
 import dev.bugobliterator.itermbuddy.store.beginFreshPairing
 import dev.bugobliterator.itermbuddy.ui.AppScreen
 import dev.bugobliterator.itermbuddy.ui.appScreenFor
+import dev.bugobliterator.itermbuddy.ui.home.macAlertBanner
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
@@ -81,6 +85,7 @@ class CompanionClientTest {
         val store: PairingStore = InMemoryPairingStore(),
         timeouts: ClientTimeouts = ClientTimeouts(),
         storeContext: CoroutineContext = EmptyCoroutineContext,
+        sink: StreamSink? = null,
     ) {
         val logs = CopyOnWriteArrayList<String>()
         val history = CopyOnWriteArrayList<Pair<Long, ClientState>>()
@@ -95,6 +100,7 @@ class CompanionClientTest {
             test.testScheduler.timeSource,
             storeContext,
             { logs += it },
+            sink,
         )
         val mac = FakeMac(relay, code, macKeys.first, test.backgroundScope)
 
@@ -1241,6 +1247,118 @@ class CompanionClientTest {
         h.mac.sendRaw("""{"payload":{"futureThing":{"x":1}}}""".toByteArray())
         runCurrent()
         assertEquals(listOf("futureThing"), received.map { (it as MacMessage.Unsupported).case })
+    }
+
+    // Revision 14 and 15 extras (the Mac's status, browser events)
+
+    /** The `macStatus` of `hello-mac-with-alerts.json`: one app-modal alert with the main thread blocked. */
+    private fun alertsStatus(): JsonObject =
+        FakeMac.fixtureJson("hello-mac-with-alerts.json").getValue("payload").jsonObject
+            .getValue("hello").jsonObject.getValue("macStatus").jsonObject
+
+    @Test
+    fun alertPresentAtConnectShowsStatus() = runTest {
+        val h = Harness(this)
+        val record = h.stored(PairingStage.REGISTERED)
+        h.macPinned(record)
+        // The Mac sends only changes after the hello reply (CompanionLink.swift:518-524, 559-564),
+        // so an alert already up at connect is known from the hello alone.
+        h.mac.helloMacStatus = alertsStatus()
+        // The status each time the state changes, read in the same instant.
+        val atState = CopyOnWriteArrayList<Pair<ClientState, MacStatus?>>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            h.client.state.collect { atState += it to h.client.macStatus.value }
+        }
+        assertNull(h.client.macStatus.value)
+        h.mac.start()
+        h.client.start()
+        h.awaitConnected()
+
+        val blocked = MacStatus(mainBlocked = true, alertCount = 1)
+        assertEquals("seeded before Connected", blocked, atState.last { it.first is ClientState.Connected }.second)
+        assertEquals(blocked, h.client.macStatus.value)
+        assertEquals("iTerm2 is showing an alert on the Mac.", macAlertBanner(h.client.macStatus.value))
+
+        // The link drops: the status went with it, before the state left Connected.
+        val connectedAt = atState.size
+        h.mac.helloMacStatus = null
+        h.mac.dropSocket()
+        h.await { it !is ClientState.Connected }
+        assertNull(h.client.macStatus.value)
+        assertNull(macAlertBanner(h.client.macStatus.value))
+        assertTrue("${atState.drop(connectedAt)}", atState.drop(connectedAt).all { it.second == null })
+
+        // A reconnect to a Mac with nothing showing (and no status in its hello) stays clear.
+        h.awaitConnected(2)
+        assertNull(h.client.macStatus.value)
+    }
+
+    @Test
+    fun revisionFifteenExtrasDoNotDisturbSession() = runTest {
+        val sink = RecordingStreamSink()
+        val h = Harness(this, sink = sink)
+        val record = h.stored(PairingStage.REGISTERED)
+        h.macPinned(record)
+        h.mac.start()
+        h.client.start()
+        h.awaitConnected()
+        val events = CopyOnWriteArrayList<MacMessage>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { h.client.events.collect { events += it } }
+
+        val started = h.client.request(PhoneMessage.StartSessionStream("ptys_7K2M9Q4R8T1VH")) as MacMessage.StreamStarted
+        h.mac.sendMedia(byteArrayOf(1))
+        h.mac.sendSample("messages/browser-sessions/mac-status-changed-blocked.json", null)
+        h.mac.sendSample("messages/browser-sessions/modal-alert-answer-rejected.json", null)
+        h.mac.sendSample("messages/browser-sessions/browser-editing-changed.json", null)
+        h.mac.sendSample("messages/browser-sessions/browser-navigation-changed.json", null)
+        h.mac.sendMedia(byteArrayOf(2))
+        runCurrent()
+
+        // The stream goes on: every frame and stream message reached the sink, in wire order.
+        val kinds = sink.inputs.map {
+            when (it) {
+                is StreamInput.Control -> it.message.javaClass.simpleName
+                is StreamInput.Media -> "Media:${it.copyBytes().single()}"
+                else -> it.javaClass.simpleName
+            }
+        }
+        assertEquals(
+            listOf(
+                "LinkUp", "StreamStarted", "StreamConfigMessage", "Media:1",
+                "BrowserEditingChanged", "BrowserNavigationChanged", "Media:2",
+            ),
+            kinds,
+        )
+        assertEquals(1L, started.streamID)
+        // The status is an event and the banner's state; the rejection is unsupported and dropped.
+        assertEquals(
+            listOf<MacMessage>(MacMessage.MacStatusChanged(MacStatus(mainBlocked = true, alertCount = 1))),
+            events.filterIsInstance<MacMessage.MacStatusChanged>(),
+        )
+        assertEquals(listOf("modalAlertAnswerRejected"), events.filterIsInstance<MacMessage.Unsupported>().map { it.case })
+        assertEquals(2, events.size)
+        assertEquals(MacStatus(mainBlocked = true, alertCount = 1), h.client.macStatus.value)
+        assertEquals("iTerm2 is showing an alert on the Mac.", macAlertBanner(h.client.macStatus.value))
+        assertEquals(ClientState.Connected(FakeMac.MAC_REVISION), h.client.state.value)
+        assertEquals(MacMessage.Pong, h.client.request(PhoneMessage.Ping))
+
+        // Answered at the Mac: the banner goes.
+        h.mac.sendSample("messages/browser-sessions/mac-status-changed-clear.json", null)
+        h.mac.sendMedia(byteArrayOf(3))
+        runCurrent()
+        assertEquals(MacStatus(mainBlocked = false, alertCount = 0), h.client.macStatus.value)
+        assertNull(macAlertBanner(h.client.macStatus.value))
+        assertEquals("Media:3", sink.inputs.last().let { "Media:${(it as StreamInput.Media).copyBytes().single()}" })
+        assertEquals(1, h.mac.handshakes.get())
+    }
+
+    /** Records every stream input in order. */
+    private class RecordingStreamSink : StreamSink {
+        val inputs = CopyOnWriteArrayList<StreamInput>()
+
+        override suspend fun accept(input: StreamInput) {
+            inputs += input
+        }
     }
 
     @Test

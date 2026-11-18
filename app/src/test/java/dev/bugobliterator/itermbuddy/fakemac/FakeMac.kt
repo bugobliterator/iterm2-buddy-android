@@ -137,6 +137,12 @@ class FakeMac(
 
     @Volatile var minimumPeer = MAC_MINIMUM_PEER
 
+    /**
+     * The `macStatus` the hello reply carries, as a v3.7.7 Mac sends it to a phone at revision 14
+     * or later (`CompanionLink.swift:518-536`); null omits it, as `hello-mac.json` does.
+     */
+    @Volatile var helloMacStatus: JsonObject? = null
+
     /** When false, requests are recorded but never answered (a stalled Mac whose relay link is fine). */
     @Volatile var answering = true
 
@@ -620,7 +626,8 @@ class FakeMac(
     private fun helloReply(requestID: Long?): ByteArray {
         val sample = fixtureJson("hello-mac.json")
         val hello = sample.getValue("payload").jsonObject.getValue("hello").jsonObject
-        val body = JsonObject(hello + mapOf("revision" to JsonPrimitive(revision), "minimumPeer" to JsonPrimitive(minimumPeer)))
+        val fields = hello + mapOf("revision" to JsonPrimitive(revision), "minimumPeer" to JsonPrimitive(minimumPeer))
+        val body = JsonObject(helloMacStatus?.let { fields + ("macStatus" to it) } ?: fields)
         return envelope(JsonObject(mapOf("hello" to body)), requestID)
     }
 

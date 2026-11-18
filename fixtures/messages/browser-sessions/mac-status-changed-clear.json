@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.macStatusChanged(status: WireFixtures.CompanionMacStatus(modalAlerts: [], mainBlocked: false)))",
+  "json" : {"payload":{"macStatusChanged":{"status":{"mainBlocked":false,"modalAlerts":[]}}}}
+}

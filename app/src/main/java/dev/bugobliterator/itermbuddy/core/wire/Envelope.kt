@@ -170,7 +170,8 @@ private fun decodeMacCase(case: String, body: JsonElement, payload: JsonObject):
         val hello = body.asObject(case)
         hello.optional(case, "wantsNotificationPermission") { it.isBoolean() }
         hello.optional(case, "aiAvailable") { it.isBoolean() }
-        hello.optional(case, "macStatus") { it is JsonObject }
+        // Checked here, so HelloReply.macStatus() never throws for a decoded reply.
+        hello.ifPresent("macStatus") { decodeMacStatus(get(it)) }
         MacMessage.HelloReply(hello.long(case, "revision"), hello.long(case, "minimumPeer"), hello)
     }
     "relayRoomSecretStored" -> MacMessage.RelayRoomSecretStored.also { body.asObject(case) }
@@ -184,6 +185,9 @@ private fun decodeMacCase(case: String, body: JsonElement, payload: JsonObject):
     "streamExtent" -> decodeStreamExtent(body)
     "selectionRange" -> decodeSelectionRange(body)
     "selectionText" -> decodeSelectionText(body)
+    "macStatusChanged" -> decodeMacStatusChanged(body)
+    "browserEditingChanged" -> decodeBrowserEditingChanged(body)
+    "browserNavigationChanged" -> decodeBrowserNavigationChanged(body)
     "error" -> {
         val error = body.asObject(case)[UNLABELLED] as? JsonObject
             ?: throw WireDecodeException("error.$UNLABELLED is missing or not an object")
