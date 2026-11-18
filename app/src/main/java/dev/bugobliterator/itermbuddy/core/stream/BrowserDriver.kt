@@ -118,6 +118,11 @@ class BrowserDriver(
         }
     }
 
+    /** Stops a fling and sends nothing (a tap off the page: it clicks nothing but stops the coast, as iOS's tap). */
+    fun stopFling() {
+        synchronized(lock) { accumulator.stopFling() }
+    }
+
     /** Drops the travel not yet sent and any fling (a pinch began). */
     fun cancelScroll() {
         synchronized(lock) { accumulator.cancel() }

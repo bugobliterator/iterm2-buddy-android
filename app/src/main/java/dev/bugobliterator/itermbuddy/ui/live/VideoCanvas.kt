@@ -153,7 +153,7 @@ class LiveVideoSource(
  * [doubleTapZoom] false there is no double-tap zoom and a tap is given at its lift.
  *
  * **Browser** ([browser] non-null when a gesture starts: a browser page taking input). A tap is
- * also a click at its page pixel ([browserTapPoint]; none off the page). A one-finger drag scrolls
+ * also a click at its page pixel ([browserTapPoint]; none off the page) and stops any fling. A one-finger drag scrolls
  * the page through the driver ([browserGestureStep]: all of it at fit; zoomed in, it pans and only
  * vertical travel past the pan edge scrolls), at the page pixel under the finger where it went
  * down ([browserScrollPoint]); a pinch zooms locally, cancels the scroll and makes the rest of the
@@ -311,9 +311,9 @@ fun VideoCanvas(
                             val page = currentBrowser
                             if (page != null) {
                                 val image = currentImage
-                                browserTapPoint(action.x, action.y, shown, g.fit, image.width, image.height)?.let { (x, y) ->
-                                    page.tap(x.toDouble(), y.toDouble())
-                                }
+                                // Off the page it clicks nothing, but every tap stops a fling (iOS SessionView:2192).
+                                val point = browserTapPoint(action.x, action.y, shown, g.fit, image.width, image.height)
+                                if (point == null) page.stopFling() else page.tap(point.first.toDouble(), point.second.toDouble())
                             }
                             currentOnTap()
                         }

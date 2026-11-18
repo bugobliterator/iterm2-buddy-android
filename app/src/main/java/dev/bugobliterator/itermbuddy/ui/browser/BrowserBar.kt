@@ -78,8 +78,8 @@ internal interface BrowserBarActions {
  * The browser view's bar, drawn over the top of the page like the live view's (a translucent
  * scrim behind the status bar and a 48 dp row), with iOS's browser controls in it
  * (`IOS/Screens/SessionView.swift:1114-1214`): ← (leave), ‹ back, › forward, the [AddressField],
- * ⟳ Reload or ✕ Stop, and ⌨ when [offersKeyboard] (iOS's toolbar keyboard button, 910-924, for
- * editors the Mac cannot detect). Then, when [banner] is set, the Mac alert row. Its measured
+ * ⟳ Reload or ✕ Stop, and ⌨ (iOS's toolbar keyboard button, 910-924, for editors the Mac cannot
+ * detect), greyed unless [keyboardEnabled]. Then, when [banner] is set, the Mac alert row. Its measured
  * height is the canvas's top inset, so the page sits below it.
  */
 @Composable
@@ -88,7 +88,7 @@ internal fun BrowserBar(
     address: AddressFieldState,
     url: String?,
     onAddress: ((AddressFieldState) -> AddressFieldState) -> Unit,
-    offersKeyboard: Boolean,
+    keyboardEnabled: Boolean,
     actions: BrowserBarActions,
     banner: String?,
     modifier: Modifier = Modifier,
@@ -121,7 +121,7 @@ internal fun BrowserBar(
                 } else {
                     BarButton("⟳", "Reload", controls.reloadOrStop, actions::reload)
                 }
-                if (offersKeyboard) BarButton("⌨", "Show or hide keyboard", enabled = true, onClick = actions::toggleKeyboard)
+                BarButton("⌨", "Show or hide keyboard", keyboardEnabled, actions::toggleKeyboard)
             }
         }
         if (banner != null) LiveAlertBanner(banner)

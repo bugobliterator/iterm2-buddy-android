@@ -10,6 +10,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
@@ -34,9 +36,12 @@ import dev.bugobliterator.itermbuddy.ui.live.NoPersonalizedLearning
  * anywhere restores the URL ([onBlur]); Go opens the trimmed text ([go]). A URL that is null or
  * empty reads as an empty field (upstream decodes an absent URL as "").
  *
- * [selection] is the field's selection while focused. The tap that focuses a field places a
- * cursor straight after the focus change; the first selection-only change after [onFocus] is
- * ignored so the select-all survives it, and later ones (a second tap) move the cursor.
+ * [selection] and [composition] (the IME's composing span) are the field's while focused, so the
+ * value given back to the field keeps the IME's composition and it never restarts input. The tap
+ * that focuses a field places a cursor straight after the focus change; the first selection-only
+ * change after [onFocus] is ignored so the select-all survives it, and later ones (a second tap)
+ * move the cursor. A focus with no tap after it (TalkBack, a hardware keyboard) lets the latch go
+ * a frame later ([settled]), so it never eats the owner's first real tap.
  *
  * [toString] redacts [text] (its length only): a URL or what is typed is never logged.
  */
@@ -44,6 +49,7 @@ data class AddressFieldState(
     val text: String,
     val focused: Boolean,
     val selection: TextRange = TextRange(text.length),
+    val composition: TextRange? = null,
     private val keepSelectAll: Boolean = false,
 ) {
     /** What the field shows for the page's [url]: the URL, or what is typed while focused. */
@@ -58,17 +64,21 @@ data class AddressFieldState(
     /** The field lost focus: back to the page's [url]. */
     fun onBlur(url: String?): AddressFieldState = AddressFieldState(url.orEmpty(), focused = false)
 
-    /** The owner typed or moved the cursor: [newText] with [newSelection]. Ignored while not focused. */
-    fun onEdit(newText: String, newSelection: TextRange): AddressFieldState {
+    /** The owner typed or moved the cursor: [newText] with [newSelection] and the IME's [newComposition]. Ignored while not focused. */
+    fun onEdit(newText: String, newSelection: TextRange, newComposition: TextRange? = null): AddressFieldState {
         if (!focused) return this
-        if (keepSelectAll && newText == text) return copy(keepSelectAll = false)
-        return AddressFieldState(newText, focused = true, selection = newSelection)
+        if (keepSelectAll && newText == text) return copy(composition = newComposition, keepSelectAll = false)
+        return AddressFieldState(newText, focused = true, selection = newSelection, composition = newComposition)
     }
+
+    /** A frame after the focus: the select-all latch is let go (see the class comment). */
+    fun settled(): AddressFieldState = if (keepSelectAll) copy(keepSelectAll = false) else this
 
     /** What Go opens: the text trimmed of whitespace and newlines; null when nothing is left. */
     fun go(): String? = text.trim().ifEmpty { null }
 
-    override fun toString(): String = "AddressFieldState(text(len=${text.length}), focused=$focused, selection=$selection)"
+    override fun toString(): String =
+        "AddressFieldState(text(len=${text.length}), focused=$focused, selection=$selection, composition=$composition)"
 }
 
 /**
@@ -92,11 +102,18 @@ internal fun AddressField(
 ) = NoPersonalizedLearning {
     val colors = MaterialTheme.colorScheme
     val shown = state.shown(url)
-    val value = TextFieldValue(shown, if (state.focused) state.selection else TextRange(shown.length))
+    val value = if (state.focused) TextFieldValue(shown, state.selection, state.composition) else TextFieldValue(shown, TextRange(shown.length))
+    // The focusing tap's cursor lands in the same frame as the focus; after that the latch goes.
+    LaunchedEffect(state.focused) {
+        if (state.focused) {
+            withFrameNanos { }
+            onUpdate { it.settled() }
+        }
+    }
     val style = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface)
     BasicTextField(
         value = value,
-        onValueChange = { edit -> onUpdate { it.onEdit(edit.text, edit.selection) } },
+        onValueChange = { edit -> onUpdate { it.onEdit(edit.text, edit.selection, edit.composition) } },
         enabled = enabled,
         singleLine = true,
         textStyle = style,
