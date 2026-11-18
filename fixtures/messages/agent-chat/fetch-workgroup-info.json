@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: Optional(14), payload: WireFixtures.CompanionClientMessage.fetchWorkgroupInfo(workgroupID: \"wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F\"))",
+  "json" : {"payload":{"fetchWorkgroupInfo":{"workgroupID":"wg-5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F"}},"requestID":14}
+}

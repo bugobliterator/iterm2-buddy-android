@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: Optional(14), payload: WireFixtures.CompanionHostMessage.error(CompanionProtocol.CompanionError(code: CompanionProtocol.CompanionError.Code.unknownSession, message: \"That workgroup no longer exists.\")))",
+  "json" : {"payload":{"error":{"_0":{"code":"unknownSession","message":"That workgroup no longer exists."}}},"requestID":14}
+}

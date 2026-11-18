@@ -1,0 +1,5 @@
+{
+  "direction" : "phoneToMac",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionClientMessage>(requestID: Optional(10), payload: WireFixtures.CompanionClientMessage.createChat(title: \"Orchestrator\", mode: WireFixtures.CompanionNewChatMode.orchestrator))",
+  "json" : {"payload":{"createChat":{"mode":{"orchestrator":{}},"title":"Orchestrator"}},"requestID":10}
+}

@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.delivery(message: WireFixtures.Message(chatID: \"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E\", author: WireFixtures.Participant.agent, content: WireFixtures.Message.Content.clientLocal(WireFixtures.ClientLocal(action: WireFixtures.ClientLocal.Action.enableOrchestrationRequest(requestID: \"enable-orchestration-widget\"))), sentDate: 2026-11-18 11:15:09 +0000, uniqueID: 11111111-2222-4333-8444-000000000509, inResponseTo: nil, responseID: nil, agentReasoning: nil, firstBlobRef: nil, configuration: nil), chatID: \"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E\", partial: false))",
+  "json" : {"payload":{"delivery":{"chatID":"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E","message":{"author":"agent","chatID":"9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E","content":{"clientLocal":{"_0":{"action":{"enableOrchestrationRequest":{"requestID":"enable-orchestration-widget"}}}}},"sentDate":1795000509000,"uniqueID":"11111111-2222-4333-8444-000000000509"},"partial":false}}}
+}

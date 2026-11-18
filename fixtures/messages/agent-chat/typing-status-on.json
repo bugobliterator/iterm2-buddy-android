@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.typingStatus(isTyping: true, participant: WireFixtures.Participant.agent, chatID: \"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E\"))",
+  "json" : {"payload":{"typingStatus":{"chatID":"6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E","isTyping":true,"participant":"agent"}}}
+}

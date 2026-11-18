@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: nil, payload: WireFixtures.CompanionHostMessage.error(CompanionProtocol.CompanionError(code: CompanionProtocol.CompanionError.Code.internalError, message: \"The chat system is not available\")))",
+  "json" : {"payload":{"error":{"_0":{"code":"internalError","message":"The chat system is not available"}}}}
+}

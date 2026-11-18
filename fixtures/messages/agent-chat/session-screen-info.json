@@ -1,0 +1,5 @@
+{
+  "direction" : "macToPhone",
+  "swiftValue" : "WireFixtures.CompanionEnvelope<WireFixtures.CompanionHostMessage>(requestID: Optional(15), payload: WireFixtures.CompanionHostMessage.sessionScreenInfo(WireFixtures.CompanionSessionScreenInfo(guid: \"C3D4E5F6-0718-4293-A4B5-C6D7E8F90A1B\", name: \"zsh\", lineCount: 1025, columns: 81, width: 647.875, lineHeight: 16.25, scale: 1.5)))",
+  "json" : {"payload":{"sessionScreenInfo":{"_0":{"columns":81,"guid":"C3D4E5F6-0718-4293-A4B5-C6D7E8F90A1B","lineCount":1025,"lineHeight":16.25,"name":"zsh","scale":1.5,"width":647.875}}},"requestID":15}
+}

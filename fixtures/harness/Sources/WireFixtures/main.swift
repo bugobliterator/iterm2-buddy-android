@@ -727,3 +727,11 @@ let browserSampleList = try browserSamples()
 try writeSessionSamples(browserSampleList,
                         to: outputDirectory.appendingPathComponent("messages/browser-sessions", isDirectory: true))
 print("wire-fixtures: wrote \(messagesDirectory.path)/browser-sessions: samples=\(browserSampleList.count)")
+
+// MARK: - Agent chat samples and chat vectors (AgentChatSamples.swift, ChatVectors.swift)
+
+let agentChatSampleList = try agentChatSamples()
+try writeSessionSamples(agentChatSampleList,
+                        to: outputDirectory.appendingPathComponent("messages/agent-chat", isDirectory: true))
+print("wire-fixtures: wrote \(messagesDirectory.path)/agent-chat: samples=\(agentChatSampleList.count)")
+try writeChatVectors(samples: agentChatSampleList, to: outputDirectory.appendingPathComponent("chat", isDirectory: true))
