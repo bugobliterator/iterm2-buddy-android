@@ -283,6 +283,7 @@ class SelectionDriverTest {
         assertEquals(listOf("SENTINEL-selection"), clipboard)
         val copied = checkNotNull(rig.driver.copyNotices.value)
         assertEquals(CopyOutcome.COPIED, copied.outcome)
+        assertEquals("guid-one", copied.sessionGuid)
         assertFalse("a notice carries no text", copied.toString().contains("SENTINEL"))
         rig.driver.noticeShown(copied)
         assertNull(rig.driver.copyNotices.value)
@@ -298,6 +299,26 @@ class SelectionDriverTest {
         runCurrent()
         assertEquals(CopyOutcome.FAILED, rig.driver.copyNotices.value?.outcome)
         assertFalse(rig.logs.any { "SENTINEL" in it })
+    }
+
+    @Test
+    fun copyToClipboardIsQueuedAtCallTime() = runTest {
+        val rig = Rig(this)
+        val clipboard = mutableListOf<String>()
+        rig.driver.copyToClipboard("guid-one") { clipboard += it }
+        rig.driver.clear()
+        runCurrent()
+        val request = rig.link.requests.receive()
+        assertTrue("the clear waits behind the copy", rig.link.sent.isEmpty())
+        request.reply.complete(MacMessage.SelectionText("SENTINEL-selection"))
+        assertEquals(listOf<PhoneMessage>(PhoneMessage.ClearSelection(1)), rig.sent())
+        assertEquals(listOf("SENTINEL-selection"), clipboard)
+        // Without an active stream it fails at once, with nothing asked.
+        rig.active.value = null
+        rig.driver.copyToClipboard("guid-two") {}
+        runCurrent()
+        assertEquals(CopyNotice(rig.driver.copyNotices.value!!.id, "guid-two", CopyOutcome.FAILED), rig.driver.copyNotices.value)
+        assertTrue(rig.link.requests.isEmpty)
     }
 
     private companion object {

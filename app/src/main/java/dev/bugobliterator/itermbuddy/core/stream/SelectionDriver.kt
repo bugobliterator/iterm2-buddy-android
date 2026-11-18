@@ -134,11 +134,14 @@ class SelectionDriver(
      * The selection of session [sessionGuid] as text, after everything queued before it: `""` when
      * nothing is selected, null on an error, a failure, no active stream or a timeout.
      */
-    suspend fun copy(sessionGuid: String): String? {
+    suspend fun copy(sessionGuid: String): String? = enqueueCopy(sessionGuid)?.await()
+
+    /** Queues a copy now, in call order with the sends; null (nothing queued) without an active stream. */
+    private fun enqueueCopy(sessionGuid: String): CompletableDeferred<String?>? {
         val linkId = active.value?.linkId ?: return null
         val result = CompletableDeferred<String?>()
         enqueue(Copy(linkId, sessionGuid, result))
-        return result.await()
+        return result
     }
 
     /**
@@ -146,19 +149,21 @@ class SelectionDriver(
      * [copyNotices].
      */
     fun copyToClipboard(sessionGuid: String, clipboard: (String) -> Unit) {
+        // Queued at call time, so a Clear or Select All called after it cannot overtake it.
+        val pending = enqueueCopy(sessionGuid)
         scope.launch {
-            val text = copy(sessionGuid)
+            val text = pending?.await()
             val outcome = copyOutcome(text)
             if (outcome == CopyOutcome.COPIED && text != null) {
                 try {
                     clipboard(text)
                 } catch (e: Exception) {
                     log("clipboard write failed (${e::class.simpleName})")
-                    notices.value = CopyNotice(nextId(), CopyOutcome.FAILED)
+                    notices.value = CopyNotice(nextId(), sessionGuid, CopyOutcome.FAILED)
                     return@launch
                 }
             }
-            notices.value = CopyNotice(nextId(), outcome)
+            notices.value = CopyNotice(nextId(), sessionGuid, outcome)
         }
     }
 
@@ -269,5 +274,5 @@ fun copyOutcome(text: String?): CopyOutcome = when {
     else -> CopyOutcome.COPIED
 }
 
-/** One [SelectionDriver.copyToClipboard] outcome, [id] telling repeats apart. Holds no text. */
-data class CopyNotice(val id: Long, val outcome: CopyOutcome)
+/** One [SelectionDriver.copyToClipboard] outcome for session [sessionGuid], [id] telling repeats apart. Holds no text. */
+data class CopyNotice(val id: Long, val sessionGuid: String, val outcome: CopyOutcome)
