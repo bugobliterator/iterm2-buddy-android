@@ -204,4 +204,12 @@ class CanvasZoomTest {
         assertEquals(listOf(PressAction.SelectEnd(40f, 20f)), press.cancel())
         assertEquals(emptyList<PressAction>(), press.cancel())
     }
+
+    @Test
+    fun aConsumedLiftIsACancel() {
+        assertTrue("ACTION_CANCEL arrives unpressed and consumed", isCancelledLift(consumed = true, wasSelecting = false))
+        assertFalse("a real lift is not consumed yet in the initial pass", isCancelledLift(consumed = false, wasSelecting = false))
+        assertFalse("a selection ends either way", isCancelledLift(consumed = true, wasSelecting = true))
+        assertFalse(isCancelledLift(consumed = false, wasSelecting = true))
+    }
 }

@@ -76,6 +76,8 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.ui.tooling.preview)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    // The activity ComposeTestRule hosts the instrumented gesture test in.
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
     // MlKitException comes with it (com.google.mlkit:common, as the scanner declares).
     implementation(libs.play.services.code.scanner)
     implementation(libs.androidx.lifecycle.runtime.compose)
@@ -101,6 +103,8 @@ dependencies {
     androidTestImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
 }
 
 // -PtestForks=1 runs unit tests serially, for timing comparisons.

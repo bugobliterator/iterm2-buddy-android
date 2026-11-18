@@ -457,13 +457,16 @@ private fun LiveSessionContent(
         }
         if (selection != null) {
             val notice by selection.copyNotices.collectAsStateWithLifecycle()
-            LaunchedEffect(notice) {
-                val shown = notice ?: return@LaunchedEffect
-                selection.noticeShown(shown)
+            LaunchedEffect(notice, session.guid) {
+                // Another session's copy waits for that session's view.
+                val shown = notice?.takeIf { it.sessionGuid == session.guid } ?: return@LaunchedEffect
+                // Marked shown once the snackbar is done (timed out or dismissed); left mid-snackbar
+                // (a rotation), the next view shows it again.
                 copyMessage(shown.outcome)?.let { message ->
                     snackbar.currentSnackbarData?.dismiss()
                     snackbar.showSnackbar(message)
                 }
+                selection.noticeShown(shown)
             }
         }
         val anchor = menuAnchor

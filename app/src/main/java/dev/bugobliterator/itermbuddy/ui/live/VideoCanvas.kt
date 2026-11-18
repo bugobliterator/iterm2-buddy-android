@@ -331,10 +331,11 @@ private fun VideoSurface(output: HevcVideoOutput, modifier: Modifier) {
  * Taps, double taps and selection holds of the primary finger, decided by a [PressArbiter] in
  * event time (the double-tap window from [viewConfiguration], the hold [holdMillis], touch slop),
  * each decision given to [onAction]. [selectable] is read as each press goes down. Events are
- * read in the initial pass and consumed only while a selection owns the gesture. Cancelled (the
- * detector restarts), a selection under way still ends where it was.
+ * read in the initial pass and consumed only while a selection owns the gesture. A lift that is a
+ * cancel ([isCancelledLift]: the system took the press) is [PressArbiter.cancel], never a tap.
+ * Cancelled (the detector restarts), a selection under way still ends where it was.
  */
-private suspend fun PointerInputScope.detectPresses(holdMillis: Long, selectable: () -> Boolean, onAction: (PressAction) -> Unit) {
+internal suspend fun PointerInputScope.detectPresses(holdMillis: Long, selectable: () -> Boolean, onAction: (PressAction) -> Unit) {
     val arbiter = PressArbiter(holdMillis, viewConfiguration.doubleTapTimeoutMillis, viewConfiguration.touchSlop)
     try {
         awaitPointerEventScope {
@@ -369,8 +370,11 @@ private suspend fun PointerInputScope.detectPresses(holdMillis: Long, selectable
                     }
                     primary == null || !primary.pressed -> {
                         tracked = null
-                        val at = primary?.position ?: Offset.Zero
-                        if (primary == null) arbiter.cancel() else arbiter.up(at.x, at.y, lastTime)
+                        if (primary == null || isCancelledLift(primary.isConsumed, wasSelecting)) {
+                            arbiter.cancel()
+                        } else {
+                            arbiter.up(primary.position.x, primary.position.y, lastTime)
+                        }
                     }
                     else -> arbiter.move(primary.position.x, primary.position.y, event.changes.count { it.pressed }, lastTime)
                 }

@@ -247,6 +247,15 @@ internal class PressArbiter(private val holdMillis: Long, private val doubleTapM
 }
 
 /**
+ * Whether a lift of the primary finger is a cancel rather than an up: Compose delivers
+ * `ACTION_CANCEL` (the system pilfered the press, such as a back gesture) as an unpressed change
+ * already consumed (`SuspendingPointerInputModifierNodeImpl.onCancelPointerInput`); a real lift,
+ * read in the initial pass, is not consumed yet. While a selection is under way ([wasSelecting])
+ * either one ends it where it is, so the lift is taken as an up.
+ */
+internal fun isCancelledLift(consumed: Boolean, wasSelecting: Boolean): Boolean = consumed && !wasSelecting
+
+/**
  * The selection point under screen point ([x], [y]) of a terminal shown with zoom [shown], the
  * live band at [fit] and the document [layout] above it ([ScrollbackLayout.liveBandTopPx] of
  * history): over the band, the video's cell ([cellAt], margins included, from the layout's live
