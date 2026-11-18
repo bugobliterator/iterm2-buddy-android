@@ -21,11 +21,12 @@ fun isCanonicalUppercaseUuid(text: String): Boolean =
  * as Foundation's `UUID(uuidString:)` does, and returned uppercase. Anything else throws a
  * [WireDecodeException] naming [case] and [key] only.
  */
-fun JsonObject.uuid(case: String, key: String): String {
-    val text = string(case, key)
-    if (!CANONICAL_UUID.matches(text)) throw WireDecodeException("$case.$key is not a UUID")
-    return text.uppercase(Locale.ROOT)
-}
+fun JsonObject.uuid(case: String, key: String): String =
+    canonicalUuidOrNull(string(case, key)) ?: throw WireDecodeException("$case.$key is not a UUID")
+
+/** [text] as an uppercase canonical UUID, read case-insensitively; null when it is not one (or null). */
+internal fun canonicalUuidOrNull(text: String?): String? =
+    text?.takeIf { CANONICAL_UUID.matches(it) }?.uppercase(Locale.ROOT)
 
 /**
  * A Swift `Date` field as the companion wire writes it: milliseconds since 1970 as a JSON

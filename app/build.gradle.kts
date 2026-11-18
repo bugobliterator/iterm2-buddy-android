@@ -111,6 +111,10 @@ dependencies {
 val unitTestForks = providers.gradleProperty("testForks").map(String::toInt)
     .orElse(Runtime.getRuntime().availableProcessors())
 
+val chatMemoryTestName = "chatMemoryTest"
+// Heap-bound tests only: ui.live.LiveInputMemoryTest is about input state, not heap, and stays in testDebugUnitTest.
+val memoryTests = "dev.bugobliterator.itermbuddy.core.*MemoryTest"
+
 tasks.withType<Test>().configureEach {
     maxParallelForks = unitTestForks.get()
     systemProperty("fixtures.dir", rootProject.file("fixtures").path)
@@ -123,4 +127,22 @@ tasks.withType<Test>().configureEach {
     inputs.files(rootProject.fileTree("fixtures") { exclude("harness/**") })
         .withPathSensitivity(PathSensitivity.RELATIVE)
         .withPropertyName("fixtures")
+    // Memory tests assert a peak heap, so they run only in chatMemoryTest's bounded JVM.
+    if (name != chatMemoryTestName) filter { excludeTestsMatching(memoryTests) }
 }
+
+/**
+ * Runs the debug unit tests named `core.*MemoryTest` in JVMs with a 128 MiB heap, where a decode whose
+ * peak does not fit fails with an OutOfMemoryError. `check` runs it; `testDebugUnitTest` does not.
+ */
+val chatMemoryTest = tasks.register<Test>(chatMemoryTestName) {
+    description = "Runs the chat memory tests in a bounded heap."
+    group = LifecycleBasePlugin.VERIFICATION_GROUP
+    val unitTests = tasks.getByName<Test>("testDebugUnitTest")
+    testClassesDirs = unitTests.testClassesDirs
+    classpath = unitTests.classpath
+    filter { includeTestsMatching(memoryTests) }
+    maxHeapSize = "128m"
+}
+
+tasks.named("check") { dependsOn(chatMemoryTest) }

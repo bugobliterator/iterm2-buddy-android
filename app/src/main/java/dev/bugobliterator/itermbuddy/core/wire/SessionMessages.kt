@@ -1,6 +1,15 @@
 package dev.bugobliterator.itermbuddy.core.wire
 
+import dev.bugobliterator.itermbuddy.core.chat.ChatListEntry
+import dev.bugobliterator.itermbuddy.core.chat.ChatMessage
+import dev.bugobliterator.itermbuddy.core.chat.MentionResolution
+import dev.bugobliterator.itermbuddy.core.chat.NewChatMode
+import dev.bugobliterator.itermbuddy.core.chat.Participant
+import dev.bugobliterator.itermbuddy.core.chat.TurnEvent
+import dev.bugobliterator.itermbuddy.core.chat.UserTextMessage
+import dev.bugobliterator.itermbuddy.core.chat.WorkgroupInfo
 import dev.bugobliterator.itermbuddy.core.input.KeyEvent
+import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTree
 import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
 import java.util.Base64
@@ -8,11 +17,15 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 /**
- * A message the phone sends to the Mac: the pairing, live-session, history, selection and
- * browser subset of upstream `CompanionClientMessage`
+ * A message the phone sends to the Mac: the pairing, live-session, history, selection, browser
+ * and agent chat subset of upstream `CompanionClientMessage`
  * (`sources/Companion/Shared/CompanionMessages.swift`). The live-session cases' encoders are in
  * `StreamMessages.kt`, the history and selection ones in `HistorySelectionMessages.kt`, the
- * browser ones in `BrowserMessages.kt`.
+ * browser ones in `BrowserMessages.kt`, the chat ones in `ChatMessages.kt`.
+ *
+ * No case here encodes an approval, a push or a notification message (`remoteCommandDecision`,
+ * `selectSessionResponse`, `linkSession`, a `userCommand` publish, `pushStatus`, `syncSince`,
+ * `messagesSince`, `notificationPermissionResponse`): those belong to later phases.
  *
  * Payloads follow Swift's synthesized enum coding: `{"<case>": {...}}`, labelled
  * values by name, an unlabelled value under `_0`, `{}` for a case with no values,
@@ -208,14 +221,101 @@ sealed interface PhoneMessage {
 
         override fun toString(): String = "BrowserLoad(streamID=$streamID, text(len=${text.length}))"
     }
+
+    // Agent chat (`MSG:695-761`). Requests, as iOS `CompanionClient` sends them (`CC:95-236`):
+    // ListChatsAndSessions, CreateChat, Subscribe, ResolveMentions, FetchWorkgroupInfo and
+    // FetchSessionScreenInfo. The rest are fire-and-forget sends with no request ID.
+
+    /** `listChatsAndSessions`, a request: the Mac replies with [MacMessage.ChatsAndSessions]. */
+    data object ListChatsAndSessions : PhoneMessage {
+        override fun payload(): JsonObject = case("listChatsAndSessions", EMPTY)
+    }
+
+    /** `createChat(title:mode:)`, a request: the Mac replies with [MacMessage.ChatCreated]. [toString] hides the title. */
+    data class CreateChat(val title: String, val mode: NewChatMode) : PhoneMessage {
+        override fun payload(): JsonObject = encodeCreateChat(this)
+
+        override fun toString(): String = "CreateChat(title(len=${title.length}), mode=$mode)"
+    }
+
+    /** `deleteChat(chatID:)`, fire-and-forget; a refusal comes back as an unsolicited error. */
+    data class DeleteChat(val chatID: String) : PhoneMessage {
+        override fun payload(): JsonObject = encodeChatIdCase("deleteChat", chatID)
+    }
+
+    /**
+     * `deleteMessages(chatID:messageIDs:)`, fire-and-forget (Mac revision 12): truncates the chat from
+     * the first of [messageIDs], a suffix. Each ID must be a canonical uppercase UUID, the form the
+     * phone holds and Swift's `UUID` writes.
+     */
+    data class DeleteMessages(val chatID: String, val messageIDs: List<String>) : PhoneMessage {
+        init {
+            require(messageIDs.all(::isCanonicalUppercaseUuid)) { "messageIDs must be uppercase canonical UUIDs" }
+        }
+
+        override fun payload(): JsonObject = encodeDeleteMessages(this)
+    }
+
+    /** `setChatMuted(chatID:muted:)`, fire-and-forget (Mac revision 5). */
+    data class SetChatMuted(val chatID: String, val muted: Boolean) : PhoneMessage {
+        override fun payload(): JsonObject = encodeSetChatMuted(this)
+    }
+
+    /**
+     * `subscribe(chatID:)`, a request: the Mac installs the subscription, then replies with
+     * [MacMessage.History] (empty for an unknown chat), then sends live events.
+     */
+    data class Subscribe(val chatID: String) : PhoneMessage {
+        override fun payload(): JsonObject = encodeChatIdCase("subscribe", chatID)
+    }
+
+    /** `unsubscribe(chatID:)`, fire-and-forget. */
+    data class Unsubscribe(val chatID: String) : PhoneMessage {
+        override fun payload(): JsonObject = encodeChatIdCase("unsubscribe", chatID)
+    }
+
+    /**
+     * `publish(message:toChatID:partial:)`, fire-and-forget, always `partial:false` (`CC:176-178`).
+     * The message is the owner's plain text and nothing else; [toChatID] is the message's own chat,
+     * as iOS always sends it (`AM:3100-3118`).
+     */
+    data class Publish(val message: UserTextMessage, val toChatID: String = message.chatID) : PhoneMessage {
+        init {
+            require(toChatID == message.chatID) { "a message is published to its own chat" }
+        }
+
+        override fun payload(): JsonObject = encodePublish(this)
+
+        override fun toString(): String = "Publish(message=$message, toChatID=$toChatID)"
+    }
+
+    /**
+     * `resolveMentions(identifiers:)`, a request: the Mac replies with [MacMessage.MentionsResolved],
+     * one entry per identifier, in order. [toString] shows only the count.
+     */
+    data class ResolveMentions(val identifiers: List<String>) : PhoneMessage {
+        override fun payload(): JsonObject = encodeResolveMentions(this)
+
+        override fun toString(): String = "ResolveMentions(identifiers=${identifiers.size})"
+    }
+
+    /** `fetchWorkgroupInfo(workgroupID:)`, a request: the Mac replies with [MacMessage.WorkgroupInfoMessage]. */
+    data class FetchWorkgroupInfo(val workgroupID: String) : PhoneMessage {
+        override fun payload(): JsonObject = encodeFetchWorkgroupInfo(this)
+    }
+
+    /** `fetchSessionScreenInfo(sessionGuid:)`, a request: the Mac replies with [MacMessage.SessionScreenInfoMessage]. */
+    data class FetchSessionScreenInfo(val sessionGuid: String) : PhoneMessage {
+        override fun payload(): JsonObject = encodeFetchSessionScreenInfo(this)
+    }
 }
 
 /**
- * A message the Mac sends to the phone: the pairing, live-session, history, selection, browser
- * and Mac status subset of upstream `CompanionHostMessage`. Every other host case decodes to
- * [Unsupported] (`modalAlertAnswerRejected` among them: this app never answers an alert).
- * The decoders are in `StreamMessages.kt`, `HistorySelectionMessages.kt`, `BrowserMessages.kt`
- * and `MacStatus.kt`.
+ * A message the Mac sends to the phone: the pairing, live-session, history, selection, browser,
+ * Mac status and agent chat subset of upstream `CompanionHostMessage`. Every other host case
+ * decodes to [Unsupported] (`modalAlertAnswerRejected` among them: this app never answers an
+ * alert). The decoders are in `StreamMessages.kt`, `HistorySelectionMessages.kt`,
+ * `BrowserMessages.kt`, `MacStatus.kt` and `ChatMessages.kt`.
  */
 sealed interface MacMessage {
     /**
@@ -225,6 +325,12 @@ sealed interface MacMessage {
      * [macStatus]). The revisions are [Long] to match Swift's 64-bit `Int`.
      */
     data class HelloReply(val revision: Long, val minimumPeer: Long, val raw: JsonObject) : MacMessage {
+        /**
+         * Whether the Mac has AI available now (revision 13). Absent or `null`, from a Mac before
+         * 13, reads as true, as iOS reads it (`MSG:986-991`): such a Mac only paired with AI on.
+         */
+        val aiAvailable: Boolean get() = (raw["aiAvailable"] as? JsonPrimitive)?.content != "false"
+
         /** [raw] can carry alert headings, bodies and session GUIDs: only its keys are shown. */
         override fun toString(): String = "HelloReply(revision=$revision, minimumPeer=$minimumPeer, keys=${raw.keys.sorted()})"
     }
@@ -236,10 +342,16 @@ sealed interface MacMessage {
     /** Unsolicited: the Mac has dropped this pairing. */
     data object Unpaired : MacMessage
 
-    /** `error(CompanionError)`: [raw] is the `CompanionError` object, `{"code", "message"}`. */
+    /**
+     * `error(CompanionError)`: [raw] is the `CompanionError` object, `{"code", "message"}`.
+     * [message] is Mac text that can interpolate a Swift error or chat content (`HB:468`,
+     * `HB:1406`), so [toString] shows the [code] only.
+     */
     data class Error(val raw: JsonObject) : MacMessage {
         val code: String get() = (raw.getValue("code") as JsonPrimitive).content
         val message: String get() = (raw.getValue("message") as JsonPrimitive).content
+
+        override fun toString(): String = "Error(code=$code)"
     }
 
     /**
@@ -311,6 +423,79 @@ sealed interface MacMessage {
     data class BrowserNavigationChanged(val streamID: Long, val state: BrowserNavigationState) : MacMessage {
         override fun toString(): String = "BrowserNavigationChanged(streamID=$streamID, state=$state)"
     }
+
+    // Agent chat (`MSG:1003-1141`). [ChatsAndSessions], [ChatCreated], [History],
+    // [MentionsResolved], [WorkgroupInfoMessage] and [SessionScreenInfoMessage] are replies; the
+    // rest are unsolicited events. Every case that carries chat content shows counts and IDs only.
+
+    /** `chatsAndSessions(chats:sessions:)`: the reply to [PhoneMessage.ListChatsAndSessions]. */
+    data class ChatsAndSessions(val chats: List<ChatListEntry>, val sessions: List<SessionSummary>) : MacMessage {
+        override fun toString(): String = "ChatsAndSessions(chats=${chats.size}, sessions=${sessions.size})"
+    }
+
+    /** `chatCreated(entry:)`: the reply to [PhoneMessage.CreateChat]. */
+    data class ChatCreated(val entry: ChatListEntry) : MacMessage {
+        override fun toString(): String = "ChatCreated(entry=$entry)"
+    }
+
+    /**
+     * `history(chatID:messages:maxSeq:)`: the reply to [PhoneMessage.Subscribe], the chat's whole
+     * visible history, oldest first, in one frame. [maxSeq] is upstream `Int64`.
+     */
+    data class History(val chatID: String, val messages: List<ChatMessage>, val maxSeq: Long) : MacMessage {
+        override fun toString(): String = "History(chatID=$chatID, messages=${messages.size}, maxSeq=$maxSeq)"
+    }
+
+    /**
+     * `delivery(message:chatID:partial:)`, unsolicited on a subscription: a whole message, or with
+     * [partial] a streamed `append`/`appendAttachment` delta naming its target.
+     */
+    data class Delivery(val message: ChatMessage, val chatID: String, val partial: Boolean) : MacMessage {
+        override fun toString(): String = "Delivery(message=$message, chatID=$chatID, partial=$partial)"
+    }
+
+    /**
+     * `messagesRemoved(chatID:messageIDs:)`, unsolicited on a subscription (revision 12): a
+     * truncated suffix, held uppercase. It can name messages the phone never saw (hidden rows).
+     */
+    data class MessagesRemoved(val chatID: String, val messageIDs: List<String>) : MacMessage
+
+    /** `typingStatus(isTyping:participant:chatID:)`, unsolicited: only a spinner hint. */
+    data class TypingStatus(val isTyping: Boolean, val participant: Participant, val chatID: String) : MacMessage
+
+    /** `turnLifecycle(event:chatID:)`, unsolicited (revision 8): an agent turn's start or end. */
+    data class TurnLifecycle(val event: TurnEvent, val chatID: String) : MacMessage
+
+    /** `mentionsResolved([CompanionMentionResolution])`: the reply to [PhoneMessage.ResolveMentions]. */
+    data class MentionsResolved(val resolutions: List<MentionResolution>) : MacMessage {
+        override fun toString(): String = "MentionsResolved(resolutions=${resolutions.size})"
+    }
+
+    /** `workgroupInfo(CompanionWorkgroupInfo)`: the reply to [PhoneMessage.FetchWorkgroupInfo]. */
+    data class WorkgroupInfoMessage(val info: WorkgroupInfo) : MacMessage {
+        override fun toString(): String =
+            "WorkgroupInfoMessage(workgroupID=${info.workgroupID}, members=${info.members.size})"
+    }
+
+    /** `chatListChanged(chats:)`, unsolicited: the Mac's whole chat list, which replaces the phone's. */
+    data class ChatListChanged(val chats: List<ChatListEntry>) : MacMessage {
+        override fun toString(): String = "ChatListChanged(chats=${chats.size})"
+    }
+
+    /** `aiAvailabilityChanged(available:)`, unsolicited (revision 13), at any phone revision. */
+    data class AiAvailabilityChanged(val available: Boolean) : MacMessage
+
+    /**
+     * `sessionScreenInfo(CompanionSessionScreenInfo)`: the reply to
+     * [PhoneMessage.FetchSessionScreenInfo]. A plain reply, not chat-scoped.
+     */
+    data class SessionScreenInfoMessage(val info: SessionScreenInfo) : MacMessage
+
+    /**
+     * What a waiting request receives when its reply crossed to the chat sink as raw bytes
+     * ([RAW_CHAT_CASES], see `peekEnvelope`): the reply's [case] and its frame's [sizeBytes]. No content.
+     */
+    data class ChatPayloadTaken(val case: String, val sizeBytes: Int) : MacMessage
 
     /**
      * A case this build does not handle: [case] is its discriminator and [raw] the
