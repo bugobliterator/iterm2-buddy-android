@@ -1150,6 +1150,27 @@ class ChatRepositoryTest {
         assertEquals(ConversationState.Loading, repository.conversation(A).value)
     }
 
+    @Test
+    fun slowOversizedListLatchesByTheThirdEnd() = runTest {
+        val rig = ChatRig(this, timeouts = ChatTimeouts(list = 2.seconds))
+        rig.chats = listOf(A to MAC_TIME)
+        rig.listHold = 5.seconds
+        rig.listFrame = { id -> envelope(padded(rig.listPayload("chatsAndSessions"), "chatsAndSessions", NOISE_CAP + 1024), id) }
+        // A's subscribe is always out when the list's frame lands, so the list never ends a link alone.
+        rig.neverAnswer += A
+        rig.repository.open(A)
+        rig.connect()
+        rig.awaitConnected(4)
+        settle()
+        advanceTimeBy(10.minutes)
+        runCurrent()
+        // Links 1 to 3 each end on the list's frame with A out; the third latches the list.
+        assertEquals("bounded", 4, rig.connectionCount)
+        assertEquals(3, rig.listRequests.get())
+        assertEquals(ChatListState.Failed(retryable = true), rig.repository.list.value)
+        assertEquals("A is only ever a suspect", emptySet<String>(), rig.repository.tooLargeChats())
+    }
+
     /** Counts single marks and batches. */
     private class CountingSeenStore : ChatSeenStore {
         private val inner = InMemoryChatSeenStore()
