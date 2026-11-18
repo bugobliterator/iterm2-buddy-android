@@ -2,10 +2,12 @@ package dev.bugobliterator.itermbuddy.core.sessions
 
 import com.southernstorm.noise.protocol.Noise
 import dev.bugobliterator.itermbuddy.Fixtures
-import dev.bugobliterator.itermbuddy.SessionsGraph
+import dev.bugobliterator.itermbuddy.HomeGraph
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.ClientTimeouts
 import dev.bugobliterator.itermbuddy.core.CompanionClient
+import dev.bugobliterator.itermbuddy.core.chat.ChatRepository
+import dev.bugobliterator.itermbuddy.core.chat.InMemoryChatSeenStore
 import dev.bugobliterator.itermbuddy.core.noise.newStaticKeyPair
 import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
 import dev.bugobliterator.itermbuddy.core.pairing.roomName
@@ -15,13 +17,14 @@ import dev.bugobliterator.itermbuddy.core.stream.FakeVideoOutput
 import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.decodeEnvelope
+import dev.bugobliterator.itermbuddy.fakemac.FakeChatMac
 import dev.bugobliterator.itermbuddy.fakemac.FakeMac
 import dev.bugobliterator.itermbuddy.fakemac.FakeRelay
 import dev.bugobliterator.itermbuddy.store.InMemoryPairingStore
 import dev.bugobliterator.itermbuddy.store.PairingStage
 import dev.bugobliterator.itermbuddy.store.advancePairing
 import dev.bugobliterator.itermbuddy.store.beginFreshPairing
-import dev.bugobliterator.itermbuddy.wireSessions
+import dev.bugobliterator.itermbuddy.wireHome
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,9 +42,10 @@ import kotlin.random.Random
 import kotlin.time.Duration.Companion.minutes
 
 /**
- * The app's sessions graph as [wireSessions] builds it for `CompanionApp`, on the in-process
- * [FakeRelay] and [FakeMac] in virtual time: a real [CompanionClient], a real [StreamController]
- * with a [FakeVideoOutput], the [SessionTreeRepository] and the navigator.
+ * The app's home graph as [wireHome] builds it for `CompanionApp`, on the in-process [FakeRelay],
+ * [FakeMac] and [FakeChatMac] in virtual time: a real [CompanionClient], a real [StreamController]
+ * with a [FakeVideoOutput], the [SessionTreeRepository], the [ChatRepository] (its seen marks in
+ * [chatSeen]) and the navigator.
  *
  * @param events where the repository reads pushes; null for the client's own `events`.
  */
@@ -60,9 +64,11 @@ internal class SessionsRig(
     val video = FakeVideoOutput { test.testScheduler.currentTime }
     private val connections = MutableStateFlow(0)
 
-    val graph: SessionsGraph = wireSessions(
+    val chatSeen = InMemoryChatSeenStore()
+
+    val graph: HomeGraph = wireHome(
         test.backgroundScope,
-        newClient = { sink ->
+        newClient = { sink, chatSink ->
             CompanionClient(
                 store,
                 relay,
@@ -74,6 +80,7 @@ internal class SessionsRig(
                 EmptyCoroutineContext,
                 { logs += it },
                 sink,
+                chatSink,
             )
         },
         newController = { link ->
@@ -89,12 +96,17 @@ internal class SessionsRig(
         newRepository = { client ->
             SessionTreeRepository(client, test.backgroundScope, events = events?.invoke(client) ?: client.events, log = { logs += it })
         },
+        newChats = { link ->
+            ChatRepository(link, test.backgroundScope, chatSeen, nowMillis = { test.testScheduler.currentTime }, log = { logs += it })
+        },
     )
     val client get() = graph.client
     val repository get() = graph.repository
     val navigator get() = graph.navigator
     val controller get() = graph.controller
+    val chats get() = graph.chats
     val mac = FakeMac(relay, code, macKeys.first, test.backgroundScope)
+    val chatMac = FakeChatMac(mac, test.backgroundScope)
 
     init {
         test.backgroundScope.launch(UnconfinedTestDispatcher(test.testScheduler)) {

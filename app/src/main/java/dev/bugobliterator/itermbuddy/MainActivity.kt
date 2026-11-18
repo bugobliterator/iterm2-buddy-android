@@ -55,13 +55,13 @@ class MainActivity : ComponentActivity() {
      * and closes the stream, so this activity being recreated changes nothing.
      */
     private val homeActions = object : HomeActions {
-        override fun openSession(session: SessionSummary, title: String) = app.sessions.navigator.openSession(session, title)
+        override fun openSession(session: SessionSummary, title: String) = app.home.navigator.openSession(session, title)
 
-        override fun openSettings() = app.sessions.navigator.openSettings()
+        override fun openSettings() = app.home.navigator.openSettings()
 
-        override fun back() = app.sessions.navigator.back()
+        override fun back() = app.home.navigator.back()
 
-        override fun retry() = app.sessions.controller.retry()
+        override fun retry() = app.home.controller.retry()
 
         override fun fitToPhone(sessionGuid: String, viewportWidthPx: Int, viewportHeightPx: Int) =
             app.fitToPhone(sessionGuid, viewportWidthPx, viewportHeightPx)
@@ -83,9 +83,9 @@ class MainActivity : ComponentActivity() {
 
         override fun inputMemory(sessionGuid: String) = app.inputMemories.of(sessionGuid)
 
-        override fun setSearchQuery(query: String) = app.sessions.search.set(query)
+        override fun setSearchQuery(query: String) = app.home.search.set(query)
 
-        override fun refresh() = app.sessions.repository.refresh()
+        override fun refresh() = app.home.repository.refresh()
 
         override fun reconnect() {
             app.clearNotices()
@@ -104,7 +104,7 @@ class MainActivity : ComponentActivity() {
         app.startOnce()
         enableEdgeToEdge()
         val version = appVersion()
-        val sessions = app.sessions
+        val sessions = app.home
         val video = LiveVideoSource(app.video, sessions.controller.state, sessions.controller.historyTiles, app.selection, app.browser)
         val debugBuild = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         // The live view reads the stream's session and config; liveTop moves with the output, so

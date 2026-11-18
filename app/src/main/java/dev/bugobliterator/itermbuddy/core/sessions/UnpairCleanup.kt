@@ -9,8 +9,12 @@ import kotlinx.coroutines.launch
 /**
  * Runs every one of [cleanups], in order, each time [paired] turns false: a local unpair, the
  * Mac's `unpaired`, or a new scan replacing the pairing. A cleanup that throws is logged and the
- * rest still run. `CompanionApp` (through `wireSessions`) passes the navigator's `reset` (which
- * also stops any stream) and the repository's `clear`.
+ * rest still run. `CompanionApp` (through `wireHome`) passes the navigator's `reset` (which
+ * also stops any stream), the session tree repository's `clear`, and the chat repository's
+ * `clear`. The chat seen store is deliberately not a cleanup of its own: `ChatRepository.clear()`
+ * wipes it on the chat consumer, after its barrier against inputs from earlier links, so a mark
+ * still queued there cannot land after the wipe (a cleanup here runs on another thread and would
+ * race it).
  *
  * A [StateFlow] conflates: a false followed by a true before this collector runs would be missed.
  * The client cannot do that: a new pairing is stored unconfirmed (false) first and is confirmed
