@@ -37,11 +37,11 @@ kotlin {
     jvmToolchain(17)
 }
 
-/** Copies the one fixture the device test reads into a generated androidTest assets directory. */
-abstract class CopyHevcClipAssets : DefaultTask() {
-    @get:InputFile
+/** Copies the fixtures the device tests read into a generated androidTest assets directory, flat. */
+abstract class CopyDeviceTestFixtures : DefaultTask() {
+    @get:InputFiles
     @get:PathSensitive(PathSensitivity.RELATIVE)
-    abstract val clip: RegularFileProperty
+    abstract val fixtures: ConfigurableFileCollection
 
     @get:OutputDirectory
     abstract val outputDir: DirectoryProperty
@@ -51,19 +51,23 @@ abstract class CopyHevcClipAssets : DefaultTask() {
         val out = outputDir.get().asFile
         out.deleteRecursively()
         out.mkdirs()
-        clip.get().asFile.copyTo(out.resolve(clip.get().asFile.name))
+        fixtures.files.forEach { it.copyTo(out.resolve(it.name)) }
     }
 }
 
-val hevcClipAssets = tasks.register<CopyHevcClipAssets>("hevcClipAndroidTestAssets") {
-    // HevcDecodePathDeviceTest reads terminal-clip.json (the clip as the Mac sends it) from the test APK.
-    clip.set(rootProject.layout.projectDirectory.file("fixtures/media/hevc/terminal-clip.json"))
+val deviceTestFixtures = tasks.register<CopyDeviceTestFixtures>("deviceTestFixtureAssets") {
+    fixtures.from(
+        // HevcDecodePathDeviceTest reads terminal-clip.json (the clip as the Mac sends it).
+        rootProject.layout.projectDirectory.file("fixtures/media/hevc/terminal-clip.json"),
+        // MentionParserDeviceTest runs the parser vectors on the device's ICU regex engine.
+        rootProject.layout.projectDirectory.file("fixtures/chat/mention-parser.json"),
+    )
 }
 
 androidComponents {
     onVariants { variant ->
         variant.deviceTests.values.forEach { deviceTest ->
-            deviceTest.sources.assets?.addGeneratedSourceDirectory(hevcClipAssets, CopyHevcClipAssets::outputDir)
+            deviceTest.sources.assets?.addGeneratedSourceDirectory(deviceTestFixtures, CopyDeviceTestFixtures::outputDir)
         }
     }
 }
