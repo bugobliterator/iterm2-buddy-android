@@ -4,6 +4,8 @@ import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.noise.newStaticKeyPair
 import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
+import dev.bugobliterator.itermbuddy.core.stream.TileState
+import dev.bugobliterator.itermbuddy.core.stream.Tiles
 import dev.bugobliterator.itermbuddy.fakemac.FakeMac
 import dev.bugobliterator.itermbuddy.ui.HomeDestination
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -48,6 +50,11 @@ class UnpairCleanupTest {
         assertEquals(SessionsRig.ORIGIN, rig.client.relayOrigin.value)
         assertTrue(rig.controller.state.value is LiveViewState.Live)
         assertNotNull(rig.controller.activeStream.value)
+        // History tiles cached: the fixture config has history up to 3999.
+        rig.mac.onRequest("fetchHistoryTile") { Tiles.tilePayload(Tiles.fetchBody(it)) }
+        rig.controller.historyTiles.want(3900, 3999)
+        runCurrent()
+        assertEquals(2, rig.controller.historyTiles.tiles.value.values.count { it is TileState.Ready })
         // What the owner typed in the UI: the search, a draft and an armed tray.
         rig.graph.search.set("claude")
         rig.graph.drafts.set(session.guid, "make test")
@@ -66,6 +73,7 @@ class UnpairCleanupTest {
         assertEquals(HomeDestination.SessionList, rig.navigator.destination.value)
         assertEquals(LiveViewState.Closed, rig.controller.state.value)
         assertNull(rig.controller.activeStream.value)
+        assertEquals(emptyMap<Long, TileState>(), rig.controller.historyTiles.tiles.value)
         assertEquals("", rig.graph.search.query.value)
         assertEquals("", rig.graph.drafts.get(session.guid))
         assertFalse(rig.graph.inputMemories.of(session.guid).expanded)

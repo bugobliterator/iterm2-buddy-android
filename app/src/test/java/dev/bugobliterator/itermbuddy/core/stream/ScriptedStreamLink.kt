@@ -4,7 +4,9 @@ import dev.bugobliterator.itermbuddy.core.CompanionRequestException
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withContext
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.Duration
@@ -29,6 +31,12 @@ class ScriptedStreamLink : StreamLink {
     /** The current link: sends and requests for another one throw, as `CompanionClient` does. */
     @Volatile var currentLink: Long = 1
 
+    /**
+     * When true, a request waits for its reply even if its caller is cancelled: a reply the
+     * session already handed to its waiter as the caller was being cancelled.
+     */
+    @Volatile var repliesOutliveCancellation = false
+
     private val nextRequestID = AtomicLong(1)
 
     override suspend fun send(message: PhoneMessage, onLink: Long?) {
@@ -47,6 +55,6 @@ class ScriptedStreamLink : StreamLink {
         val pending = Pending(message, onLink, nextRequestID.getAndIncrement())
         onSent(pending.requestID)
         requests.trySend(pending)
-        return pending.reply.await()
+        return if (repliesOutliveCancellation) withContext(NonCancellable) { pending.reply.await() } else pending.reply.await()
     }
 }

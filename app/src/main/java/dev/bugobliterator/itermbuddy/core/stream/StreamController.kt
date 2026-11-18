@@ -4,6 +4,7 @@ import dev.bugobliterator.itermbuddy.core.CompanionRequestException
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
+import dev.bugobliterator.itermbuddy.core.wire.SelectionSpan
 import dev.bugobliterator.itermbuddy.core.wire.StreamCodec
 import dev.bugobliterator.itermbuddy.core.wire.StreamEndReason
 import kotlinx.coroutines.CancellationException
@@ -125,6 +126,8 @@ class StreamController(
     private val nowMillis: () -> Long,
     private val log: (String) -> Unit,
     ackContext: CoroutineContext = Dispatchers.Default,
+    tileTimeouts: TileTimeouts = TileTimeouts(),
+    tileEncodedBudgetBytes: Long = DEFAULT_ENCODED_TILE_BYTES,
 ) : StreamSink {
     private val stateFlow = MutableStateFlow<LiveViewState>(LiveViewState.Closed)
 
@@ -135,6 +138,16 @@ class StreamController(
 
     /** The adopted stream, or null. */
     val activeStream: StateFlow<ActiveStream?> = activeFlow.asStateFlow()
+
+    /**
+     * The active stream's history tiles. The controller forwards its configs, extents, selection
+     * ranges and live tops, and clears it whenever the active stream ends or is replaced, before
+     * any input of the next stream (iOS `neutralizeDeadStream`, `AppModel.swift:4445-4447, 4534-4553`).
+     */
+    val historyTiles = HistoryTileStore(link, scope, tileTimeouts, tileEncodedBudgetBytes, log)
+
+    /** The active stream's selection as the Mac reports it; null when none or no stream. */
+    val selection: StateFlow<SelectionSpan?> = historyTiles.selection
 
     // ---- Inbox ----
 
@@ -453,6 +466,7 @@ class StreamController(
         frame.liveTop?.let {
             stream.liveTop = it
             publishActive()
+            historyTiles.onLiveTop(it)
         }
         val submitted = try {
             video.submit(frame)
@@ -502,6 +516,8 @@ class StreamController(
             is MacMessage.StreamStarted -> onStarted(control.linkId, control.requestID, message)
             is MacMessage.StreamConfigMessage -> onConfig(control.linkId, message.config)
             is MacMessage.StreamEnded -> onEnded(control.linkId, message)
+            is MacMessage.StreamExtent -> onExtent(control.linkId, message)
+            is MacMessage.SelectionRange -> onSelectionRange(control.linkId, message)
             else -> Unit
         }
     }
@@ -535,9 +551,12 @@ class StreamController(
         if (stream.linkId != linkId || stream.streamID != config.streamID) return
         val previous = stream.config
         stream.config = config
+        historyTiles.onConfig(linkId, stream.streamID, config)
         if (previous == null || previous.generationId != config.generationId) {
             // AppModel.swift:4403: snap the live top to the new extent until a frame says otherwise.
-            stream.liveTop = config.firstAbsLine + maxOf(0, config.totalLines - config.rows)
+            val snapped = config.firstAbsLine + maxOf(0, config.totalLines - config.rows)
+            stream.liveTop = snapped
+            historyTiles.onLiveTop(snapped)
         }
         publishActive()
         val wasStalled = (stateFlow.value as? LiveViewState.Live)?.stalled ?: false
@@ -573,6 +592,22 @@ class StreamController(
         resetVideo()
         intent = null
         setState(LiveViewState.Ended(stream.session, ended.reason))
+    }
+
+    /** iOS `AppModel.swift:4403-4420`: a clear snaps the live top in the controller and the store. */
+    private fun onExtent(linkId: Long, extent: MacMessage.StreamExtent) {
+        val stream = active ?: return
+        if (stream.linkId != linkId || stream.streamID != extent.streamID) return
+        val snapped = historyTiles.onExtent(extent.firstAbsLine, extent.totalLines) ?: return
+        stream.liveTop = snapped
+        publishActive()
+    }
+
+    /** iOS applies it only for the active stream (`AppModel.swift:4421-4424`). */
+    private fun onSelectionRange(linkId: Long, selection: MacMessage.SelectionRange) {
+        val stream = active ?: return
+        if (stream.linkId != linkId || stream.streamID != selection.streamID) return
+        historyTiles.onSelectionRange(selection.range)
     }
 
     // ---- Starts ----
@@ -787,6 +822,8 @@ class StreamController(
 
     private fun setActive(stream: Active?) {
         active = stream
+        // Every end or replacement of the active stream: no tile or selection outlives it.
+        historyTiles.clear()
         rejectingSince = null
         requestRunSince = null
         deferredKeyframe?.cancel()
