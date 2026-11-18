@@ -66,17 +66,23 @@ fun MentionDraft.editSpan(start: Int, end: Int): Pair<Int, Int> {
  * The draft with [start] until [end] replaced by [replacement] (plain text, never a token), the
  * span widened by [editSpan]. Tokens after it shift by the change in length; tokens it covers go.
  *
- * The keyboard sees a token as its name, so a backspace into it can come back as the whole
- * token replaced by what is left of the name (Gboard re-composing "Code Revie" for "Code
- * Review"). An edit whose span is exactly one token and whose replacement is a remnant of the
- * token's name (a part of it, or the name with one character changed, added or removed) deletes
- * the token instead of leaving that remnant as text.
+ * The keyboard sees a token as its name, so it can come back as the whole token replaced by a
+ * re-composed word. For an edit whose span is exactly one token:
+ * - the whole name and more ("Code Reviews": a letter typed at its end) keeps the token and
+ *   inserts the rest after it;
+ * - a strict prefix of the name at least two characters long ("Code Revie": what a backspace
+ *   leaves) deletes the token instead of leaving that remnant as text;
+ * - anything else (a character or word typed over the selected token) replaces it.
  */
 fun MentionDraft.applyEdit(start: Int, end: Int, replacement: String): MentionDraft {
     val (from, to) = editSpan(start, end)
     val covered = tokens.firstOrNull { it.start == from && it.end == to }
-    if (covered != null && replacement.isNotEmpty() && isRemnantOf(replacement, covered.displayName)) {
-        return applyEdit(from, to, "")
+    if (covered != null) {
+        val name = covered.displayName
+        if (replacement.length > name.length && replacement.startsWith(name)) {
+            return applyEdit(to, to, replacement.substring(name.length))
+        }
+        if (isRemnantOf(replacement, name)) return applyEdit(from, to, "")
     }
     val delta = replacement.length - (to - from)
     val kept = ArrayList<MentionToken>(tokens.size)
@@ -103,22 +109,10 @@ fun MentionDraft.insertMention(at: Int, guid: String, displayName: String): Ment
 }
 
 /**
- * Whether [text] is what a keyboard leaves of [name] after editing it as a word: a part of it at
- * least two characters long (one for a two-character name), or [name] with one character changed,
- * added or removed. A single typed character over a selected token is not a remnant.
+ * Whether [text] is what a backspace leaves of [name]: a strict prefix of it, at least
+ * [MIN_REMNANT_LENGTH] characters long. A single character typed over a selected token is not.
  */
-private fun isRemnantOf(text: String, name: String): Boolean {
-    val shortest = minOf(2, name.length - 1).coerceAtLeast(1)
-    if (text.length >= shortest && name.contains(text)) return true
-    return text.length >= 2 && withinOneEdit(text, name)
-}
+private fun isRemnantOf(text: String, name: String): Boolean =
+    text.length >= MIN_REMNANT_LENGTH && text.length < name.length && name.startsWith(text)
 
-/** Whether [a] and [b] differ by at most one character changed, added or removed. */
-private fun withinOneEdit(a: String, b: String): Boolean {
-    if (kotlin.math.abs(a.length - b.length) > 1) return false
-    var i = 0
-    while (i < a.length && i < b.length && a[i] == b[i]) i++
-    var j = 0
-    while (j < a.length - i && j < b.length - i && a[a.length - 1 - j] == b[b.length - 1 - j]) j++
-    return a.length - i - j <= 1 && b.length - i - j <= 1
-}
+private const val MIN_REMNANT_LENGTH = 2

@@ -558,12 +558,20 @@ class ChatRepository(
         entryByID[chatID]?.let { sendMarks[chatID] = SendMark(it.chat.lastModifiedMillis, uniqueID, sendMarks[chatID]) }
     }
 
-    /** [uniqueID]'s send never left the phone: its mark goes, unless a later send set one since. */
+    /** [uniqueID]'s send never left the phone: its mark goes, wherever it sits in the chat's chain of marks. */
     private fun forgetOwnSend(chatID: String, uniqueID: String) {
         val mark = sendMarks[chatID] ?: return
-        if (mark.uniqueID != uniqueID) return
-        val previous = mark.previous
-        if (previous == null) sendMarks -= chatID else sendMarks[chatID] = previous
+        val rest = mark.without(uniqueID)
+        if (rest === mark) return
+        if (rest == null) sendMarks -= chatID else sendMarks[chatID] = rest
+    }
+
+    /** This chain with [uniqueID]'s mark unlinked; the same instance when it holds none. */
+    private fun SendMark.without(uniqueID: String): SendMark? {
+        if (this.uniqueID == uniqueID) return previous
+        val below = previous ?: return this
+        val rest = below.without(uniqueID)
+        return if (rest === below) this else SendMark(modified, this.uniqueID, rest)
     }
 
     /**

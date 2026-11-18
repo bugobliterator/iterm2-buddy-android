@@ -181,6 +181,32 @@ class ChatSendTest {
     }
 
     @Test
+    fun failedSendsLeaveNoStaleMark() = runTest {
+        val rig = openRig()
+        val gate = CompletableDeferred<Unit>()
+        rig.publishGate = gate
+        // Two sends wait on the link; the earlier one's mark sits under the later one's.
+        val first = async { rig.repository.send(A, draft("first")) }
+        runCurrent()
+        val second = async { rig.repository.send(A, draft("second")) }
+        runCurrent()
+        rig.failPublishes = true
+        // They fail in order: the earlier one (not on top) first, then the later one.
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(SendOutcome.NotSendable(NotSendableReason.SEND_FAILED), first.await())
+        assertEquals(SendOutcome.NotSendable(NotSendableReason.SEND_FAILED), second.await())
+        settle()
+        assertTrue(rig.shown().echoes.isEmpty())
+        // No mark of either is left to swallow the agent's bump.
+        rig.sendSample("delivery-agent-opening.json", A)
+        rig.chats = listOf(A to MAC_TIME + 500)
+        rig.pushList()
+        settle()
+        assertTrue(rig.repository.rows.value.single().unread)
+    }
+
+    @Test
     fun ownSendSetsTheSeenMark() = runTest {
         val rig = openRig()
         assertEquals(SendOutcome.Sent, rig.repository.send(A, draft("mine")))
@@ -231,6 +257,20 @@ class ChatSendTest {
         job.cancel()
         runCurrent()
         assertEquals(SendOutcome.NotSendable(NotSendableReason.NOT_CONNECTED), sending.await())
+
+        // Handed to a consumer suspended in receive, which is cancelled before it resumes.
+        val waitingJob = Job()
+        val waiting = ChatRepository(
+            link,
+            CoroutineScope(StandardTestDispatcher(testScheduler) + waitingJob),
+            InMemoryChatSeenStore(),
+            nowMillis = { testScheduler.currentTime },
+        )
+        runCurrent()
+        val handedOver = async(start = CoroutineStart.UNDISPATCHED) { waiting.send(A, draft("hello")) }
+        waitingJob.cancel()
+        runCurrent()
+        assertEquals(SendOutcome.NotSendable(NotSendableReason.NOT_CONNECTED), handedOver.await())
         // And after it stopped.
         assertEquals(SendOutcome.NotSendable(NotSendableReason.NOT_CONNECTED), repository.send(A, draft("again")))
     }

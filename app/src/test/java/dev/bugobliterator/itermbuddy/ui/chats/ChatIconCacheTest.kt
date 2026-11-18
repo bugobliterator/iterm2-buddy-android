@@ -190,6 +190,40 @@ class ChatIconCacheTest {
     }
 
     @Test
+    fun clearCancelsWaitingDecodesUnderAnImmediateDispatcher() {
+        val decoding = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val decoder = ImageBytesDecoder { bytes ->
+            if (bytes.remaining() == "png:slow:1".length) {
+                decoding.countDown()
+                release.await(30, TimeUnit.SECONDS)
+            }
+            DecodedImage(bytes.remaining().toString(), 1)
+        }
+        // One decode at a time, decoding at once in the loading thread (never under the lock). The
+        // two others wait for the permit; cancelled, they complete inside clear() itself.
+        val cache = ChatIconCache(decoder, maxBytes = 1_000, decodeContext = Dispatchers.Unconfined, maxConcurrentDecodes = 1)
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val slow = executor.submit<String?> { runBlocking { cache.load(png("slow", 1)) } }
+            assertEquals(true, decoding.await(30, TimeUnit.SECONDS))
+            val waiting = runBlocking(Dispatchers.Unconfined) {
+                val loads = List(2) { index -> async(start = CoroutineStart.UNDISPATCHED) { cache.load(png("waiting$index", 1)) } }
+                assertNull("the lock is free while a decode runs", cache.cached(png("slow", 1).key))
+                cache.clear()
+                loads.awaitAll()
+            }
+            assertEquals(listOf(null, null), waiting)
+            release.countDown()
+            assertNull("cleared while it decoded", slow.get(30, TimeUnit.SECONDS))
+            assertEquals(0L, cache.heldBytes)
+        } finally {
+            release.countDown()
+            executor.shutdown()
+        }
+    }
+
+    @Test
     fun atMostTwoDecodesRunAtOnce() {
         val executor = Executors.newFixedThreadPool(4)
         val running = AtomicInteger()

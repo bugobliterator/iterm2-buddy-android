@@ -11,6 +11,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -110,6 +111,26 @@ class ChatInboxTest {
         val direct = launch { empty.accept(payload(2, 500)) }
         runCurrent()
         assertTrue(direct.isCompleted)
+    }
+
+    @Test
+    fun postTakenByACancelledReceiveIsReportedDropped() = runTest {
+        val job = Job()
+        val scope = CoroutineScope(StandardTestDispatcher(testScheduler) + job)
+        val inbox = ChatInbox(scope) { }
+        runCurrent()
+        // The consumer waits in receive; the post is handed to it, and it is cancelled before it resumes.
+        var ran = false
+        var dropped = 0
+        inbox.post(onDropped = { dropped++ }) { ran = true }
+        job.cancel()
+        runCurrent()
+        assertFalse(ran)
+        assertEquals(1, dropped)
+        // Queued behind it, and posted after the stop: dropped too, once each.
+        inbox.post(onDropped = { dropped++ }) { ran = true }
+        assertEquals(2, dropped)
+        assertFalse(ran)
     }
 
     @Test
