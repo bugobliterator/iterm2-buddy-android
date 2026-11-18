@@ -49,7 +49,14 @@ sealed interface ChatInput {
      * `peekEnvelope`; [bytes] is the whole envelope, owned by this input (not copied). The consumer
      * decodes it with [decode], off the loop.
      */
-    class Payload(val linkId: Long, val requestID: Long?, val case: String, val bytes: ByteArray) : ChatInput {
+    class Payload(
+        val linkId: Long,
+        val requestID: Long?,
+        val case: String,
+        val bytes: ByteArray,
+        /** For a raw `delivery`, the body's top-level `chatID` as `peekChatID` read it; null otherwise or when unreadable. */
+        val chatID: String? = null,
+    ) : ChatInput {
         /** The envelope's size, for the inbox's byte bound. */
         val size: Int get() = bytes.size
 
@@ -73,7 +80,7 @@ sealed interface ChatInput {
         }
 
         /** The bytes are chat content: the case and size only. */
-        override fun toString(): String = "Payload(linkId=$linkId, requestID=$requestID, case=$case, bytes=$size)"
+        override fun toString(): String = "Payload(linkId=$linkId, requestID=$requestID, case=$case, ${chatID?.let { "chatID=$it, " } ?: ""}bytes=$size)"
     }
 
     /**

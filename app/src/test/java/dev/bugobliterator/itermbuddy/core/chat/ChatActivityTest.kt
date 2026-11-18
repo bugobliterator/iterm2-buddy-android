@@ -544,6 +544,23 @@ class ChatActivityTest {
         assertEquals(WAITING, defaults.states.value[CHAT])
     }
 
+    @Test
+    fun ownerOpeningTheChatInsideTheSettleWindowIsNotDone() {
+        working()
+        tracker.onLinkDown()
+        history(visible = false)
+        tracker.visibilityChanged(CHAT)
+        advance(SETTLE)
+        assertEquals("seen at settle time", IDLE, state())
+
+        working("left")
+        tracker.onLinkDown()
+        history(chatID = "left", visible = true)
+        tracker.visibilityChanged(null)
+        advance(SETTLE)
+        assertEquals("left before settle", DONE, state("left"))
+    }
+
     private companion object {
         const val CHAT = "chat-under-test"
         const val DEBOUNCE = 1_200L

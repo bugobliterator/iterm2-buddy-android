@@ -4,11 +4,15 @@ import com.southernstorm.noise.protocol.Noise
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.ClientTimeouts
 import dev.bugobliterator.itermbuddy.core.CompanionClient
+import dev.bugobliterator.itermbuddy.core.RequestNotSentException
 import dev.bugobliterator.itermbuddy.core.noise.newStaticKeyPair
 import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
 import dev.bugobliterator.itermbuddy.core.pairing.roomName
 import dev.bugobliterator.itermbuddy.core.relay.JoinSigner
 import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
+import dev.bugobliterator.itermbuddy.core.stream.StreamLink
+import dev.bugobliterator.itermbuddy.core.wire.MacMessage
+import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.fakemac.FakeChatMac
 import dev.bugobliterator.itermbuddy.fakemac.FakeMac
 import dev.bugobliterator.itermbuddy.fakemac.FakeRelay
@@ -91,8 +95,29 @@ internal class ChatRig(
         rawDeliveryBytes = RAW_DELIVERY,
     )
 
+    /** Chats whose subscribes fail as if the envelope could not be written: the Mac never sees them. */
+    val notSent: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** The client as the repository's link, except for [notSent]. */
+    private val link = object : StreamLink {
+        override suspend fun send(message: PhoneMessage, onLink: Long?) = client.send(message, onLink)
+
+        override suspend fun request(
+            message: PhoneMessage,
+            onLink: Long?,
+            timeout: Duration?,
+            onSent: (requestID: Long) -> Unit,
+        ): MacMessage {
+            if (message is PhoneMessage.Subscribe && message.chatID in notSent) {
+                onSent(NOT_SENT_REQUEST_ID)
+                throw RequestNotSentException("the frame could not be sent")
+            }
+            return client.request(message, onLink, timeout, onSent)
+        }
+    }
+
     val repository = ChatRepository(
-        client,
+        link,
         test.backgroundScope,
         seen,
         timeouts,
@@ -188,6 +213,9 @@ internal class ChatRig(
         awaitConnected()
     }
 
+    /** How many times the client has connected. */
+    val connectionCount: Int get() = connections.value
+
     suspend fun awaitConnected(times: Int = 1) {
         withTimeout(30.minutes) { connections.first { it >= times } }
     }
@@ -226,6 +254,7 @@ internal class ChatRig(
         const val RAW_CAP = 32 * 1024
         const val RAW_DELIVERY = 16 * 1024
         const val NOISE_CAP = 256 * 1024
+        const val NOT_SENT_REQUEST_ID = 1_000_000L
 
         /** The Mac's `lastModifiedDate` of the sample chats, give or take. */
         const val MAC_TIME = 1_795_000_400_000.0

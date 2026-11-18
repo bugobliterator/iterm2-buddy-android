@@ -142,7 +142,7 @@ class ChatSubscriptions(private val oversized: OversizedChats) {
     private val requests = LinkedHashMap<SubscribeTicket, String>()
 
     /** Requests that timed out: their slots are free, but a late reply still answers the chat. */
-    private val late = HashMap<SubscribeTicket, String>()
+    private val late = LinkedHashMap<SubscribeTicket, String>()
 
     /** Chats [resubscribe]d on this link: once each. */
     private val resubscribed = HashSet<String>()
@@ -240,12 +240,18 @@ class ChatSubscriptions(private val oversized: OversizedChats) {
 
     /**
      * A `History` for [chatID] landed on this link, or a history `PayloadTooLarge` ([tooLarge]),
-     * which also makes it too large for the process.
+     * which also makes it too large for the process. It answers the chat's oldest timed-out request,
+     * if any (a late history whose ticket the caller could not settle). The chat stays unanswered
+     * while a request for it is still in flight (a Try again), or another timed-out one remains:
+     * this history may be the older request's, and the other's reply can still end a link.
      */
     fun subscribed(chatID: String, tooLarge: Boolean = false) {
         attempted += chatID
         subscribed += chatID
-        unanswered -= chatID
+        if (requests.values.none { it == chatID }) {
+            late.entries.firstOrNull { it.value == chatID }?.let { late.remove(it.key) }
+        }
+        answered(chatID)
         if (tooLarge) oversized.foundTooLarge(chatID) else oversized.answered(chatID)
     }
 
