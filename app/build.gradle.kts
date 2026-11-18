@@ -132,7 +132,8 @@ val realIterm2Environment = listOf(
 )
 
 tasks.withType<Test>().configureEach {
-    maxParallelForks = unitTestForks.get()
+    // The real iTerm2 tests share one pairing, and the Mac serves one phone: one JVM, one test at a time.
+    maxParallelForks = if (name == realIterm2TestName) 1 else unitTestForks.get()
     systemProperty("fixtures.dir", rootProject.file("fixtures").path)
     // RelayEndToEndTest runs only when scripts/relay-it.sh points RELAY_DIR at a relay checkout.
     providers.environmentVariable("RELAY_DIR").orNull?.let { relayDir ->
