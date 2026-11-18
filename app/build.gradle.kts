@@ -143,6 +143,8 @@ val chatMemoryTest = tasks.register<Test>(chatMemoryTestName) {
     classpath = unitTests.classpath
     filter { includeTestsMatching(memoryTests) }
     maxHeapSize = "128m"
+    // One collector whose peak is predictable in a small heap.
+    jvmArgs("-XX:+UseSerialGC")
 }
 
 tasks.named("check") { dependsOn(chatMemoryTest) }
