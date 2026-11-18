@@ -147,10 +147,11 @@ class SelectionDriverTest {
         val failed = async { rig.driver.copy("guid-one") }
         rig.link.requests.receive().reply.completeExceptionally(CompanionRequestException("link 1 has ended"))
         assertNull(failed.await())
-        // No reply within the bound.
+        // No reply within the bound: the request carries it, and its timeout is a failure.
         val timedOut = async { rig.driver.copy("guid-one") }
-        rig.link.requests.receive()
-        advanceTimeBy(5.seconds.inWholeMilliseconds + 1)
+        val pending = rig.link.requests.receive()
+        assertEquals(5.seconds, pending.timeout)
+        pending.reply.completeExceptionally(CompanionRequestException("request timed out"))
         assertNull(timedOut.await())
         // No active stream: nothing is asked.
         rig.active.value = null
@@ -249,6 +250,54 @@ class SelectionDriverTest {
         rig.active.value = stream(linkId = 1, streamID = 2)
         gate.complete(Unit)
         assertEquals("the begin was already being sent; the move is dropped", 3, rig.sent().size)
+    }
+
+    @Test
+    fun failedBeginDropsItsGesture() = runTest {
+        val rig = Rig(this)
+        val gate = CompletableDeferred<Unit>()
+        rig.link.sendGate = gate
+        rig.driver.begin(P1)
+        rig.driver.move(P2)
+        rig.driver.end(P3)
+        runCurrent()
+        // The begin times out on a link that never takes it.
+        advanceTimeBy(2.seconds.inWholeMilliseconds + 1)
+        rig.link.sendGate = null
+        gate.complete(Unit)
+        rig.driver.selectAll()
+        assertEquals("the move and end of a gesture the Mac never began are dropped", listOf<PhoneMessage>(PhoneMessage.SelectAllInStream(1)), rig.sent())
+        // The next gesture goes out whole.
+        rig.driver.begin(P1)
+        rig.driver.end(P2)
+        assertEquals(listOf(SelectionPhase.BEGIN, SelectionPhase.END), rig.gestures().map { it.phase })
+    }
+
+    @Test
+    fun copyToClipboardOutlivesTheCallerAndReports() = runTest {
+        val rig = Rig(this)
+        val clipboard = mutableListOf<String>()
+        rig.driver.copyToClipboard("guid-one") { clipboard += it }
+        rig.link.requests.receive().reply.complete(MacMessage.SelectionText("SENTINEL-selection"))
+        runCurrent()
+        assertEquals(listOf("SENTINEL-selection"), clipboard)
+        val copied = checkNotNull(rig.driver.copyNotices.value)
+        assertEquals(CopyOutcome.COPIED, copied.outcome)
+        assertFalse("a notice carries no text", copied.toString().contains("SENTINEL"))
+        rig.driver.noticeShown(copied)
+        assertNull(rig.driver.copyNotices.value)
+        // Nothing selected: the clipboard is left alone.
+        rig.driver.copyToClipboard("guid-one") { clipboard += it }
+        rig.link.requests.receive().reply.complete(MacMessage.SelectionText(""))
+        runCurrent()
+        assertEquals(1, clipboard.size)
+        assertEquals(CopyOutcome.NOTHING_SELECTED, rig.driver.copyNotices.value?.outcome)
+        // A failure.
+        rig.driver.copyToClipboard("guid-one") { clipboard += it }
+        rig.link.requests.receive().reply.complete(MacMessage.Error(JsonObject(emptyMap())))
+        runCurrent()
+        assertEquals(CopyOutcome.FAILED, rig.driver.copyNotices.value?.outcome)
+        assertFalse(rig.logs.any { "SENTINEL" in it })
     }
 
     private companion object {

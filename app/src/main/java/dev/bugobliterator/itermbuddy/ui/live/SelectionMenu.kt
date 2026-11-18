@@ -17,28 +17,13 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import dev.bugobliterator.itermbuddy.core.stream.CopyOutcome
+import dev.bugobliterator.itermbuddy.core.stream.SelectionDriver
+import dev.bugobliterator.itermbuddy.core.wire.SelectionPoint
 import kotlin.math.roundToInt
 
 /** The clip label for copied terminal text. */
 internal const val SELECTION_CLIP_LABEL = "Terminal selection"
-
-/** What a Copy came to, from the Mac's answer ([dev.bugobliterator.itermbuddy.core.stream.SelectionDriver.copy]). */
-internal enum class CopyOutcome {
-    /** On the clipboard; Android 13+ confirms it itself, so nothing more is shown. */
-    COPIED,
-
-    /** The Mac had no selection (`""`, as iOS skips the clipboard for it, `AppModel.swift:5096-5103`). */
-    NOTHING_SELECTED,
-
-    /** An error, a failure or no reply. */
-    FAILED,
-}
-
-internal fun copyOutcome(text: String?): CopyOutcome = when {
-    text == null -> CopyOutcome.FAILED
-    text.isEmpty() -> CopyOutcome.NOTHING_SELECTED
-    else -> CopyOutcome.COPIED
-}
 
 /** The snackbar for [outcome], or null when the system's own confirmation is enough. */
 internal fun copyMessage(outcome: CopyOutcome): String? = when (outcome) {
@@ -123,4 +108,36 @@ internal fun clipboardText(context: Context): String? {
     val clip = context.getSystemService(ClipboardManager::class.java)?.primaryClip ?: return null
     if (clip.itemCount == 0) return null
     return clip.getItemAt(0).coerceToText(context)?.toString()?.takeIf { it.isNotEmpty() }
+}
+
+/**
+ * One long press's selection, for the live view: [begin] reports whether a begin was sent, and
+ * [move] and [end] act only after one was (iOS `guard selecting`, `SessionView.swift:2826, 2840`);
+ * [end] uses the last mapped point when the lift cannot be mapped (iOS `lastDragLivePoint`) and
+ * says whether to show the menu.
+ */
+internal class SelectionPress(private val driver: SelectionDriver) {
+    private var began = false
+    private var last: SelectionPoint? = null
+
+    fun begin(point: SelectionPoint?): Boolean {
+        last = point
+        began = point != null && driver.begin(point)
+        return began
+    }
+
+    fun move(point: SelectionPoint?) {
+        if (!began || point == null) return
+        last = point
+        driver.move(point)
+    }
+
+    /** True when a selection was begun: the menu shows. */
+    fun end(point: SelectionPoint?): Boolean {
+        if (!began) return false
+        began = false
+        (point ?: last)?.let(driver::end)
+        last = null
+        return true
+    }
 }

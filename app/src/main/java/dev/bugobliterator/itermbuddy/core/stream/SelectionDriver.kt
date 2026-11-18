@@ -11,7 +11,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlin.time.Duration
@@ -32,9 +34,12 @@ import kotlin.time.Duration.Companion.seconds
  * - **Stale items.** At dequeue an item whose stream is no longer the active one (another link or
  *   stream ID) is discarded, and each send is bound to its link (`onLink`) and to [sendBound]; a
  *   failure is logged and the queue goes on.
+ * - **Failed begin.** When a gesture's begin fails or times out, its moves and end are dropped too.
  * - **Copy** asks the Mac for the selection of a session by GUID, on the active link, and answers
  *   its text (`""` when nothing is selected), or null on an error reply, a failure, no active
- *   stream, or no reply within [copyTimeout].
+ *   stream, or no reply within [copyTimeout] (the request's own bound). [copyToClipboard] does it in
+ *   [scope], so it outlives the screen (a rotation), hands non-empty text to a clipboard writer and
+ *   reports the [CopyOutcome] in [copyNotices] for the screen to show when it is there.
  *
  * [range] is the selection as the Mac reports it ([StreamController.selection]); the tiles it
  * invalidates are the history store's job. The calls are thread-safe. Logs carry counts, stream
@@ -44,7 +49,7 @@ class SelectionDriver(
     private val link: StreamLink,
     private val active: StateFlow<ActiveStream?>,
     selection: StateFlow<SelectionSpan?>,
-    scope: CoroutineScope,
+    private val scope: CoroutineScope,
     private val log: (String) -> Unit = {},
     private val sendBound: Duration = 2.seconds,
     private val copyTimeout: Duration = 15.seconds,
@@ -57,16 +62,27 @@ class SelectionDriver(
 
     private sealed interface Item
 
-    private class Send(val key: StreamKey, val message: PhoneMessage) : Item
+    /** [gesture] is the gesture the message belongs to, or null for Select All and Clear. */
+    private class Send(val key: StreamKey, val message: PhoneMessage, val gesture: Long? = null) : Item
 
     private class Copy(val linkId: Long, val sessionGuid: String, val result: CompletableDeferred<String?>) : Item
 
     /** The gesture in progress: its stream, mode and the last point sent. */
-    private class Gesture(val key: StreamKey, val mode: SelectionMode, var lastSent: SelectionPoint)
+    private class Gesture(val id: Long, val key: StreamKey, val mode: SelectionMode, var lastSent: SelectionPoint)
 
     private val lock = Any()
     private var gesture: Gesture? = null
+    private var nextGestureId = 1L
     private val queue = Channel<Item>(Channel.UNLIMITED)
+
+    /** The gesture whose begin failed; touched by the consumer only. */
+    private var failedGesture: Long? = null
+
+    private val notices = MutableStateFlow<CopyNotice?>(null)
+    private var nextNoticeId = 1L
+
+    /** The latest [copyToClipboard] outcome not yet [noticeShown]; it carries no text. */
+    val copyNotices: StateFlow<CopyNotice?> = notices.asStateFlow()
 
     init {
         scope.launch {
@@ -74,17 +90,18 @@ class SelectionDriver(
         }
     }
 
-    /** Starts a gesture at [point] on the active stream; nothing is sent without one. */
-    fun begin(point: SelectionPoint, mode: SelectionMode = SelectionMode.CHARACTER) {
+    /** Starts a gesture at [point] on the active stream; false (nothing sent) without one. */
+    fun begin(point: SelectionPoint, mode: SelectionMode = SelectionMode.CHARACTER): Boolean {
         synchronized(lock) {
             val key = activeKey()
             if (key == null) {
                 gesture = null
-                return
+                return false
             }
-            val started = Gesture(key, mode, point)
+            val started = Gesture(nextGestureId++, key, mode, point)
             gesture = started
-            enqueue(Send(key, PhoneMessage.SelectionGesture(key.streamID, SelectionPhase.BEGIN, mode, point)))
+            enqueue(Send(key, PhoneMessage.SelectionGesture(key.streamID, SelectionPhase.BEGIN, mode, point), started.id))
+            return true
         }
     }
 
@@ -94,7 +111,7 @@ class SelectionDriver(
             val current = currentGesture() ?: return
             if (point == current.lastSent) return
             current.lastSent = point
-            enqueue(Send(current.key, PhoneMessage.SelectionGesture(current.key.streamID, SelectionPhase.MOVE, current.mode, point)))
+            enqueue(Send(current.key, PhoneMessage.SelectionGesture(current.key.streamID, SelectionPhase.MOVE, current.mode, point), current.id))
         }
     }
 
@@ -103,7 +120,7 @@ class SelectionDriver(
         synchronized(lock) {
             val current = currentGesture() ?: return
             gesture = null
-            enqueue(Send(current.key, PhoneMessage.SelectionGesture(current.key.streamID, SelectionPhase.END, current.mode, point)))
+            enqueue(Send(current.key, PhoneMessage.SelectionGesture(current.key.streamID, SelectionPhase.END, current.mode, point), current.id))
         }
     }
 
@@ -123,6 +140,34 @@ class SelectionDriver(
         enqueue(Copy(linkId, sessionGuid, result))
         return result.await()
     }
+
+    /**
+     * [copy] in [scope]: non-empty text goes to [clipboard] (never logged), and the outcome to
+     * [copyNotices].
+     */
+    fun copyToClipboard(sessionGuid: String, clipboard: (String) -> Unit) {
+        scope.launch {
+            val text = copy(sessionGuid)
+            val outcome = copyOutcome(text)
+            if (outcome == CopyOutcome.COPIED && text != null) {
+                try {
+                    clipboard(text)
+                } catch (e: Exception) {
+                    log("clipboard write failed (${e::class.simpleName})")
+                    notices.value = CopyNotice(nextId(), CopyOutcome.FAILED)
+                    return@launch
+                }
+            }
+            notices.value = CopyNotice(nextId(), outcome)
+        }
+    }
+
+    /** The screen has shown [notice]. */
+    fun noticeShown(notice: CopyNotice) {
+        notices.compareAndSet(notice, null)
+    }
+
+    private fun nextId(): Long = synchronized(lock) { nextNoticeId++ }
 
     private fun sendForActive(message: (streamID: Long) -> PhoneMessage) {
         synchronized(lock) {
@@ -154,33 +199,38 @@ class SelectionDriver(
     private suspend fun process(item: Item) {
         when (item) {
             is Send -> {
+                if (item.gesture != null && item.gesture == failedGesture) return
                 if (activeKey() != item.key) {
                     log("discarded selection ${item.message::class.simpleName} for stream ${item.key.streamID} on link ${item.key.linkId}: not active")
                     return
                 }
-                send(item)
+                if (!send(item) && item.message is PhoneMessage.SelectionGesture && item.message.phase == SelectionPhase.BEGIN) {
+                    failedGesture = item.gesture
+                }
             }
             is Copy -> item.result.complete(copy(item))
         }
     }
 
-    private suspend fun send(item: Send) {
+    /** Sends [item] within [sendBound]; false (logged) on a timeout or failure. */
+    private suspend fun send(item: Send): Boolean {
         val name = item.message::class.simpleName
-        try {
+        return try {
             withTimeout(sendBound) { link.send(item.message, onLink = item.key.linkId) }
+            true
         } catch (_: TimeoutCancellationException) {
             log("selection $name for stream ${item.key.streamID} timed out after $sendBound; skipped")
+            false
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             log("selection $name for stream ${item.key.streamID} on link ${item.key.linkId} failed (${e::class.simpleName}); skipped")
+            false
         }
     }
 
     private suspend fun copy(item: Copy): String? = try {
-        val reply = withTimeout(copyTimeout) {
-            link.request(PhoneMessage.CopySelection(item.sessionGuid), onLink = item.linkId, timeout = copyTimeout)
-        }
+        val reply = link.request(PhoneMessage.CopySelection(item.sessionGuid), onLink = item.linkId, timeout = copyTimeout)
         when (reply) {
             is MacMessage.SelectionText -> {
                 log("copy for ${item.sessionGuid}: ${reply.text.length} chars")
@@ -191,9 +241,6 @@ class SelectionDriver(
                 null
             }
         }
-    } catch (_: TimeoutCancellationException) {
-        log("copy for ${item.sessionGuid} timed out after $copyTimeout")
-        null
     } catch (e: CancellationException) {
         item.result.complete(null)
         throw e
@@ -202,3 +249,25 @@ class SelectionDriver(
         null
     }
 }
+
+/** What a Copy came to. */
+enum class CopyOutcome {
+    /** On the clipboard; Android 13+ confirms it itself, so nothing more is shown. */
+    COPIED,
+
+    /** The Mac had no selection (`""`: iOS skips the clipboard for it, `AppModel.swift:5096-5103`). */
+    NOTHING_SELECTED,
+
+    /** An error, a failure or no reply. */
+    FAILED,
+}
+
+/** [SelectionDriver.copy]'s answer as a [CopyOutcome]. */
+fun copyOutcome(text: String?): CopyOutcome = when {
+    text == null -> CopyOutcome.FAILED
+    text.isEmpty() -> CopyOutcome.NOTHING_SELECTED
+    else -> CopyOutcome.COPIED
+}
+
+/** One [SelectionDriver.copyToClipboard] outcome, [id] telling repeats apart. Holds no text. */
+data class CopyNotice(val id: Long, val outcome: CopyOutcome)

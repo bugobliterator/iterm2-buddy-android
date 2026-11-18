@@ -18,7 +18,7 @@ import kotlin.time.Duration
 class ScriptedStreamLink : StreamLink {
     class Sent(val message: PhoneMessage, val onLink: Long?)
 
-    class Pending(val message: PhoneMessage, val onLink: Long?, val requestID: Long) {
+    class Pending(val message: PhoneMessage, val onLink: Long?, val requestID: Long, val timeout: Duration? = null) {
         val reply = CompletableDeferred<MacMessage>()
     }
 
@@ -52,7 +52,7 @@ class ScriptedStreamLink : StreamLink {
         onSent: (requestID: Long) -> Unit,
     ): MacMessage {
         if (onLink != null && onLink != currentLink) throw CompanionRequestException("link $onLink has ended")
-        val pending = Pending(message, onLink, nextRequestID.getAndIncrement())
+        val pending = Pending(message, onLink, nextRequestID.getAndIncrement(), timeout)
         onSent(pending.requestID)
         requests.trySend(pending)
         return if (repliesOutliveCancellation) withContext(NonCancellable) { pending.reply.await() } else pending.reply.await()

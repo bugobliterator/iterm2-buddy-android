@@ -128,12 +128,80 @@ class CanvasZoomTest {
         assertNull(selectionPointAt(500f, 300f, ZoomState(0f, 0f, 0f), bandFit, document, terminal))
     }
 
+    /** Hold 300 ms, double-tap window 300 ms, slop 8 px. */
+    private fun arbiter() = PressArbiter(holdMillis = 300, doubleTapMillis = 300, slop = 8f)
+
     @Test
-    fun holdBeginsOnlyForOneStillFinger() {
-        assertFalse("still, one finger: wait out the hold", holdCancelled(travel = 3f, pointers = 1, released = false, slop = 8f))
-        assertTrue("moved past the slop: a pan, wheel drag or scroll", holdCancelled(travel = 9f, pointers = 1, released = false, slop = 8f))
-        assertTrue("two fingers: a pinch", holdCancelled(travel = 0f, pointers = 2, released = false, slop = 8f))
-        assertTrue("lifted: a tap", holdCancelled(travel = 0f, pointers = 0, released = true, slop = 8f))
-        assertTrue("a lost pointer", holdCancelled(travel = Float.NaN, pointers = 1, released = false, slop = 8f))
+    fun tapThenHoldAndDragGivesNoTap() {
+        val press = arbiter()
+        val actions = mutableListOf<PressAction>()
+        actions += press.down(100f, 100f, 0, selectable = true)
+        actions += press.up(100f, 100f, 60)
+        // A long press inside the double-tap window: no deferred tap may land in its selection.
+        actions += press.down(200f, 300f, 200, selectable = true)
+        assertEquals(500L, press.deadline)
+        actions += press.tick(500)
+        assertTrue(press.selecting)
+        actions += press.move(260f, 340f, pointers = 1, time = 550)
+        actions += press.up(260f, 340f, 600)
+        actions += press.tick(5000)
+        assertEquals(
+            listOf(PressAction.SelectBegin(200f, 300f), PressAction.SelectMove(260f, 340f), PressAction.SelectEnd(260f, 340f)),
+            actions,
+        )
+    }
+
+    @Test
+    fun holdAndLiftAfterATapKeepsTheSelection() {
+        val press = arbiter()
+        val actions = press.down(100f, 100f, 0, true) + press.up(100f, 100f, 50) +
+            press.down(100f, 100f, 150, true) + press.up(102f, 101f, 700) + press.tick(10_000)
+        assertEquals(listOf(PressAction.SelectBegin(100f, 100f), PressAction.SelectEnd(102f, 101f)), actions)
+    }
+
+    @Test
+    fun quickTapStillTaps() {
+        val press = arbiter()
+        assertEquals(emptyList<PressAction>(), press.down(10f, 20f, 0, true) + press.up(11f, 21f, 80))
+        assertEquals(380L, press.deadline)
+        assertEquals(emptyList<PressAction>(), press.tick(379))
+        assertEquals(listOf(PressAction.Tap(11f, 21f)), press.tick(380))
+        assertEquals(null, press.deadline)
+        // Unselectable, a long press lifted is a tap too.
+        val plain = arbiter()
+        assertEquals(null, plain.down(10f, 20f, 0, selectable = false).let { plain.deadline })
+        assertEquals(listOf(PressAction.Tap(10f, 20f)), plain.up(10f, 20f, 2000) + plain.tick(2300))
+    }
+
+    @Test
+    fun doubleTapStillZooms() {
+        val press = arbiter()
+        val actions = press.down(10f, 20f, 0, true) + press.up(10f, 20f, 50) +
+            press.down(12f, 22f, 150, true) + press.up(12f, 22f, 200) + press.tick(10_000)
+        assertEquals(listOf(PressAction.DoubleTap(12f, 22f)), actions)
+        assertFalse(press.selecting)
+    }
+
+    @Test
+    fun dragAndPinchStillPanAndNeverSelect() {
+        val press = arbiter()
+        val drag = press.down(10f, 20f, 0, true) + press.move(14f, 20f, 1, 50) + press.move(30f, 20f, 1, 100) +
+            press.tick(1000) + press.move(300f, 20f, 1, 1100) + press.up(300f, 20f, 1200) + press.tick(5000)
+        assertEquals("a drag is the pan or wheel detector's", emptyList<PressAction>(), drag)
+        val pinch = press.down(10f, 20f, 0, true) + press.move(10f, 20f, pointers = 2, time = 40) + press.tick(1000) + press.up(10f, 20f, 1100)
+        assertEquals(emptyList<PressAction>(), pinch)
+        // A tap then a drag: the tap still happens.
+        val tapThenDrag = press.down(10f, 20f, 0, true) + press.up(10f, 20f, 40) + press.down(10f, 20f, 100, true) + press.move(60f, 20f, 1, 150)
+        assertEquals(listOf(PressAction.Tap(10f, 20f)), tapThenDrag)
+    }
+
+    @Test
+    fun cancelEndsASelectionUnderWay() {
+        val press = arbiter()
+        press.down(10f, 20f, 0, true)
+        press.tick(300)
+        press.move(40f, 20f, 1, 350)
+        assertEquals(listOf(PressAction.SelectEnd(40f, 20f)), press.cancel())
+        assertEquals(emptyList<PressAction>(), press.cancel())
     }
 }

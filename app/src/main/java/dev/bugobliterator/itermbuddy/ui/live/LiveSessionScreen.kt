@@ -90,7 +90,6 @@ import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
 import dev.bugobliterator.itermbuddy.core.stream.fitGrid
 import dev.bugobliterator.itermbuddy.core.wire.SelectionPhase
-import dev.bugobliterator.itermbuddy.core.wire.SelectionPoint
 import dev.bugobliterator.itermbuddy.ui.LiveSessionTheme
 import dev.bugobliterator.itermbuddy.video.VideoStats
 import kotlin.math.roundToInt
@@ -167,8 +166,10 @@ interface LiveSessionActions {
  * **Selection** (iOS `SessionView.swift:2806-2860, 2935-2948`). While the active stream is this
  * session's, a 0.3 s hold on the picture or the history begins a selection on the Mac through the
  * app's [LiveVideoSource.selection] driver, the same press drags it, and lifting ends it (at the
- * last mapped point if the lift cannot be mapped) and shows the [SelectionMenu] there: **Copy**
- * (the Mac's text to the clipboard, marked sensitive; "Nothing selected" when it has none),
+ * last mapped point if the lift cannot be mapped) and, only if a begin was sent ([SelectionPress]),
+ * shows the [SelectionMenu] there: **Copy**
+ * (the Mac's text to the clipboard, marked sensitive, done in the app scope so a rotation does
+ * not cut it short; "Nothing selected" when it has none),
  * **Select All** (the menu stays, for Copy), and **Paste** (the clipboard's first text item through
  * the ordered input sender, only while input is offered). The Mac draws the selection into the
  * video and the tiles. A tap while the menu or a selection is up sends Clear Selection and hides
@@ -261,8 +262,7 @@ private fun LiveSessionContent(
     val selection = source.selection
     var menuAnchor by remember(session.guid) { mutableStateOf<Offset?>(null) }
     var menuClipboardHasText by remember(session.guid) { mutableStateOf(false) }
-    // The last point a drag mapped to, for an end that cannot be mapped (iOS `lastDragLivePoint`).
-    val lastDragPoint = remember(session.guid) { arrayOfNulls<SelectionPoint>(1) }
+    val press = remember(selection, session.guid) { selection?.let(::SelectionPress) }
     // The menu belongs to the stream it was shown on: gone with it (an end, a reconnect, another session).
     val selectionStream = activeStream?.takeIf { it.sessionGuid == session.guid }?.let { it.linkId to it.streamID }
     LaunchedEffect(selectionStream) { menuAnchor = null }
@@ -392,19 +392,10 @@ private fun LiveSessionContent(
                         when (phase) {
                             SelectionPhase.BEGIN -> {
                                 menuAnchor = null
-                                lastDragPoint[0] = point
-                                if (point != null) {
-                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    selection.begin(point)
-                                }
+                                if (press?.begin(point) == true) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                             }
-                            SelectionPhase.MOVE -> if (point != null) {
-                                lastDragPoint[0] = point
-                                selection.move(point)
-                            }
-                            SelectionPhase.END -> {
-                                (point ?: lastDragPoint[0])?.let(selection::end)
-                                lastDragPoint[0] = null
+                            SelectionPhase.MOVE -> press?.move(point)
+                            SelectionPhase.END -> if (press?.end(point) == true) {
                                 menuClipboardHasText = clipboardHasText(context)
                                 menuAnchor = Offset(x, y)
                             }
@@ -464,6 +455,17 @@ private fun LiveSessionContent(
             }
             SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
         }
+        if (selection != null) {
+            val notice by selection.copyNotices.collectAsStateWithLifecycle()
+            LaunchedEffect(notice) {
+                val shown = notice ?: return@LaunchedEffect
+                selection.noticeShown(shown)
+                copyMessage(shown.outcome)?.let { message ->
+                    snackbar.currentSnackbarData?.dismiss()
+                    snackbar.showSnackbar(message)
+                }
+            }
+        }
         val anchor = menuAnchor
         if (selection != null && anchor != null) {
             SelectionMenu(
@@ -472,15 +474,9 @@ private fun LiveSessionContent(
                 canPaste = offersInput && menuClipboardHasText,
                 onCopy = {
                     menuAnchor = null
-                    snackbarScope.launch {
-                        val text = selection.copy(session.guid)
-                        val outcome = copyOutcome(text)
-                        if (outcome == CopyOutcome.COPIED && text != null) copyToClipboard(context, text)
-                        copyMessage(outcome)?.let { message ->
-                            snackbar.currentSnackbarData?.dismiss()
-                            snackbar.showSnackbar(message)
-                        }
-                    }
+                    // In the driver's app scope, so a rotation does not cut it short.
+                    val appContext = context.applicationContext
+                    selection.copyToClipboard(session.guid) { text -> copyToClipboard(appContext, text) }
                 },
                 onSelectAll = selection::selectAll,
                 onPaste = {

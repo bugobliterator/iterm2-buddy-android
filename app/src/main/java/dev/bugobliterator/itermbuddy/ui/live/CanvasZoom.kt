@@ -6,6 +6,7 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
 import dev.bugobliterator.itermbuddy.core.stream.cellAt
 import dev.bugobliterator.itermbuddy.core.stream.historyCellAt
 import dev.bugobliterator.itermbuddy.core.wire.SelectionPoint
+import kotlin.math.hypot
 
 /*
  * The live canvas's zoom state and per-event decisions, pure so they are tested on the JVM;
@@ -101,16 +102,149 @@ internal fun gestureStep(
 /** How long a still finger is held before a selection begins: iOS's 0.3 s (`IOS/Screens/SessionView.swift:1928-1933`). */
 internal const val SELECTION_HOLD_MILLIS = 300L
 
+/** What [PressArbiter] decides, at canvas point ([x], [y]). */
+internal sealed interface PressAction {
+    val x: Float
+    val y: Float
+
+    /** A single tap, once the double-tap window has passed with no second press. */
+    data class Tap(override val x: Float, override val y: Float) : PressAction
+
+    data class DoubleTap(override val x: Float, override val y: Float) : PressAction
+
+    data class SelectBegin(override val x: Float, override val y: Float) : PressAction
+
+    data class SelectMove(override val x: Float, override val y: Float) : PressAction
+
+    data class SelectEnd(override val x: Float, override val y: Float) : PressAction
+}
+
 /**
- * Whether a press waiting out [SELECTION_HOLD_MILLIS] is no longer a selection hold: a second
- * finger came down (zoom), the finger moved more than [slop] from where it went down (a pan,
- * a wheel drag or a scroll, decided by [gestureStep]), or it was lifted (a tap). As UIKit's long
- * press with its default allowable movement, so a drag that moves before the hold scrolls instead.
- * Once the hold passes, the selection owns the rest of the gesture and the pan and tap detectors
- * see it consumed.
+ * One decision for taps, double taps and the selection hold, so they cannot overlap (Compose's
+ * `detectTapGestures` defers a first tap until the double-tap window passes and then delivers it
+ * when a second press comes, which would clear a selection that second press starts). Fed the
+ * primary finger's events in event time; [deadline] is when [tick] must be called if nothing
+ * else happens first. Pans and pinches are [gestureStep]'s: a press that moves past [slop] or
+ * gets a second finger before the hold is left to them and never selects.
+ *
+ * - A press held still for [holdMillis] (when it was [down] as selectable) begins a selection
+ *   ([PressAction.SelectBegin]); moves extend it and the lift ends it. A first tap still waiting
+ *   for its double-tap window is dropped: the press that follows it is a selection, not a tap.
+ * - A press lifted before the hold is a tap, deferred [doubleTapMillis] for a second one. A second
+ *   press lifted in time is a [PressAction.DoubleTap] (no tap); one that pans fires the waiting tap.
+ * - An unselectable press held long and lifted is a tap, as Compose's (no long-press handler).
+ *
+ * Holds no state but positions and times; tested on the JVM.
  */
-internal fun holdCancelled(travel: Float, pointers: Int, released: Boolean, slop: Float): Boolean =
-    released || pointers > 1 || !(travel <= slop)
+internal class PressArbiter(private val holdMillis: Long, private val doubleTapMillis: Long, private val slop: Float) {
+    private sealed interface State
+
+    private data object Idle : State
+
+    /** A tap lifted at ([x], [y]) at [upTime], waiting for a second press. */
+    private class TapPending(val x: Float, val y: Float, val upTime: Long) : State
+
+    /** A finger down at ([x], [y]) at [time]; [firstTap] is the tap it may be the second of. */
+    private class Pressed(val x: Float, val y: Float, val time: Long, val selectable: Boolean, val firstTap: TapPending?) : State {
+        var lastX = x
+        var lastY = y
+    }
+
+    /** The press is a pan or pinch: nothing more until it lifts. */
+    private data object Ignoring : State
+
+    private class Selecting(var x: Float, var y: Float) : State
+
+    private var state: State = Idle
+
+    /** Whether a selection owns the gesture: its events should be consumed. */
+    val selecting: Boolean get() = state is Selecting
+
+    /** When [tick] is due, or null when no timer runs. */
+    val deadline: Long?
+        get() = when (val now = state) {
+            is TapPending -> now.upTime + doubleTapMillis
+            is Pressed -> if (now.selectable) now.time + holdMillis else null
+            else -> null
+        }
+
+    /** The primary finger goes down; [selectable] whether a hold may select now. */
+    fun down(x: Float, y: Float, time: Long, selectable: Boolean): List<PressAction> {
+        val fired = tick(time)
+        val pending = state as? TapPending
+        state = Pressed(x, y, time, selectable, pending)
+        return fired
+    }
+
+    /** The primary finger at ([x], [y]) with [pointers] fingers down. */
+    fun move(x: Float, y: Float, pointers: Int, time: Long): List<PressAction> {
+        val fired = tick(time)
+        when (val now = state) {
+            is Pressed -> {
+                now.lastX = x
+                now.lastY = y
+                val travel = hypot(x - now.x, y - now.y)
+                if (pointers > 1 || !(travel <= slop)) {
+                    state = Ignoring
+                    return fired + listOfNotNull(now.firstTap?.let { PressAction.Tap(it.x, it.y) })
+                }
+            }
+            is Selecting -> if (x != now.x || y != now.y) {
+                now.x = x
+                now.y = y
+                return fired + PressAction.SelectMove(x, y)
+            }
+            else -> Unit
+        }
+        return fired
+    }
+
+    /** The primary finger lifts at ([x], [y]). */
+    fun up(x: Float, y: Float, time: Long): List<PressAction> {
+        val fired = tick(time)
+        return when (val now = state) {
+            is Pressed -> if (now.firstTap != null) {
+                state = Idle
+                fired + PressAction.DoubleTap(x, y)
+            } else {
+                state = TapPending(x, y, time)
+                fired
+            }
+            is Selecting -> {
+                state = Idle
+                fired + PressAction.SelectEnd(x, y)
+            }
+            else -> {
+                state = Idle
+                fired
+            }
+        }
+    }
+
+    /** Time passed to [time]: a hold begins, or a waiting tap fires. */
+    fun tick(time: Long): List<PressAction> {
+        val due = deadline ?: return emptyList()
+        if (time < due) return emptyList()
+        return when (val now = state) {
+            is TapPending -> {
+                state = Idle
+                listOf(PressAction.Tap(now.x, now.y))
+            }
+            is Pressed -> {
+                state = Selecting(now.lastX, now.lastY)
+                listOf(PressAction.SelectBegin(now.lastX, now.lastY))
+            }
+            else -> emptyList()
+        }
+    }
+
+    /** The gesture was cut short: a selection ends where it was; anything else is forgotten. */
+    fun cancel(): List<PressAction> {
+        val now = state
+        state = Idle
+        return if (now is Selecting) listOf(PressAction.SelectEnd(now.x, now.y)) else emptyList()
+    }
+}
 
 /**
  * The selection point under screen point ([x], [y]) of a terminal shown with zoom [shown], the
