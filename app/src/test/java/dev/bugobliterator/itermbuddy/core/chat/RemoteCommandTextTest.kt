@@ -105,6 +105,9 @@ class RemoteCommandTextTest {
         assertEquals(1, graphemeCount("👍🏽")) // thumbs up with a skin tone
         assertEquals(1, graphemeCount("각")) // a conjoining jamo syllable
         assertEquals(1, graphemeCount("한"))
+        assertEquals(1, graphemeCount("\u0E17\u0E33")) // Thai "ทำ": SARA AM is a spacing mark
+        assertEquals(1, graphemeCount("\u0EA5\u0EB3")) // Lao, likewise
+        assertEquals(2, graphemeCount("ทำทำ"))
         val thirtyOne = "a".repeat(31)
         assertEquals(thirtyOne + family, (thirtyOne + family).truncatedWithTrailingEllipsis(32))
         assertEquals("$thirtyOne…", (thirtyOne + family + "!").truncatedWithTrailingEllipsis(32))

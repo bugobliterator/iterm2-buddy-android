@@ -202,7 +202,7 @@ class MessageDecodingTest {
     fun interactiveRequestsAreFlagged() {
         val interactive = history.filter { it.isInteractiveRequest }.map { it.uniqueID.takeLast(3) }
         // classic command, select session, offer link, workgroup permission, enable orchestration
-        assertEquals(listOf("070", "160", "204", "207", "208"), interactive)
+        assertEquals(listOf("070", "160", "204", "207", "208", "209"), interactive)
         for (name in listOf("delivery-remote-command-classic", "delivery-select-session-request",
             "delivery-workgroup-permission-request", "delivery-enable-orchestration-request")) {
             assertTrue(name, decodeChatMessage(deliveryMessage(name), budgets).isInteractiveRequest)
@@ -252,7 +252,9 @@ class MessageDecodingTest {
     fun nonImageFileBytesAreNotKept() {
         val notes = (historyMessage("000000000030").body as MessageBody.Multipart).parts
             .filterIsInstance<Subpart.AttachmentPart>().single().attachment.kind as AttachmentKind.File
-        assertNull(notes.bytes)
+        assertNull(notes.copyBytes())
+        assertNull(notes.bytesView())
+        assertEquals(0, notes.keptByteCount)
         assertEquals("notes.txt", notes.name)
         assertEquals("text/plain", notes.mimeType)
         assertEquals("TODO: tag v1.2\n".length, notes.size)
@@ -264,7 +266,11 @@ class MessageDecodingTest {
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAADUlEQVR4AQECAP3/AAAAAgABfgUN0gAAAABJRU5ErkJggg==",
         )
         assertTrue(plot.isImage)
-        assertArrayEquals(expected, plot.bytes)
+        assertArrayEquals(expected, plot.copyBytes())
+        val view = plot.bytesView()!!
+        assertTrue(view.isReadOnly)
+        assertEquals(expected.size, view.remaining())
+        assertArrayEquals(expected, ByteArray(view.remaining()).also { view.get(it) })
     }
 
     private fun fileMessage(name: String, mimeType: String, size: Int): JsonObject {
@@ -283,18 +289,70 @@ class MessageDecodingTest {
     fun imageOverFourMebibytesKeepsNameOnly() {
         val fourMebibytes = 4 * 1024 * 1024
         val over = decodeChatMessage(fileMessage("big.png", "image/png", fourMebibytes + 1), budgets).file()
-        assertNull(over.bytes)
+        assertNull(over.copyBytes())
         assertEquals("big.png", over.name)
         assertEquals("image/png", over.mimeType)
         assertEquals(fourMebibytes + 1, over.size)
         val atLimit = decodeChatMessage(fileMessage("edge.png", "image/png", fourMebibytes), budgets).file()
-        assertEquals(fourMebibytes, atLimit.bytes?.size)
+        assertEquals(fourMebibytes, atLimit.keptByteCount)
 
         // The transcript budget: images are kept in order until the next would overrun it.
         val small = AttachmentBudgets(maxImageBytes = 1000, maxTranscriptImageBytes = 2500)
-        val messages = JsonArray(listOf(800, 900, 1200, 700).map { fileMessage("p$it.png", "IMAGE/PNG", it) })
-        val kept = decodeChatMessages(messages, small).map { it.file().bytes?.size }
+        val messages = JsonArray(listOf(800, 900, 1200, 700).map { fileMessage("p$it.png", "image/png", it) })
+        val kept = decodeChatMessages(messages, small).map { it.file().copyBytes()?.size }
         assertEquals(listOf(800, 900, null, 700), kept)
+    }
+
+    @Test
+    fun imageTypesMatchCaseSensitivelyAsIos() {
+        assertEquals(3, decodeChatMessage(fileMessage("a.png", "image/png", 3), budgets).file().keptByteCount)
+        val upper = decodeChatMessage(fileMessage("a.png", "IMAGE/PNG", 3), budgets).file()
+        assertNull(upper.copyBytes())
+        assertFalse(upper.isImage)
+        assertEquals(3, upper.size)
+    }
+
+    @Test
+    fun malformedContentKeepsTheRestOfTheHistory() {
+        val secret = "kittens-secret"
+        val good = message("""{"markdown":{"_0":"ok"}}""", uniqueID = "\"11111111-2222-4333-8444-000000000001\"")
+        fun withoutContent(): JsonObject = JsonObject(message("{}").filterKeys { it != "content" })
+        val shapes = listOf(
+            withoutContent() to MessageBody.Unreadable("content"),
+            message("\"$secret\"") to MessageBody.Unreadable("content"),
+            message("[1]") to MessageBody.Unreadable("content"),
+            message("null") to MessageBody.Unreadable("content"),
+            message("{}") to MessageBody.Unreadable("content"),
+            message("""{"markdown":{"_0":"$secret"},"plainText":{"_0":"$secret"}}""") to MessageBody.Unreadable("content"),
+            message("""{"$secret":{"_0":"$secret"},"markdown":{"_0":"$secret"}}""") to MessageBody.Unsupported,
+        )
+        for ((shape, expected) in shapes) {
+            val decoded = decodeChatMessages(JsonArray(listOf(good, shape, good)), budgets)
+            assertEquals(listOf(MessageBody.Markdown("ok"), expected, MessageBody.Markdown("ok")), decoded.map { it.body })
+            assertFalse(decoded.toString().contains(secret))
+        }
+    }
+
+    @Test
+    fun statusUpdateNestingIsCapped() {
+        fun nested(depth: Int): String {
+            var update = """{"webSearchStarted":{}}"""
+            repeat(depth) { update = """{"multipart":{"_0":[$update]}}""" }
+            return """{"appendAttachment":{"attachment":{"id":"status","inline":true,
+                "type":{"statusUpdate":{"_0":$update}}},"uuid":"11111111-2222-4333-8444-000000000501"}}"""
+        }
+        val atLimit = decodeChatMessage(message(nested(MAX_STATUS_UPDATE_DEPTH)), budgets).body
+        val kind = (atLimit as MessageBody.AppendAttachment).attachment.kind as AttachmentKind.StatusUpdate
+        assertEquals("Searching the web…", kind.display)
+        assertEquals(
+            MessageBody.Unreadable("appendAttachment"),
+            decodeChatMessage(message(nested(MAX_STATUS_UPDATE_DEPTH + 1)), budgets).body,
+        )
+        // As deep as the kotlinx parser's own nesting limit (400) lets through: still just unreadable.
+        assertEquals(
+            MessageBody.Unreadable("appendAttachment"),
+            decodeChatMessage(message(nested(120)), budgets).body,
+        )
     }
 
     @Test
@@ -366,8 +424,6 @@ class MessageDecodingTest {
             message("""{"markdown":{"_0":"$secret"}}""", uniqueID = "\"$secret\""),
             message("""{"markdown":{"_0":"$secret"}}""", sentDate = "\"$secret\""),
             message("""{"markdown":{"_0":"$secret"}}""", chatID = "{\"$secret\":1}"),
-            message("""{"$secret":{"_0":"$secret"},"markdown":{"_0":"$secret"}}"""),
-            message("\"$secret\""),
         )
         for (obj in rejected) {
             val error = assertThrows(WireDecodeException::class.java) { decodeChatMessage(obj, budgets) }
@@ -492,7 +548,9 @@ class MessageDecodingTest {
         val icon = byteArrayOf(9)
         val held = summary(icon)
         icon[0] = 0
-        assertEquals(9.toByte(), held.icon!![0])
+        assertEquals(9.toByte(), held.copyIcon()!![0])
+        assertTrue(held.iconView()!!.isReadOnly)
+        assertEquals(1, held.iconSize)
     }
 
     @Test

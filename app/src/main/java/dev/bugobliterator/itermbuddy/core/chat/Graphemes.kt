@@ -25,9 +25,14 @@ fun graphemeCount(text: String): Int = graphemeBoundaries(text, limit = Int.MAX_
  * on the phone and on the JVM alike. `java.text.BreakIterator` is not used: before JDK 20 it
  * does not keep emoji ZWJ sequences together, so JVM tests would not see what the device does.
  *
- * Property tables are derived from [Character.getType] plus the fixed ranges below. Not
- * implemented: GB9c (Indic conjunct breaks, Unicode 15.1), which splits a few Indic conjuncts
- * that Swift keeps whole; such a cut differs by at most one cluster.
+ * Property tables are derived from [Character.getType] plus the fixed ranges below. Known gaps,
+ * each moving a cut by at most one cluster in rare text:
+ * - GB9c (Indic conjunct breaks, Unicode 15.1) is not implemented, so a few Indic conjuncts that
+ *   Swift keeps whole are split.
+ * - Every `Mc` is SpacingMark; the handful of Myanmar (and similar) `Mc` that Unicode lists as
+ *   Extend or excludes from SpacingMark are not special-cased.
+ * - GB11 is tracked loosely: `ExtPict ZWJ ZWJ ExtPict` stays one cluster here, where Unicode
+ *   breaks before the second pictograph.
  */
 internal fun graphemeBoundaries(text: String, limit: Int): List<Int> {
     val ends = ArrayList<Int>()
@@ -110,6 +115,7 @@ private fun breakProperty(codePoint: Int): BreakProperty = when {
     codePoint in 0x1F3FB..0x1F3FF -> BreakProperty.EXTEND // emoji modifiers
     codePoint in 0xE0020..0xE007F -> BreakProperty.EXTEND // tags
     codePoint == 0xFF9E || codePoint == 0xFF9F -> BreakProperty.EXTEND // halfwidth sound marks
+    codePoint == 0x0E33 || codePoint == 0x0EB3 -> BreakProperty.SPACING_MARK // Thai and Lao SARA AM (Lo)
     PREPEND.any { codePoint in it } -> BreakProperty.PREPEND
     codePoint in 0x1100..0x115F || codePoint in 0xA960..0xA97C -> BreakProperty.HANGUL_L
     codePoint in 0x1160..0x11A7 || codePoint in 0xD7B0..0xD7C6 -> BreakProperty.HANGUL_V

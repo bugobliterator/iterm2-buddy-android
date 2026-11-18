@@ -34,7 +34,9 @@ data class AttachmentBudgets(
  * Decodes one wire `Message` (`Message.swift:707-757`) as upstream does, with these differences:
  * - Unknown keys are ignored and only fields the phone reads are validated.
  * - `chatID`, `author` (strictly `user` or `agent`), `sentDate` and `uniqueID` must be valid,
- *   and `content` must be an object with one key, or the message is rejected.
+ *   or the message is rejected. Nothing else rejects it.
+ * - A missing, non-object or empty `content` is `Unreadable("content")`; one with several keys
+ *   is [MessageBody.Unsupported] when any key is unknown, else `Unreadable("content")`.
  * - An unknown content case, or an unknown client-local action in a known `clientLocal`, is
  *   [MessageBody.Unsupported], as upstream.
  * - A hidden kind is [MessageBody.Hidden] (or [MessageBody.Commit]) without reading its body.
@@ -85,11 +87,7 @@ private fun decodeMessage(obj: JsonObject, allowance: ImageAllowance): ChatMessa
     val chatID = obj.string(MESSAGE, "chatID")
     val author = Participant.fromRaw(obj.string(MESSAGE, "author"))
         ?: throw WireDecodeException("$MESSAGE.author is not a known participant")
-    val content = obj["content"] as? JsonObject
-        ?: throw WireDecodeException("$MESSAGE.content is missing or not an object")
-    val case = content.keys.singleOrNull()
-        ?: throw WireDecodeException("$MESSAGE.content must have exactly one key, has ${content.size}")
-    val body = decodeBody(case, content.getValue(case), allowance)
+    val body = decodeContent(obj["content"], allowance)
     val sentMillis = obj.millis(MESSAGE, "sentDate")
     val uniqueID = obj.uuid(MESSAGE, "uniqueID")
     return ChatMessage(chatID, author, body, sentMillis, uniqueID)
@@ -114,6 +112,23 @@ private val KNOWN_ACTIONS = setOf(
     "workgroupPermissionRequest", "enableOrchestrationRequest",
     "orchestrationPermissionGranted",
 )
+
+/**
+ * The `content` field. A malformed shape never rejects the message, so one bad message cannot
+ * cost a whole history: a missing or non-object `content`, or `{}`, is `Unreadable("content")`;
+ * several keys are [MessageBody.Unsupported] when any is unknown (upstream peeks one key and may
+ * degrade an unknown one, `Message.swift:45-54`), else `Unreadable("content")`.
+ */
+private fun decodeContent(element: JsonElement?, allowance: ImageAllowance): MessageBody {
+    val content = element as? JsonObject ?: return MessageBody.Unreadable(CONTENT)
+    return when (content.size) {
+        0 -> MessageBody.Unreadable(CONTENT)
+        1 -> content.keys.single().let { case -> decodeBody(case, content.getValue(case), allowance) }
+        else -> if (content.keys.any { it !in KNOWN_CONTENT_CASES }) MessageBody.Unsupported else MessageBody.Unreadable(CONTENT)
+    }
+}
+
+private const val CONTENT = "content"
 
 private fun decodeBody(case: String, element: JsonElement, allowance: ImageAllowance): MessageBody = when {
     case !in KNOWN_CONTENT_CASES || case == "unsupported" -> MessageBody.Unsupported
@@ -241,14 +256,14 @@ private fun decodeClientAction(action: JsonObject): ClientAction? {
 /** `Message.Subpart` (`Message.swift:246-252`): a synthesized enum, so an unknown case is corrupt. */
 private fun decodeSubpart(part: JsonObject, allowance: ImageAllowance): Subpart {
     val path = "multipart.part"
-    val case = part.keys.singleOrNull() ?: throw WireDecodeException("$path must have exactly one key")
+    val case = part.knownCase(SUBPART_CASES, path)
     val body = part.getValue(case).asBody("$path.$case")
     return when (case) {
         "plainText" -> Subpart.PlainText(body.string("$path.$case", "_0"))
         "markdown" -> Subpart.Markdown(body.string("$path.$case", "_0"))
         "context" -> Subpart.Context(body.string("$path.$case", "_0"))
         "attachment" -> Subpart.AttachmentPart(decodeAttachment(body.obj("$path.$case", "_0"), "$path.$case._0", allowance))
-        else -> throw WireDecodeException("$path has an unknown case")
+        else -> throw WireDecodeException("$path has an unhandled case")
     }
 }
 
@@ -257,7 +272,7 @@ private fun decodeAttachment(attachment: JsonObject, path: String, allowance: Im
     val inline = attachment.boolean(path, "inline")
     val id = attachment.string(path, "id")
     val type = attachment.obj(path, "type")
-    val case = type.keys.singleOrNull() ?: throw WireDecodeException("$path.type must have exactly one key")
+    val case = type.knownCase(ATTACHMENT_CASES, "$path.type")
     val at = "$path.type.$case"
     val body = type.getValue(case).asBody(at)
     val kind = when (case) {
@@ -265,14 +280,14 @@ private fun decodeAttachment(attachment: JsonObject, path: String, allowance: Im
         "statusUpdate" -> AttachmentKind.StatusUpdate(decodeStatusUpdate(body.obj(at, "_0"), "$at._0"))
         "file" -> decodeFile(body.obj(at, "_0"), "$at._0", allowance)
         "fileID" -> AttachmentKind.FileId(body.string(at, "id"), body.string(at, "name"))
-        else -> throw WireDecodeException("$path.type has an unknown case")
+        else -> throw WireDecodeException("$path.type has an unhandled case")
     }
     return Attachment(inline, id, kind)
 }
 
-/** `LLM.Message.StatusUpdate` (`LLM.swift:106-113`). */
-private fun decodeStatusUpdate(update: JsonObject, path: String): AgentStatusUpdate {
-    val case = update.keys.singleOrNull() ?: throw WireDecodeException("$path must have exactly one key")
+/** `LLM.Message.StatusUpdate` (`LLM.swift:106-113`). Multiparts nest at most [MAX_STATUS_UPDATE_DEPTH] deep. */
+private fun decodeStatusUpdate(update: JsonObject, path: String, depth: Int = 1): AgentStatusUpdate {
+    val case = update.knownCase(STATUS_UPDATE_CASES, path)
     val at = "$path.$case"
     val body = update.getValue(case).asBody(at)
     return when (case) {
@@ -281,12 +296,28 @@ private fun decodeStatusUpdate(update: JsonObject, path: String): AgentStatusUpd
         "codeInterpreterStarted" -> AgentStatusUpdate.CodeInterpreterStarted
         "codeInterpreterFinished" -> AgentStatusUpdate.CodeInterpreterFinished
         "reasoningSummaryUpdate" -> AgentStatusUpdate.ReasoningSummaryUpdate(body.string(at, "_0"))
-        "multipart" -> AgentStatusUpdate.Multipart(
-            body.array(at, "_0").mapIndexed { index, part -> decodeStatusUpdate(part.asBody("$at[$index]"), "$at[$index]") },
-        )
-        else -> throw WireDecodeException("$path has an unknown case")
+        "multipart" -> {
+            if (depth > MAX_STATUS_UPDATE_DEPTH) throw WireDecodeException("$path nests too deeply")
+            AgentStatusUpdate.Multipart(
+                body.array(at, "_0").map { part -> decodeStatusUpdate(part.asBody("$at[]"), "$at[]", depth + 1) },
+            )
+        }
+        else -> throw WireDecodeException("$path has an unhandled case")
     }
 }
+
+/**
+ * How many status-update multiparts may nest inside one another. Deeper is corrupt,
+ * so a hostile nest cannot overflow the stack; upstream recurses without a bound.
+ */
+internal const val MAX_STATUS_UPDATE_DEPTH = 32
+
+private val SUBPART_CASES = setOf("plainText", "markdown", "context", "attachment")
+private val ATTACHMENT_CASES = setOf("code", "statusUpdate", "file", "fileID")
+private val STATUS_UPDATE_CASES = setOf(
+    "webSearchStarted", "webSearchFinished", "codeInterpreterStarted", "codeInterpreterFinished",
+    "reasoningSummaryUpdate", "multipart",
+)
 
 /**
  * `AttachmentType.File` (`LLM.swift:145-150`). `content` is standard padded base64; its decoded
@@ -310,7 +341,7 @@ private fun decodeFile(file: JsonObject, path: String, allowance: ImageAllowance
     } else {
         null
     }
-    return AttachmentKind.File(name, mimeType, size, bytes)
+    return AttachmentKind.File.adopting(name, mimeType, size, bytes)
 }
 
 private fun base64DecodedSize(encoded: String, path: String): Int {

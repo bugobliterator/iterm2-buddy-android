@@ -1,5 +1,7 @@
 package dev.bugobliterator.itermbuddy.core.chat
 
+import java.nio.ByteBuffer
+
 /**
  * What a chat message says: upstream `Message.Content` (`Message.swift:286-336`), reduced to what
  * the phone shows or needs to merge a streamed reply.
@@ -137,15 +139,29 @@ sealed interface AttachmentKind {
     }
 
     /**
-     * `file(File)`. [size] is the decoded byte count of the wire's `content`. [bytes] are kept only
+     * `file(File)`. [size] is the decoded byte count of the wire's `content`. Bytes are kept only
      * for an `image/` type within the attachment budgets ([AttachmentBudgets]); otherwise null and
      * only the name, type and size are shown. `localPath` is not kept.
      */
-    class File(val name: String, val mimeType: String, val size: Int, bytes: ByteArray?) : AttachmentKind {
-        private val content: ByteArray? = bytes?.copyOf()
+    class File private constructor(
+        val name: String,
+        val mimeType: String,
+        val size: Int,
+        private val content: ByteArray?,
+        @Suppress("UNUSED_PARAMETER") adopted: Adopted,
+    ) : AttachmentKind {
+        /** Holds its own copy of [bytes]. */
+        constructor(name: String, mimeType: String, size: Int, bytes: ByteArray?) :
+            this(name, mimeType, size, bytes?.copyOf(), Adopted)
 
-        /** A copy of the kept bytes, or null when they were not kept. */
-        val bytes: ByteArray? get() = content?.copyOf()
+        /** A fresh copy of the kept bytes, or null when they were not kept. */
+        fun copyBytes(): ByteArray? = content?.copyOf()
+
+        /** The kept bytes as a read-only view, without copying, or null when they were not kept. */
+        fun bytesView(): ByteBuffer? = content?.let { ByteBuffer.wrap(it).asReadOnlyBuffer() }
+
+        /** How many bytes are kept: 0 when none are. */
+        val keptByteCount: Int get() = content?.size ?: 0
 
         val isImage: Boolean get() = isImageMimeType(mimeType)
 
@@ -159,6 +175,12 @@ sealed interface AttachmentKind {
         override fun toString(): String =
             "File(name(len=${name.length}), mimeType(len=${mimeType.length}), size=$size, " +
                 "bytes=${content?.let { "${it.size} kept" } ?: "not kept"})"
+
+        internal companion object {
+            /** Takes ownership of [bytes] without copying: the caller must not keep or change them. */
+            fun adopting(name: String, mimeType: String, size: Int, bytes: ByteArray?): File =
+                File(name, mimeType, size, bytes, Adopted)
+        }
     }
 
     /** `fileID(id:name:)`: a file held by the AI provider; only its name is shown. */
@@ -167,7 +189,11 @@ sealed interface AttachmentKind {
     }
 }
 
-internal fun isImageMimeType(mimeType: String): Boolean = mimeType.lowercase().startsWith("image/")
+/** iOS shows a file as an image when its type has the case-sensitive prefix `image/` (`MessageBubbleView.swift:407`). */
+internal fun isImageMimeType(mimeType: String): Boolean = mimeType.startsWith("image/")
+
+/** Marks the private constructors that take ownership of a byte array instead of copying it. */
+internal object Adopted
 
 /** `LLM.Message.StatusUpdate` (`LLM.swift:106-133`) with its `displayString` (`LLM.swift:517-553`). */
 sealed interface AgentStatusUpdate {
