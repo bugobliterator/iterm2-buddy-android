@@ -14,6 +14,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 class TranscriptMergeTest {
@@ -44,18 +45,34 @@ class TranscriptMergeTest {
         for (element in cases) {
             val case = element.jsonObject
             val name = case.getValue("name").jsonPrimitive.content
-            val chatID = case.getValue("chatID").jsonPrimitive.content
-            val transcript = Transcript(decodeChatMessages(case.getValue("transcript").jsonArray, budgets), budgets)
-            for (delta in case.getValue("deltas").jsonArray) {
-                // A live delivery is decoded on its own, as the receive loop decodes one.
-                val result = transcript.applyDelivery(decodeChatMessage(delta as JsonObject, budgets), chatID)
-                if (name != "append-to-non-text-target-is-ignored" && name != "commit-is-ignored") {
-                    assertFalse("$name: $result", result is MergeResult.Ignored)
-                }
-            }
             val expected = decodeChatMessages(case.getValue("expected").jsonArray, budgets)
-            assertEquals(name, expected, transcript.messages())
+            // Once read only at the end, and once read after every delta: buffering must not show.
+            for (readEachDelta in listOf(false, true)) {
+                assertEquals("$name, read each delta: $readEachDelta", expected, runVector(case, readEachDelta))
+            }
         }
+    }
+
+    private fun runVector(case: JsonObject, readEachDelta: Boolean): List<ChatMessage> {
+        val name = case.getValue("name").jsonPrimitive.content
+        val chatID = case.getValue("chatID").jsonPrimitive.content
+        val transcript = Transcript(decodeChatMessages(case.getValue("transcript").jsonArray, budgets), budgets)
+        val expectedReason = when (name) {
+            "append-to-non-text-target-is-ignored" -> IgnoreReason.TARGET_NOT_TEXT
+            "commit-is-ignored" -> IgnoreReason.HIDDEN
+            else -> null
+        }
+        for (delta in case.getValue("deltas").jsonArray) {
+            // A live delivery is decoded on its own, as the receive loop decodes one.
+            val result = transcript.applyDelivery(decodeChatMessage(delta as JsonObject, budgets), chatID)
+            if (expectedReason != null) {
+                assertEquals(name, MergeResult.Ignored(expectedReason), result)
+            } else {
+                assertFalse("$name: $result", result is MergeResult.Ignored)
+            }
+            if (readEachDelta) transcript.messages()
+        }
+        return transcript.messages()
     }
 
     @Test
@@ -119,6 +136,65 @@ class TranscriptMergeTest {
         assertEquals(listOf(reply), transcript.messages())
         // Any other unreadable message is a message of its own, shown as unreadable.
         assertEquals(MergeResult.Appended(1), transcript.applyDelivery(message(4, MessageBody.Unreadable("markdown")), CHAT))
+        // An unreadable copy of a held message never replaces it; an unreadable one may be replaced.
+        assertEquals(
+            MergeResult.Ignored(IgnoreReason.UNREADABLE_REPLACEMENT),
+            transcript.applyDelivery(message(1, MessageBody.Unreadable("markdown")), CHAT),
+        )
+        assertEquals(MergeResult.Replaced(1), transcript.applyDelivery(message(4, MessageBody.Unreadable("multipart")), CHAT))
+        assertEquals(MergeResult.Replaced(1), transcript.applyDelivery(message(4, MessageBody.Markdown("readable now")), CHAT))
+        assertEquals(listOf(reply, message(4, MessageBody.Markdown("readable now"))), transcript.messages())
+    }
+
+    @Test
+    fun atMostOneBufferIsOpen() {
+        val transcript = Transcript(listOf(message(1, MessageBody.Markdown("a")), message(2, MessageBody.Markdown("b"))), budgets)
+        transcript.applyDelivery(append(3, " one", target = 1), CHAT)
+        assertTrue(transcript.toString(), transcript.toString().contains("streaming=1"))
+        transcript.applyDelivery(append(4, " two", target = 2), CHAT)
+        assertTrue(transcript.toString(), transcript.toString().contains("streaming=1"))
+        transcript.applyDelivery(append(5, " more", target = 1), CHAT)
+        assertTrue(transcript.toString(), transcript.toString().contains("streaming=1"))
+        // Adding a message closes the open buffer, its text folded into its message.
+        transcript.applyDelivery(message(6, MessageBody.Markdown("c")), CHAT)
+        assertTrue(transcript.toString(), transcript.toString().contains("streaming=0"))
+        assertEquals(
+            listOf(MessageBody.Markdown("a one more"), MessageBody.Markdown("b two"), MessageBody.Markdown("c")),
+            transcript.messages().map { it.body },
+        )
+    }
+
+    @Test
+    fun streamedImageChunksKeepBytesOnlyWhenEveryChunkIsAnImage() {
+        fun file(mimeType: String, content: String) =
+            """{"attachment":{"_0":{"id":"file-a","inline":false,"type":{"file":{"_0":{"content":"$content","mimeType":"$mimeType","name":"shot"}}}}}}"""
+        fun opening(mimeType: String) = decodeChatMessage(
+            Json.parseToJsonElement(
+                """{"author":"agent","chatID":"$CHAT","content":{"multipart":{"_0":[${file(mimeType, "AQID")}]}},"sentDate":1,"uniqueID":"${id(1)}"}""",
+            ).jsonObject,
+            budgets,
+        )
+        fun chunk(mimeType: String) = decodeChatMessage(
+            Json.parseToJsonElement(
+                """{"author":"agent","chatID":"$CHAT","content":{"appendAttachment":{"attachment":""" +
+                    """{"id":"file-a","inline":false,"type":{"file":{"_0":{"content":"BAU=","mimeType":"$mimeType","name":".png"}}}},""" +
+                    """"uuid":"${id(1)}"}},"sentDate":2,"uniqueID":"${id(2)}"}""",
+            ).jsonObject,
+            budgets,
+        )
+
+        // The joined type is upstream's concatenation; the continuation's own type is not image/*.
+        val split = Transcript(listOf(opening("image/")), budgets)
+        split.applyDelivery(chunk("png"), CHAT)
+        val splitFile = files(split).single()
+        assertEquals("image/png", splitFile.mimeType)
+        assertEquals("shot.png", splitFile.name)
+        assertEquals(5, splitFile.size)
+        assertNull(splitFile.copyBytes())
+
+        val whole = Transcript(listOf(opening("image/png")), budgets)
+        whole.applyDelivery(chunk("image/png"), CHAT)
+        assertArrayEquals(byteArrayOf(1, 2, 3, 4, 5), files(whole).single().copyBytes())
     }
 
     @Test
@@ -350,7 +426,44 @@ class TranscriptMergeTest {
     }
 
     @Test
+    fun statusDeltasAreLinear() {
+        assumeAllocationCounting()
+        // Warm up, so class loading and JIT do not count.
+        repeat(3) { statusInto(deltas = 2_000) }
+        val shortRun = statusInto(deltas = 2_500)
+        val longRun = statusInto(deltas = 10_000)
+        assertEquals(10_001, longRun.finalLength)
+        val shortPerDelta = shortRun.allocated.toDouble() / 2_500
+        val longPerDelta = longRun.allocated.toDouble() / 10_000
+        assertTrue("allocation per status delta grows: $shortPerDelta, $longPerDelta", longPerDelta < shortPerDelta * 1.5)
+        assertTrue("allocated $longPerDelta bytes per status delta", longPerDelta < MAX_ALLOCATED_PER_STATUS_DELTA)
+    }
+
+    /** Status deltas into one message of a 5 000-message transcript; [StreamRun.finalLength] counts the updates. */
+    private fun statusInto(deltas: Int): StreamRun {
+        val first = Attachment(true, "status-a", AttachmentKind.StatusUpdate(AgentStatusUpdate.WebSearchStarted))
+        val others = (1..5_000).map { message(it, MessageBody.Markdown("other $it")) }
+        val history = others + message(0, MessageBody.Multipart(listOf(Subpart.AttachmentPart(first))))
+        val transcript = Transcript(history, budgets)
+        val updates = listOf(AgentStatusUpdate.CodeInterpreterStarted, AgentStatusUpdate.CodeInterpreterFinished)
+        val inputs = (1..deltas).map {
+            appendAttachment(5_000 + it, Attachment(false, "status-$it", AttachmentKind.StatusUpdate(updates[it % 2])), target = 0)
+        }
+        val allocated = allocatedBy {
+            for (delta in inputs) transcript.applyDelivery(delta, CHAT)
+            transcript[5_000]
+        }
+        val untouched = others.withIndex().all { (i, other) -> transcript[i] === other }
+        val part = (transcript[5_000].body as MessageBody.Multipart).parts.single() as Subpart.AttachmentPart
+        val update = (part.attachment.kind as AttachmentKind.StatusUpdate).update as AgentStatusUpdate.Multipart
+        assertEquals("status-a", part.attachment.id)
+        assertTrue(part.attachment.inline)
+        return StreamRun(allocated, deltas.toLong(), untouched, update.parts.size)
+    }
+
+    @Test
     fun applyIsLinearInDeltas() {
+        assumeAllocationCounting()
         // Warm up, so class loading and JIT do not count.
         repeat(3) { streamInto(otherMessages = 50, deltas = 2_000) }
         val shortRun = streamInto(otherMessages = 5_000, deltas = 2_500)
@@ -383,6 +496,18 @@ class TranscriptMergeTest {
         val untouched = others.withIndex().all { (i, other) -> transcript[if (i < target) i else i + 1] === other }
         val finalLength = (transcript[target].body as MessageBody.Markdown).text.length
         return StreamRun(allocated, deltas.toLong() * CHUNK.length, untouched, finalLength)
+    }
+
+    /**
+     * The linearity tests count this thread's allocated bytes, where the JVM supports it. They model
+     * many deltas and one read at the end, not a read per delta: a read rebuilds a buffered body.
+     */
+    private fun assumeAllocationCounting() {
+        val threads = ManagementFactory.getThreadMXBean() as? com.sun.management.ThreadMXBean
+        assumeTrue(
+            "thread allocation counting is unavailable",
+            threads != null && threads.isThreadAllocatedMemorySupported && threads.isThreadAllocatedMemoryEnabled,
+        )
     }
 
     private fun allocatedBy(block: () -> Unit): Long {
@@ -422,5 +547,8 @@ class TranscriptMergeTest {
          * growing buffer (2 bytes a char, doubled at most), one result per delta and the final read.
          */
         const val MAX_ALLOCATED_PER_APPENDED_CHAR = 16.0
+
+        /** Bytes allocated per status delta by a run: the growing list, one result per delta and the final read. */
+        const val MAX_ALLOCATED_PER_STATUS_DELTA = 160.0
     }
 }

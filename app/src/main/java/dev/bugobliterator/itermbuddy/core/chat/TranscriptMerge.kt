@@ -25,6 +25,9 @@ enum class IgnoreReason {
 
     /** A streamed delta whose body did not decode, so its target cannot be known. */
     UNREADABLE_DELTA,
+
+    /** A message whose body did not decode, naming a held message that did: the held one is kept. */
+    UNREADABLE_REPLACEMENT,
 }
 
 /**
@@ -41,28 +44,48 @@ enum class IgnoreReason {
  * - anything else replaces the message with its `uniqueID` in place, or is appended.
  *
  * Android only: a delta whose body did not decode ([MessageBody.Unreadable] of `append` or
- * `appendAttachment`) is ignored rather than shown as an unreadable message of its own.
+ * `appendAttachment`) is ignored rather than shown as an unreadable message of its own, and an
+ * unreadable message never replaces a readable one with its `uniqueID`; only a new ID is
+ * appended as unreadable.
+ *
+ * Streamed images: the decoder keeps a file's bytes only when its own type starts with `image/`
+ * ([AttachmentBudgets]), and a continuation chunk's type is the rest of the joined type (`"png"`
+ * after `"image/"`), so its bytes are dropped and the joined file keeps its name, type and size
+ * only. A streamed image keeps its bytes only when every chunk's type starts with `image/`.
  */
 fun Transcript.applyDelivery(message: ChatMessage, chatID: String): MergeResult {
     if (message.hidden) return MergeResult.Ignored(IgnoreReason.HIDDEN)
     return when (val body = message.body) {
         is MessageBody.Append ->
-            applyDelta(body.target, message, chatID, { MessageBody.Markdown(body.text) }, TextDelta.Chunk(body.text)) {
+            applyDelta(body.target, message, chatID, { MessageBody.Markdown(body.text) }, StreamDelta.Chunk(body.text)) {
                 it.appendingText(body.text)
             }
         is MessageBody.AppendAttachment -> {
             val kind = body.attachment.kind
-            val delta = if (kind is AttachmentKind.Code) TextDelta.Code(body.attachment, kind.text) else null
+            val delta = when (kind) {
+                is AttachmentKind.Code -> StreamDelta.Code(body.attachment, kind.text)
+                is AttachmentKind.StatusUpdate -> StreamDelta.Status(kind.update)
+                else -> null
+            }
             val start = { MessageBody.Multipart(listOf(Subpart.AttachmentPart(body.attachment))) }
             applyDelta(body.target, message, chatID, start, delta) { it.appendingAttachment(body.attachment, budgets) }
         }
-        is MessageBody.Unreadable ->
-            if (body.case in DELTA_CASES) MergeResult.Ignored(IgnoreReason.UNREADABLE_DELTA) else upsert(message)
+        is MessageBody.Unreadable -> when {
+            body.case in DELTA_CASES -> MergeResult.Ignored(IgnoreReason.UNREADABLE_DELTA)
+            replacesReadable(message.uniqueID) -> MergeResult.Ignored(IgnoreReason.UNREADABLE_REPLACEMENT)
+            else -> upsert(message)
+        }
         else -> upsert(message)
     }
 }
 
 private val DELTA_CASES = setOf("append", "appendAttachment")
+
+/** Whether a message with [uniqueID] is held and readable, which an unreadable copy must not replace. */
+private fun Transcript.replacesReadable(uniqueID: String): Boolean {
+    val index = indexOf(uniqueID)
+    return index >= 0 && storedAt(index).body !is MessageBody.Unreadable
+}
 
 private fun Transcript.upsert(message: ChatMessage): MergeResult {
     val index = indexOf(message.uniqueID)
@@ -75,7 +98,7 @@ private fun Transcript.upsert(message: ChatMessage): MergeResult {
 }
 
 /**
- * Merges a streamed delta into its [target]: in the target's open text buffer when [textDelta]
+ * Merges a streamed delta into its [target]: in the open buffer when [textDelta]
  * can grow it, else by rebuilding the body with [merge] (null for a target that takes no delta).
  * A missing target starts an agent message with the body [start] makes.
  */
@@ -84,7 +107,7 @@ private inline fun Transcript.applyDelta(
     delta: ChatMessage,
     chatID: String,
     start: () -> MessageBody,
-    textDelta: TextDelta?,
+    textDelta: StreamDelta?,
     merge: (MessageBody) -> MessageBody?,
 ): MergeResult {
     val index = indexOf(target)
@@ -151,7 +174,10 @@ internal fun Attachment.appending(other: Attachment, budgets: AttachmentBudgets)
     val lhs = kind
     val rhs = other.kind
     if (lhs is AttachmentKind.StatusUpdate && rhs is AttachmentKind.StatusUpdate) {
-        return copy(kind = AttachmentKind.StatusUpdate(AgentStatusUpdate.Multipart(lhs.update.exploded + rhs.update.exploded)))
+        val updates = ArrayList<AgentStatusUpdate>()
+        lhs.update.explodeInto(updates)
+        rhs.update.explodeInto(updates)
+        return copy(kind = AttachmentKind.StatusUpdate(AgentStatusUpdate.Multipart(updates)))
     }
     if (other.id != id) return null
     return when {
