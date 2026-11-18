@@ -56,6 +56,9 @@ val CONTROL_C = KeyEvent(Key.Text("c"), KeyModifiers(control = true))
  * `home`, `end`, `del` (forward delete), `PgUp`, `PgDn` and F1–F12. Special keys carry the sticky
  * modifiers, applied by the translator.
  *
+ * The [browser] variant (a web page) has no `^C` (an interrupt means nothing to a page) and no
+ * compose key (the browser view has no composer); the rest is the same.
+ *
  * @param modifierVersion changes whenever [modifiers] does, so the tray redraws.
  */
 @Composable
@@ -65,6 +68,7 @@ fun KeyBar(
     expanded: Boolean,
     actions: KeyBarActions,
     modifier: Modifier = Modifier,
+    browser: Boolean = false,
 ) {
     fun special(key: SpecialKey) = { actions.key(KeyEvent(Key.Special(key))) }
     Surface(modifier = modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 2.dp) {
@@ -87,7 +91,7 @@ fun KeyBar(
             }
             KeyRow {
                 KeyCap("esc", "Escape", special(SpecialKey.ESCAPE))
-                KeyCap("^C", "Control C", { actions.key(CONTROL_C) })
+                if (!browser) KeyCap("^C", "Control C", { actions.key(CONTROL_C) })
                 KeyCap("tab", "Tab", special(SpecialKey.TAB))
                 Divider()
                 KeyCap("←", "Left", special(SpecialKey.LEFT))
@@ -95,7 +99,7 @@ fun KeyBar(
                 KeyCap("↑", "Up", special(SpecialKey.UP))
                 KeyCap("→", "Right", special(SpecialKey.RIGHT))
                 Divider()
-                KeyCap("✎", "Compose", actions::compose)
+                if (!browser) KeyCap("✎", "Compose", actions::compose)
                 KeyCap(if (expanded) "⌄" else "⌃", if (expanded) "Fewer keys" else "More keys", actions::toggleExpanded)
                 KeyCap("⌨↓", "Hide keyboard", actions::hideKeyboard)
             }

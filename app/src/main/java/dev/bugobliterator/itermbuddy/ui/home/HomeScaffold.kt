@@ -49,6 +49,7 @@ import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.wire.MacStatus
 import dev.bugobliterator.itermbuddy.ui.HomeDestination
 import dev.bugobliterator.itermbuddy.ui.bannerOffersReconnect
+import dev.bugobliterator.itermbuddy.ui.browser.BrowserSessionScreen
 import dev.bugobliterator.itermbuddy.ui.connectionBanner
 import dev.bugobliterator.itermbuddy.ui.connectionLabel
 import dev.bugobliterator.itermbuddy.ui.keepsScreenOn
@@ -122,8 +123,8 @@ fun macAlertBanner(status: MacStatus?): String? = when {
  * `SESSIONS` (no bottom bar while it is the only tab), rendering [HomeModel.destination].
  * System back on any destination but the list calls [HomeActions.back]. The screen is kept on
  * only while a session view shows ([keepsScreenOn]), whatever the stream's state, and the flag is
- * cleared on leaving it. Session destinations render [LiveSessionScreen], which attaches and
- * detaches the decoder's surface; nothing in composition opens or closes a stream.
+ * cleared on leaving it. Session destinations render [LiveSessionScreen] or [BrowserSessionScreen],
+ * which attach and detach the decoder's surface; nothing in composition opens or closes a stream.
  */
 @Composable
 fun HomeScaffold(model: HomeModel, actions: HomeActions, modifier: Modifier = Modifier) {
@@ -157,13 +158,39 @@ fun HomeScaffold(model: HomeModel, actions: HomeActions, modifier: Modifier = Mo
             )
         }
         is HomeDestination.LiveSession -> LiveSession(destination.session, destination.title, model, actions, modifier)
-        is HomeDestination.BrowserSession -> LiveSession(destination.session, destination.title, model, actions, modifier)
+        is HomeDestination.BrowserSession -> BrowserSession(destination.session, destination.title, model, actions, modifier)
     }
 }
 
 /**
- * The live view for [session]; a browser session shows its video with the browser note until
- * Browser View. The Mac alert banner ([macAlertBanner]) is a row of the live view's top bar.
+ * The browser view for [session], driven by the app's browser driver
+ * ([LiveVideoSource.browser]); without one (never in the app) the live view shows the page.
+ */
+@Composable
+private fun BrowserSession(session: SessionSummary, title: String, model: HomeModel, actions: HomeActions, modifier: Modifier) {
+    val browser = model.video.browser
+    if (browser == null) {
+        LiveSession(session, title, model, actions, modifier)
+        return
+    }
+    BrowserSessionScreen(
+        title = title,
+        session = session,
+        live = model.live,
+        activeStream = model.activeStream,
+        source = model.video,
+        browser = browser,
+        debugBuild = model.debugBuild,
+        videoStatsShown = model.videoStatsShown,
+        actions = actions,
+        modifier = modifier,
+        macAlert = macAlertBanner(model.macStatus),
+    )
+}
+
+/**
+ * The live view for [session]; a browser session here (a Mac below revision 15) shows its video
+ * with the browser note. The Mac alert banner ([macAlertBanner]) is a row of the live view's top bar.
  */
 @Composable
 private fun LiveSession(session: SessionSummary, title: String, model: HomeModel, actions: HomeActions, modifier: Modifier) {

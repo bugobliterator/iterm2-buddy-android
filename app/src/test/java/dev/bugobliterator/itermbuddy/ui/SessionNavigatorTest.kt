@@ -16,7 +16,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 class SessionNavigatorTest {
     private val opened = CopyOnWriteArrayList<SessionSummary>()
     private var closes = 0
-    private val navigator = SessionNavigator(open = { opened += it }, close = { closes++ })
+    private var macRevision = 15
+    private val navigator = SessionNavigator(open = { opened += it }, close = { closes++ }, macRevision = { macRevision })
 
     @Test
     fun openAndBackDriveController() {
@@ -34,10 +35,21 @@ class SessionNavigatorTest {
     }
 
     @Test
-    fun browserRowsOpenTheLiveView() {
+    fun browserRowOpensBrowserAtRevisionFifteen() {
         navigator.openSession(BROWSER)
         assertEquals(listOf(BROWSER), opened)
+        assertEquals(HomeDestination.BrowserSession(BROWSER, "Widget Docs"), navigator.destination.value)
+        navigator.back()
+        assertEquals(1, closes)
+        // Below 15 the Mac takes no browser input: the page is watched in the live view.
+        macRevision = 14
+        navigator.openSession(BROWSER)
         assertEquals(HomeDestination.LiveSession(BROWSER, "Widget Docs"), navigator.destination.value)
+        // A terminal row is always the live view.
+        macRevision = 15
+        navigator.openSession(TERMINAL)
+        assertEquals(HomeDestination.LiveSession(TERMINAL, "zsh"), navigator.destination.value)
+        assertEquals(listOf(BROWSER, BROWSER, TERMINAL), opened)
     }
 
     @Test

@@ -37,11 +37,15 @@ import androidx.compose.ui.input.pointer.changedToDownIgnoreConsumed
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.Velocity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.bugobliterator.itermbuddy.core.stream.BrowserDriver
 import dev.bugobliterator.itermbuddy.core.stream.HistoryTileStore
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.stream.ScrollWheelAccumulator
@@ -61,13 +65,14 @@ import kotlin.math.roundToInt
  * The app-scoped pieces the live view reads directly, outside the home model, so the decoder's
  * per-frame stats and the live top recompose only what shows them: the process's [output], the
  * stream controller's [state] and its [historyTiles] (null: no scrollback), and the app's
- * [selection] driver (null: no selection).
+ * [selection] driver (null: no selection) and [browser] driver (null: no browser view).
  */
 class LiveVideoSource(
     val output: HevcVideoOutput,
     val state: StateFlow<LiveViewState>,
     val historyTiles: HistoryTileStore? = null,
     val selection: SelectionDriver? = null,
+    val browser: BrowserDriver? = null,
 ) {
     /** [videoVisible] now, for the view of [sessionGuid]. */
     fun visible(sessionGuid: String): Boolean = videoVisible(state, output.stats, sessionGuid)
@@ -144,7 +149,16 @@ class LiveVideoSource(
  * [selectionHoldMillis] begins a selection; the same press then drags it and lifting ends it,
  * each phase given with the screen point and the zoom and fit as shown, all to the callback taken
  * at the begin (so a config change mid-drag still ends it). While selecting, every change is
- * consumed in the initial pass, so the pan and wheel detector sees the gesture cancelled.
+ * consumed in the initial pass, so the pan and wheel detector sees the gesture cancelled. With
+ * [doubleTapZoom] false there is no double-tap zoom and a tap is given at its lift.
+ *
+ * **Browser** ([browser] non-null when a gesture starts: a browser page taking input). A tap is
+ * also a click at its page pixel ([browserTapPoint]; none off the page). A one-finger drag scrolls
+ * the page through the driver ([browserGestureStep]: all of it at fit; zoomed in, it pans and only
+ * vertical travel past the pan edge scrolls), at the page pixel under the finger where it went
+ * down ([browserScrollPoint]); a pinch zooms locally, cancels the scroll and makes the rest of the
+ * gesture zoom and pan only; a release at fit with no pinch flings ([browserFlings]) with the
+ * finger's velocity. Leaving composition cancels any scroll or fling under way (iOS `tearDown`).
  */
 @Composable
 fun VideoCanvas(
@@ -168,6 +182,8 @@ fun VideoCanvas(
     onWheel: (up: Boolean, lines: Int) -> Unit = { _, _ -> },
     onSelect: ((phase: SelectionPhase, x: Float, y: Float, shown: ZoomState, fit: FitRect) -> Unit)? = null,
     selectionHoldMillis: Long = SELECTION_HOLD_MILLIS,
+    doubleTapZoom: Boolean = true,
+    browser: BrowserDriver? = null,
 ) {
     var canvas by remember { mutableStateOf(IntSize.Zero) }
     val viewW = canvas.width.toFloat()
@@ -194,6 +210,11 @@ fun VideoCanvas(
     val currentOnWheel by rememberUpdatedState(onWheel)
     val currentOnDocumentView by rememberUpdatedState(onDocumentView)
     val currentOnSelect by rememberUpdatedState(onSelect)
+    val currentBrowser by rememberUpdatedState(browser)
+    val currentImage by rememberUpdatedState(IntSize(maxOf(0, imageWidth), maxOf(0, imageHeight)))
+    DisposableEffect(browser) {
+        onDispose { browser?.cancelScroll() }
+    }
     LaunchedEffect(zoomKey) {
         snapshotFlow {
             val g = geometry
@@ -226,28 +247,76 @@ fun VideoCanvas(
             // geometry is read at each event instead.
             .pointerInput(zoomKey) {
                 var multiTouch = false
+                // The browser page's gesture: decided at its start, with its pinch latch and the
+                // page pixel it scrolls at (kept from an earlier drag when this one has none, as iOS).
+                var pageGesture = false
+                var sawPinch = false
+                var scrollAt: Pair<Float, Float>? = null
                 detectZoomPan(
-                    onStart = {
+                    onStart = { down ->
                         multiTouch = false
+                        sawPinch = false
                         currentWheel?.reset()
+                        pageGesture = currentBrowser != null
+                        if (pageGesture) {
+                            val g = geometry
+                            val image = currentImage
+                            browserScrollPoint(down.x, down.y, shownZoom(kept, g, currentInset()), g.fit, image.width, image.height)?.let { scrollAt = it }
+                        }
                     },
-                    onEnd = { currentWheel?.reset() },
+                    onEnd = { velocity, completed ->
+                        currentWheel?.reset()
+                        val page = currentBrowser
+                        val at = scrollAt
+                        if (pageGesture && completed && page != null && at != null) {
+                            val g = geometry
+                            val shown = shownZoom(kept, g, currentInset())
+                            val density = browserImagePxPerViewPx(currentImage.width, g.fit)
+                            if (density != null && browserFlings(shown.scale, sawPinch)) {
+                                page.fling(velocity.x, velocity.y, density, shown.scale, at.first, at.second)
+                            }
+                        }
+                    },
                 ) { centroid, pan, gestureZoom, pointers ->
-                    val step = gestureStep(kept, geometry, currentInset(), centroid.x, centroid.y, pan.x, pan.y, gestureZoom, pointers, multiTouch, currentWheel)
-                    multiTouch = step.multiTouch
-                    kept = step.kept
-                    if (step.notches.isNotEmpty()) currentOnWheel(step.notches.first(), step.notches.size)
+                    val page = currentBrowser
+                    if (pageGesture && page != null) {
+                        val g = geometry
+                        val inset = currentInset()
+                        val step = browserGestureStep(kept, g, inset, centroid.x, centroid.y, pan.x, pan.y, gestureZoom, pointers, sawPinch)
+                        if (step.pinchStarted) page.cancelScroll()
+                        sawPinch = step.sawPinch
+                        kept = step.kept
+                        val at = scrollAt
+                        val density = browserImagePxPerViewPx(currentImage.width, g.fit)
+                        if ((step.scrollX != 0f || step.scrollY != 0f) && at != null && density != null) {
+                            page.scroll(step.scrollX, step.scrollY, density, shownZoom(step.kept, g, inset).scale, at.first, at.second)
+                        }
+                    } else {
+                        val step = gestureStep(kept, geometry, currentInset(), centroid.x, centroid.y, pan.x, pan.y, gestureZoom, pointers, multiTouch, currentWheel)
+                        multiTouch = step.multiTouch
+                        kept = step.kept
+                        if (step.notches.isNotEmpty()) currentOnWheel(step.notches.first(), step.notches.size)
+                    }
                 }
             }
-            .pointerInput(zoomKey, selectionHoldMillis) {
+            .pointerInput(zoomKey, selectionHoldMillis, doubleTapZoom) {
                 // The select callback of the gesture under way, taken at its begin.
                 var gestureSelect: ((SelectionPhase, Float, Float, ZoomState, FitRect) -> Unit)? = null
-                detectPresses(selectionHoldMillis, selectable = { currentOnSelect != null }) { action ->
+                detectPresses(selectionHoldMillis, doubleTapZoom, selectable = { currentOnSelect != null }) { action ->
                     val g = geometry
                     val inset = currentInset()
                     val shown = shownZoom(kept, g, inset)
                     when (action) {
-                        is PressAction.Tap -> currentOnTap()
+                        is PressAction.Tap -> {
+                            val page = currentBrowser
+                            if (page != null) {
+                                val image = currentImage
+                                browserTapPoint(action.x, action.y, shown, g.fit, image.width, image.height)?.let { (x, y) ->
+                                    page.tap(x.toDouble(), y.toDouble())
+                                }
+                            }
+                            currentOnTap()
+                        }
                         is PressAction.DoubleTap -> {
                             // Zooming out over history keeps the line under the tap rather than jump to the live band.
                             val next = if (g.history > 0f && shown.scale > 1f) {
@@ -329,14 +398,15 @@ private fun VideoSurface(output: HevcVideoOutput, modifier: Modifier) {
 
 /**
  * Taps, double taps and selection holds of the primary finger, decided by a [PressArbiter] in
- * event time (the double-tap window from [viewConfiguration], the hold [holdMillis], touch slop),
+ * event time (the double-tap window from [viewConfiguration], or none without [doubleTaps], the
+ * hold [holdMillis], touch slop),
  * each decision given to [onAction]. [selectable] is read as each press goes down. Events are
  * read in the initial pass and consumed only while a selection owns the gesture. A lift that is a
  * cancel ([isCancelledLift]: the system took the press) is [PressArbiter.cancel], never a tap.
  * Cancelled (the detector restarts), a selection under way still ends where it was.
  */
-internal suspend fun PointerInputScope.detectPresses(holdMillis: Long, selectable: () -> Boolean, onAction: (PressAction) -> Unit) {
-    val arbiter = PressArbiter(holdMillis, viewConfiguration.doubleTapTimeoutMillis, viewConfiguration.touchSlop)
+internal suspend fun PointerInputScope.detectPresses(holdMillis: Long, doubleTaps: Boolean = true, selectable: () -> Boolean, onAction: (PressAction) -> Unit) {
+    val arbiter = PressArbiter(holdMillis, if (doubleTaps) viewConfiguration.doubleTapTimeoutMillis else 0L, viewConfiguration.touchSlop)
     try {
         awaitPointerEventScope {
             var tracked: PointerId? = null
@@ -389,24 +459,29 @@ internal suspend fun PointerInputScope.detectPresses(holdMillis: Long, selectabl
 
 /**
  * Pinch and drag, as `detectTransformGestures` (touch slop, then centroid, pan and zoom per event,
- * no rotation), also giving how many pointers are down and when a gesture past the slop starts and
- * ends (the wheel's accumulator resets then).
+ * no rotation), also giving how many pointers are down and when a gesture past the slop starts
+ * (with where its first finger went down) and ends (the wheel's accumulator resets then), with the
+ * first finger's velocity in px/s and whether it ended with every finger lifted (not cancelled).
  */
 private suspend fun PointerInputScope.detectZoomPan(
-    onStart: () -> Unit,
-    onEnd: () -> Unit,
+    onStart: (down: Offset) -> Unit,
+    onEnd: (velocity: Velocity, completed: Boolean) -> Unit,
     onGesture: (centroid: Offset, pan: Offset, zoom: Float, pointers: Int) -> Unit,
 ) {
     awaitEachGesture {
         var zoom = 1f
         var pan = Offset.Zero
         var pastTouchSlop = false
+        var completed = false
         val touchSlop = viewConfiguration.touchSlop
-        awaitFirstDown(requireUnconsumed = false)
+        val down = awaitFirstDown(requireUnconsumed = false)
+        val velocity = VelocityTracker()
+        velocity.addPointerInputChange(down)
         try {
             do {
                 val event = awaitPointerEvent()
                 val canceled = event.changes.any { it.isConsumed }
+                event.changes.firstOrNull { it.id == down.id }?.let { if (!canceled) velocity.addPointerInputChange(it) }
                 if (!canceled) {
                     val zoomChange = event.calculateZoom()
                     val panChange = event.calculatePan()
@@ -416,7 +491,7 @@ private suspend fun PointerInputScope.detectZoomPan(
                         val zoomMotion = abs(1 - zoom) * event.calculateCentroidSize(useCurrent = false)
                         if (zoomMotion > touchSlop || pan.getDistance() > touchSlop) {
                             pastTouchSlop = true
-                            onStart()
+                            onStart(down.position)
                         }
                     }
                     if (pastTouchSlop) {
@@ -426,9 +501,10 @@ private suspend fun PointerInputScope.detectZoomPan(
                         event.changes.forEach { if (it.positionChanged()) it.consume() }
                     }
                 }
+                completed = !canceled && event.changes.none { it.pressed }
             } while (!canceled && event.changes.any { it.pressed })
         } finally {
-            if (pastTouchSlop) onEnd()
+            if (pastTouchSlop) onEnd(if (completed) velocity.calculateVelocity() else Velocity.Zero, completed)
         }
     }
 }

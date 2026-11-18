@@ -1,6 +1,7 @@
 package dev.bugobliterator.itermbuddy.ui
 
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
+import dev.bugobliterator.itermbuddy.core.stream.BROWSER_INPUT_REVISION
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -16,7 +17,7 @@ sealed interface HomeDestination {
         override fun toString(): String = "LiveSession(session=$session, title(len=${title.length}))"
     }
 
-    /** The browser view; until the Browser View task, browser rows open [LiveSession] instead. */
+    /** The browser view: a browser row on a Mac that takes browser input (revision 15). */
     data class BrowserSession(val session: SessionSummary, val title: String) : HomeDestination {
         override fun toString(): String = "BrowserSession(session=$session, title(len=${title.length}))"
     }
@@ -32,21 +33,33 @@ sealed interface HomeDestination {
  *
  * @param open starts watching a session (the stream controller's `open`).
  * @param close stops the stream and drops the watch (the stream controller's `close`).
+ * @param macRevision the connected Mac's hello revision now (0 when not connected), read when a
+ *   row is opened: a browser row opens [HomeDestination.BrowserSession] at
+ *   [BROWSER_INPUT_REVISION] or above, else the view-only live view.
  */
-class SessionNavigator(private val open: (SessionSummary) -> Unit, private val close: () -> Unit) {
+class SessionNavigator(
+    private val open: (SessionSummary) -> Unit,
+    private val close: () -> Unit,
+    private val macRevision: () -> Int,
+) {
     private val lock = Any()
     private val destinationFlow = MutableStateFlow<HomeDestination>(HomeDestination.SessionList)
 
     val destination: StateFlow<HomeDestination> = destinationFlow.asStateFlow()
 
     /**
-     * Opens [session]'s view, titled [title] (the row's title), and starts its stream. Browser
-     * sessions use the live view until Browser View.
+     * Opens [session]'s view, titled [title] (the row's title), and starts its stream. A browser
+     * session gets the browser view when the Mac takes browser input, else the live view (video
+     * only).
      */
     fun openSession(session: SessionSummary, title: String = session.name) {
         synchronized(lock) {
             open(session)
-            destinationFlow.value = HomeDestination.LiveSession(session, title)
+            destinationFlow.value = if (session.isBrowser && macRevision() >= BROWSER_INPUT_REVISION) {
+                HomeDestination.BrowserSession(session, title)
+            } else {
+                HomeDestination.LiveSession(session, title)
+            }
         }
     }
 

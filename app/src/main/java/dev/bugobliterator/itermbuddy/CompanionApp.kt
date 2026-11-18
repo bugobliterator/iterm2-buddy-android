@@ -6,7 +6,6 @@ import android.util.Log
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
-import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.CompanionClient
 import dev.bugobliterator.itermbuddy.core.CompanionRequestException
 import dev.bugobliterator.itermbuddy.core.input.InputSender
@@ -197,9 +196,7 @@ class CompanionApp : Application() {
             active = sessions.controller.activeStream,
             editing = sessions.controller.browserEditing,
             navigation = sessions.controller.browserNavigation,
-            macRevision = sessions.client.state
-                .map { (it as? ClientState.Connected)?.macRevision ?: 0 }
-                .stateIn(scope, SharingStarted.Eagerly, (sessions.client.state.value as? ClientState.Connected)?.macRevision ?: 0),
+            macRevision = sessions.client.state.map(::macRevisionOf).stateIn(scope, SharingStarted.Eagerly, macRevisionOf(sessions.client.state.value)),
             scope = scope,
             nowMillis = SystemClock::uptimeMillis,
             log = { Log.i(BROWSER_TAG, it) },

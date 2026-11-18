@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy
 
+import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.CompanionClient
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
 import dev.bugobliterator.itermbuddy.core.sessions.clearOnUnpair
@@ -19,7 +20,8 @@ import kotlinx.coroutines.CoroutineScope
  * - [client] sends media and stream-scoped control to [controller] (its stream sink), and the
  *   controller sends through the client (its [StreamLink]);
  * - [repository] reads the client's state, events and requests;
- * - [navigator] drives [controller]'s `open`/`close`;
+ * - [navigator] drives [controller]'s `open`/`close`, and reads the Mac's revision from [client]'s
+ *   state to choose the browser view;
  * - [search], [drafts] and [inputMemories] hold what the owner typed in the UI, app-scoped;
  * - on every unpair (local, Mac-sent, or a re-scan), [navigator] is reset (closing the stream),
  *   [repository] cleared, and the search, drafts and input memories emptied.
@@ -56,7 +58,7 @@ fun wireSessions(
     val controller = newController(client)
     sink.target = controller
     val repository = newRepository(client)
-    val navigator = SessionNavigator(open = controller::open, close = controller::close)
+    val navigator = SessionNavigator(open = controller::open, close = controller::close, macRevision = { macRevisionOf(client.state.value) })
     val search = SessionSearch()
     val drafts = ComposerDrafts()
     val inputMemories = LiveInputMemories()
@@ -78,3 +80,6 @@ private class ForwardingStreamSink : StreamSink {
         checkNotNull(target) { "the stream controller is not wired yet" }.accept(input)
     }
 }
+
+/** The Mac's hello revision in [state]; 0 when not connected. */
+fun macRevisionOf(state: ClientState): Int = (state as? ClientState.Connected)?.macRevision ?: 0

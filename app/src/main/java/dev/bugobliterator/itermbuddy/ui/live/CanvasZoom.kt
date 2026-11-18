@@ -99,6 +99,83 @@ internal fun gestureStep(
     return GestureStep(KeptZoom(next, inset, g.history), emptyList(), latched)
 }
 
+/**
+ * One event of a drag or pinch on a browser page: the new [kept] zoom, the page scroll it makes in
+ * screen px ([scrollX], [scrollY]: positive is right and down, the content following the finger),
+ * whether the gesture has had a pinch ([sawPinch]) and whether this event is its first pinch
+ * ([pinchStarted]: the caller cancels the page scroll then).
+ */
+internal class BrowserGestureStep(val kept: KeptZoom, val scrollX: Float, val scrollY: Float, val sawPinch: Boolean, val pinchStarted: Boolean)
+
+/** At or below this zoom the whole page fits: a drag scrolls it and a release may fling (iOS `zoomScale <= 1.001`). */
+internal const val BROWSER_FIT_SCALE = 1.001f
+
+/**
+ * One event of a pan or pinch on a browser page, as iOS's `handleBrowserPan` and
+ * `accrueBrowserScroll` (`IOS/Screens/SessionView.swift:2256-2328`):
+ *
+ * - With two fingers down, or once the gesture has had them ([sawPinch]), it zooms and pans the
+ *   view locally ([applyGesture]) and never scrolls the page, until it ends.
+ * - At fit ([BROWSER_FIT_SCALE]) a one-finger drag scrolls the page by all of it.
+ * - Zoomed in, it pans the zoomed view ([wheelDrag]): horizontal travel only pans, and vertical
+ *   travel scrolls the page only past the top or bottom pan edge.
+ */
+internal fun browserGestureStep(
+    kept: KeptZoom,
+    geometry: GestureGeometry,
+    inset: Float,
+    centroidX: Float,
+    centroidY: Float,
+    panX: Float,
+    panY: Float,
+    zoom: Float,
+    pointers: Int,
+    sawPinch: Boolean,
+): BrowserGestureStep {
+    val g = geometry
+    val shown = shownZoom(kept, g, inset)
+    if (sawPinch || pointers > 1) {
+        val next = applyGesture(shown, centroidX, centroidY, zoom, panX, panY, g.docFit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right)
+        return BrowserGestureStep(KeptZoom(next, inset, g.history), 0f, 0f, sawPinch = true, pinchStarted = !sawPinch)
+    }
+    if (shown.scale <= BROWSER_FIT_SCALE) {
+        return BrowserGestureStep(kept, finiteOrZero(panX), finiteOrZero(panY), sawPinch = false, pinchStarted = false)
+    }
+    val drag = wheelDrag(shown, panX, panY, g.docFit, g.viewW, g.viewH, inset, g.top, g.left, g.right)
+    return BrowserGestureStep(KeptZoom(drag.state, inset, g.history), 0f, drag.pastEdgeY, sawPinch = false, pinchStarted = false)
+}
+
+/** Whether a released drag coasts: only with the whole page in view and no pinch in the gesture (iOS, `SessionView.swift:2283-2290`). */
+internal fun browserFlings(scale: Float, sawPinch: Boolean): Boolean = scale <= BROWSER_FIT_SCALE && !sawPinch
+
+/** Encoded-image pixels per view pixel at fit (`imageW / fit.width`); null without an image or a fit. */
+internal fun browserImagePxPerViewPx(imageW: Int, fit: FitRect): Float? {
+    if (imageW <= 0 || fit.isEmpty) return null
+    return (imageW / fit.width).takeIf { it.isFinite() && it > 0f }
+}
+
+/**
+ * The page pixel a tap at screen point ([x], [y]) clicks, for the zoom as shown; null off the page
+ * (the black area below a short page), so a click never lands outside the web view on the Mac.
+ */
+internal fun browserTapPoint(x: Float, y: Float, shown: ZoomState, fit: FitRect, imageW: Int, imageH: Int): Pair<Float, Float>? =
+    viewToImage(x, y, shown, fit, imageW, imageH)
+
+/**
+ * The page pixel a drag starting at screen point ([x], [y]) scrolls at (iOS fixes it when the pan
+ * begins, `SessionView.swift:2262-2268`), clamped to the page so a drag that starts below a short
+ * page still scrolls it; null without an image or a fit.
+ */
+internal fun browserScrollPoint(x: Float, y: Float, shown: ZoomState, fit: FitRect, imageW: Int, imageH: Int): Pair<Float, Float>? {
+    if (!(shown.scale > 0f) || !shown.scale.isFinite() || fit.isEmpty || imageW <= 0 || imageH <= 0) return null
+    val imageX = ((x - shown.offsetX) / shown.scale - fit.left) * imageW / fit.width
+    val imageY = ((y - shown.offsetY) / shown.scale - fit.top) * imageH / fit.height
+    if (!imageX.isFinite() || !imageY.isFinite()) return null
+    return imageX.coerceIn(0f, (imageW - 1).toFloat()) to imageY.coerceIn(0f, (imageH - 1).toFloat())
+}
+
+private fun finiteOrZero(value: Float): Float = if (value.isFinite()) value else 0f
+
 /** How long a still finger is held before a selection begins: iOS's 0.3 s (`IOS/Screens/SessionView.swift:1928-1933`). */
 internal const val SELECTION_HOLD_MILLIS = 300L
 
@@ -133,6 +210,8 @@ internal sealed interface PressAction {
  * - A press lifted before the hold is a tap, deferred [doubleTapMillis] for a second one. A second
  *   press lifted in time is a [PressAction.DoubleTap] (no tap); one that pans fires the waiting tap.
  * - An unselectable press held long and lifted is a tap, as Compose's (no long-press handler).
+ * - With [doubleTapMillis] 0 (a browser page, which has no double-tap zoom) a tap is given at its
+ *   lift, never deferred, and two quick taps are two taps.
  *
  * Holds no state but positions and times; tested on the JVM.
  */
@@ -206,6 +285,10 @@ internal class PressArbiter(private val holdMillis: Long, private val doubleTapM
             is Pressed -> if (now.firstTap != null) {
                 state = Idle
                 fired + PressAction.DoubleTap(x, y)
+            } else if (doubleTapMillis <= 0) {
+                // No double tap (a browser page): the tap is not deferred.
+                state = Idle
+                fired + PressAction.Tap(x, y)
             } else {
                 state = TapPending(x, y, time)
                 fired
