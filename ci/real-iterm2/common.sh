@@ -35,7 +35,7 @@ AI_PLUGIN_ZIP_URL="https://iterm2.com/downloads/ai-plugin/iTermAI-1.1.zip"
 # Empty until the first run that installs it prints its sha256; pin that value here, and from
 # then on a different zip fails the job. Either way its JavaScript is checked against its
 # Ed25519 signature with the key iTerm2 3.7.7 embeds for the AI plugin (AIPluginClient.swift:115).
-AI_PLUGIN_ZIP_SHA256=""
+AI_PLUGIN_ZIP_SHA256="6e5547505909df1b1e9355e61f97c4ddc575373d8ef24074c320788426f99f42"
 AI_PLUGIN_SIGNING_KEY="fYLUx58QwucuPJRYxBjp7M//uVM0vTfgUo7d6u4TQR8="
 AI_PLUGIN_BUNDLE_ID="com.googlecode.iterm2.iTermAI"
 
@@ -48,7 +48,7 @@ RELAY_COMMIT="b8aa2f90d2bc8b617d1b9c97043aa0b171885310"
 # run that reaches it prints the value; pin it here and RealIterm2AgentChatTest then fails when
 # iTerm2 sends a different schema.
 FAKE_MODEL_TOOL="session_execute_command"
-FAKE_MODEL_TOOL_SCHEMA_SHA256=""
+FAKE_MODEL_TOOL_SCHEMA_SHA256="a75daa48174aa34a7dc1de035de1d0ace002a2f034275bcce64ac5a7dcc955ce"
 
 # --- Topology -----------------------------------------------------------------------------
 
