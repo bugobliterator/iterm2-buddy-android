@@ -195,6 +195,45 @@ class ChatListRulesTest {
         assertEquals(listOf(6, 7, 8), hashed)
     }
 
+    /** AI off, Loading, Failed (and an unpair, which is Loading) drop the kept rows: no title, snippet or icon outlives them. */
+    @Test
+    fun presenterForgetsRowsWhenTheListGoes() {
+        val hashed = mutableListOf<Int>()
+        val presenter = ChatListPresenter { bytes -> bytes?.let { hashed += it.remaining(); chatIconRef(it) } }
+        val iconRow = ChatRow(
+            ChatListEntry(ChatSummary("a", "title a", 1.0, 2.0, false, null, null, emptyList(), "icon-a".toByteArray()), "snippet a", false),
+            AgentState.IDLE,
+            false,
+        )
+        fun present() =
+            (presenter.present(ChatListState.Loaded(listOf(iconRow.entry), false), listOf(iconRow), true, 15, "", resolutions) as ChatListContent.Rows).rows
+        val leaving = listOf<() -> ChatListContent>(
+            { presenter.present(ChatListState.Loaded(listOf(iconRow.entry), false), listOf(iconRow), false, 15, "", resolutions) },
+            { presenter.present(ChatListState.Loading, emptyList(), true, 15, "", resolutions) },
+            { presenter.present(ChatListState.Failed(retryable = true), emptyList(), true, 15, "", resolutions) },
+            { presenter.present(ChatListState.AiUnavailable, emptyList(), true, 15, "", resolutions) },
+        )
+        var before = present()
+        assertSame("kept while the list stays", before[0], present()[0])
+        for ((index, leave) in leaving.withIndex()) {
+            leave()
+            val after = present()
+            assertNotSame("case $index", before[0], after[0])
+            assertEquals("case $index: the icon is hashed again", index + 2, hashed.size)
+            before = after
+        }
+    }
+
+    @Test
+    fun iconDecodeSideIsCappedAt128Pixels() {
+        // 44 dp in pixels, never more than 128: the 2 MiB budget then holds at least 32 icons.
+        assertEquals(44, iconDecodeSidePx(1f))
+        assertEquals(116, iconDecodeSidePx(2.625f))
+        assertEquals(128, iconDecodeSidePx(3.5f))
+        assertEquals(128, iconDecodeSidePx(4f))
+        assertTrue(ChatIconCache.DEFAULT_MAX_BYTES / (128 * 128 * 4) >= 32)
+    }
+
     @Test
     fun contentIsComputedOffTheCallingThread() = runTest {
         val executor = Executors.newSingleThreadExecutor { Thread(it, "chat-list-test") }
