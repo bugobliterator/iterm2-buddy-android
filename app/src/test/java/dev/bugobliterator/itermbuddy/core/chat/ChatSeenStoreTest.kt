@@ -148,6 +148,30 @@ class ChatSeenStoreTest {
         assertNull(memory.seen("b"))
     }
 
+    /** Marks change at once; the file is written on the writer, and changes while one is queued share it. */
+    @Test
+    fun writesRunOnTheWriterAndCoalesce() {
+        val queued = ArrayDeque<Runnable>()
+        val store = FileChatSeenStore(file, writer = { queued.addLast(it) })
+        repeat(50) { store.markSeen(CHAT_A, WHOLE_MILLIS + it) }
+        store.markSeenAll(mapOf(CHAT_B to FRACTIONAL_MILLIS))
+        assertEquals("the caller never writes", 0, store.saves)
+        assertFalse(file.exists())
+        assertEquals(WHOLE_MILLIS + 49, store.seen(CHAT_A)!!, 0.0)
+        assertEquals("one write queued for all of them", 1, queued.size)
+        queued.removeFirst().run()
+        assertEquals(1, store.saves)
+        assertEquals(WHOLE_MILLIS + 49, store().seen(CHAT_A)!!, 0.0)
+        assertEquals(FRACTIONAL_MILLIS, store().seen(CHAT_B)!!, 0.0)
+
+        // A write still queued at an unpair writes nothing back.
+        store.markSeen(CHAT_A, LATER_MILLIS)
+        store.clear()
+        queued.removeFirst().run()
+        assertFalse(file.exists())
+        assertNull(store().seen(CHAT_A))
+    }
+
     private companion object {
         const val CHAT_A = "6A1D3F5B-2C4E-4A8B-9D0F-1E2A3B4C5D6E"
         const val CHAT_B = "9B8C7D6E-5F4A-4B3C-8D2E-1F0A9B8C7D6E"

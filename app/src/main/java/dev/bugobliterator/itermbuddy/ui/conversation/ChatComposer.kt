@@ -20,10 +20,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,7 +44,6 @@ import dev.bugobliterator.itermbuddy.core.chat.applyEdit
 import dev.bugobliterator.itermbuddy.core.chat.editSpan
 import dev.bugobliterator.itermbuddy.core.chat.insertMention
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTree
-import kotlinx.coroutines.launch
 
 /** The composer's warning while the agent waits on an answer a new message would cancel (`CS:192-237`). */
 const val PENDING_REQUEST_WARNING =
@@ -151,8 +151,10 @@ private class MentionOutput(private val holder: DraftHolder, private val linkCol
 /**
  * The conversation's message row (`IOS/Views/AgentComposerBar.swift:134-176`): **@** opens the
  * [MentionPicker] over [tree], whose pick is inserted at the cursor as a token; the field holds
- * [chatID]'s draft from [drafts]; Send sends it with [send] and the draft clears only when it
- * was sent. Disabled, with [whyNotSendable]'s text, when the chat takes no message now
+ * [chatID]'s draft from [drafts]; Send starts [send] (app-scoped, [ChatDrafts.sendInBackground]),
+ * which clears the draft only when it was sent; the composer follows that send through
+ * [ChatDrafts.sendState], so one that comes back after a rotation still clears its field once and
+ * offers no second Send while it is out. Disabled, with [whyNotSendable]'s text, when the chat takes no message now
  * (`IOS/Screens/ConversationView.swift:47-55`). While [warnsOfPendingRequest], the warning shows
  * and the first Send asks to confirm. Voice dictation is a later phase.
  */
@@ -163,7 +165,7 @@ fun ChatComposer(
     whyNotSendable: NotSendableReason?,
     warnsOfPendingRequest: Boolean,
     tree: SessionTree?,
-    send: suspend (MentionDraft) -> SendOutcome,
+    send: () -> Boolean,
     modifier: Modifier = Modifier,
 ) {
     val holder = remember(chatID) { DraftHolder(drafts.get(chatID)) }
@@ -171,31 +173,32 @@ fun ChatComposer(
     val input = remember(holder) { MentionInput(holder) { drafts.set(chatID, it) } }
     val linkColor = MaterialTheme.colorScheme.primary
     val output = remember(holder, linkColor) { MentionOutput(holder, linkColor) }
-    val scope = rememberCoroutineScope()
-    var sending by remember(chatID) { mutableStateOf(false) }
+    val sendFlow = remember(chatID) { drafts.sendState(chatID) }
+    val sendState by sendFlow.collectAsState()
+    // Sends that ended before this composer came are already in the field it started from.
+    val finishedAtStart = remember(chatID) { sendFlow.value.finished }
+    val sending = sendState.sending
     var confirming by remember(chatID) { mutableStateOf(false) }
     var picking by remember(chatID) { mutableStateOf(false) }
     var problem by remember(chatID) { mutableStateOf<String?>(null) }
     val enabled = whyNotSendable == null
 
-    fun deliver() {
-        sending = true
-        problem = null
-        scope.launch {
-            val outcome = try {
-                drafts.send(chatID, send)
-            } finally {
-                sending = false
+    // A send that ended while this composer is up (started here, or before a rotation).
+    LaunchedEffect(chatID, sendState.finished) {
+        if (sendState.finished <= finishedAtStart) return@LaunchedEffect
+        when (val outcome = sendState.outcome) {
+            SendOutcome.Sent -> if (drafts.get(chatID).text.isEmpty() && holder.draft.text.isNotEmpty()) {
+                holder.draft = MentionDraft.EMPTY
+                field.edit { replace(0, length, "") }
             }
-            when (outcome) {
-                SendOutcome.Sent -> if (drafts.get(chatID).text.isEmpty()) {
-                    holder.draft = MentionDraft.EMPTY
-                    field.edit { replace(0, length, "") }
-                }
-                SendOutcome.Empty -> Unit
-                is SendOutcome.NotSendable -> problem = notSendableText(outcome.reason)
-            }
+            is SendOutcome.NotSendable -> problem = notSendableText(outcome.reason)
+            SendOutcome.Empty, null -> Unit
         }
+    }
+
+    fun deliver() {
+        problem = null
+        send()
     }
 
     fun onSend(confirmed: Boolean) {

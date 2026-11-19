@@ -8,6 +8,7 @@ import java.math.BigDecimal
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.util.concurrent.Executor
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -88,17 +89,31 @@ class InMemoryChatSeenStore : ChatSeenStore {
  * plain decimal (never exponent notation) that reads back to the same `Double`. Loaded on first
  * use; every change rewrites the file through [TEMP_SUFFIX] beside it (a fixed name) and an atomic
  * rename, so a kill leaves the old marks or the new ones; a temporary file left by a kill is
- * deleted on load and by [clear]. Thread-safe. File I/O happens on the caller's thread, so never
- * call it from the UI thread (the chat consumer calls it).
+ * deleted on load and by [clear]. Thread-safe. The marks change in memory at once; the file is
+ * written on [writer] (the app passes an IO executor, so the chat consumer never waits on a
+ * sync), one write at a time, and changes made while a write is queued share the next write.
+ * The first read loads the file on the caller's thread, and [clear] deletes it there (after any
+ * write in progress): never call it from the UI thread.
  *
  * A file that cannot be read or parsed counts as no marks (every chat reads as unseen, never as
  * seen): logged by exception class only. A failed write keeps the marks in memory for this
  * process and is logged the same way.
  *
  * @param log diagnostics: exception classes and counts only, never chat IDs or file bytes.
+ * @param writer where the file is written; by default on the caller's thread, at once.
  */
-class FileChatSeenStore(private val file: File, private val log: (String) -> Unit = {}) : ChatSeenStore {
+class FileChatSeenStore(
+    private val file: File,
+    private val log: (String) -> Unit = {},
+    private val writer: Executor = Executor(Runnable::run),
+) : ChatSeenStore {
     private var loaded: HashMap<String, Double>? = null
+
+    /** A write is queued on [writer] and has not taken its snapshot yet. Guarded by `this`. */
+    private var writeQueued = false
+
+    /** Serialises the file's writes and [clear]'s delete; taken before `this`, never inside it. */
+    private val fileLock = Any()
 
     private val temp = File(file.path + TEMP_SUFFIX)
 
@@ -112,42 +127,65 @@ class FileChatSeenStore(private val file: File, private val log: (String) -> Uni
     @Synchronized
     override fun seen(chatID: String): Double? = marks()[chatID]
 
-    @Synchronized
     override fun markSeen(chatID: String, lastModifiedMillis: Double) {
         if (!lastModifiedMillis.isFinite()) return
-        val marks = marks()
-        if (marks[chatID] == lastModifiedMillis) return
-        marks[chatID] = lastModifiedMillis
-        save(marks)
-    }
-
-    @Synchronized
-    override fun markSeenAll(marks: Map<String, Double>) {
-        val held = marks()
-        var changed = false
-        for ((chatID, millis) in marks) {
-            if (!millis.isFinite() || held[chatID] == millis) continue
-            held[chatID] = millis
-            changed = true
+        val queue = synchronized(this) {
+            val marks = marks()
+            if (marks[chatID] == lastModifiedMillis) return
+            marks[chatID] = lastModifiedMillis
+            queueWrite()
         }
-        if (changed) save(held)
+        if (queue) writer.execute(::write)
     }
 
-    @Synchronized
+    override fun markSeenAll(marks: Map<String, Double>) {
+        val queue = synchronized(this) {
+            val held = marks()
+            var changed = false
+            for ((chatID, millis) in marks) {
+                if (!millis.isFinite() || held[chatID] == millis) continue
+                held[chatID] = millis
+                changed = true
+            }
+            changed && queueWrite()
+        }
+        if (queue) writer.execute(::write)
+    }
+
     override fun forget(chatID: String) {
-        val marks = marks()
-        if (marks.remove(chatID) != null) save(marks)
+        val queue = synchronized(this) { marks().remove(chatID) != null && queueWrite() }
+        if (queue) writer.execute(::write)
     }
 
-    @Synchronized
-    override fun clear() {
-        loaded = HashMap()
+    override fun clear() = synchronized(fileLock) {
+        synchronized(this) {
+            loaded = HashMap()
+            // A write still queued finds nothing to write.
+            writeQueued = false
+        }
         deleteTemp()
         if (file.exists() && !file.delete()) {
             // Leave no marks behind for the next pairing, deleted or not.
             log("chat seen marks: could not delete the file")
             save(emptyMap())
         }
+    }
+
+    /** Whether a write must be queued now (none is waiting to take its snapshot). Holds `this`. */
+    private fun queueWrite(): Boolean {
+        if (writeQueued) return false
+        writeQueued = true
+        return true
+    }
+
+    /** On [writer]: writes the marks as they are now, unless [clear] came first. */
+    private fun write() = synchronized(fileLock) {
+        val snapshot = synchronized(this) {
+            if (!writeQueued) return@synchronized null
+            writeQueued = false
+            HashMap(marks())
+        } ?: return@synchronized
+        save(snapshot)
     }
 
     private fun load(): HashMap<String, Double> {
@@ -220,8 +258,8 @@ class FileChatSeenStore(private val file: File, private val log: (String) -> Uni
         /** Appended to the store's file name for the file each write goes through. */
         const val TEMP_SUFFIX = ".tmp"
 
-        /** The store the app uses, in [Context.getNoBackupFilesDir]. */
-        fun inNoBackupDir(context: Context, log: (String) -> Unit = {}): FileChatSeenStore =
-            FileChatSeenStore(File(context.noBackupFilesDir, FILE_NAME), log)
+        /** The store the app uses, in [Context.getNoBackupFilesDir], written on [writer]. */
+        fun inNoBackupDir(context: Context, writer: Executor, log: (String) -> Unit = {}): FileChatSeenStore =
+            FileChatSeenStore(File(context.noBackupFilesDir, FILE_NAME), log, writer)
     }
 }

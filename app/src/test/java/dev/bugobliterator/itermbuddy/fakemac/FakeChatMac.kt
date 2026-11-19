@@ -28,6 +28,12 @@ import kotlinx.serialization.json.long
  *   later message on the link (`HB:1411-1443`).
  * - [delayReply] holds back the next reply to a case (the serve loop goes on); [streamReply] sends
  *   a scripted turn; [pushChatList], [flipAi] and [refuseDelete] send the unsolicited messages.
+ * - AI off ([setAiAvailable]) as the Mac's `updateAIAvailability` and `requireAI` (`HB:2250-2300`):
+ *   every subscription is dropped, a `subscribe` is refused with the typed `aiUnavailable` error,
+ *   a `publish` (no request ID) is dropped silently, the list is answered with no chats
+ *   (`HB:448-455`), and nothing is streamed. The flip is announced separately ([announceAi]),
+ *   as the Mac's `link.poke(.aiAvailability)` is a task of its own, so a reply computed after the
+ *   flip can reach the phone before the announcement. [flipAi] does both.
  *
  * What the phone sent is in [FakeMac.received] ([sent] filters it by case).
  */
@@ -46,13 +52,25 @@ class FakeChatMac(val mac: FakeMac, private val scope: CoroutineScope) {
 
     private val delays = ConcurrentHashMap<String, Duration>()
 
+    /** Whether AI is on on this Mac now (`CompanionPairingController.aiAvailable()`). */
+    @Volatile var aiAvailable = true
+        private set
+
+    /** The chats subscribed on the Mac now: dropped when AI turns off, as `updateAIAvailability` does. */
+    val subscribed: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     init {
-        reply("listChatsAndSessions") { _, id -> send(samplePayload("chats-and-sessions.json"), id) }
-        reply("createChat") { _, id -> send(samplePayload("chat-created.json"), id) }
+        reply("listChatsAndSessions") { _, id ->
+            send(samplePayload(if (aiAvailable) "chats-and-sessions.json" else "chats-and-sessions-ai-off.json"), id)
+        }
+        reply("createChat") { _, id -> if (refusedWithoutAi(id)) Unit else send(samplePayload("chat-created.json"), id) }
         reply("resolveMentions") { _, id -> send(samplePayload("mentions-resolved.json"), id) }
         reply("fetchWorkgroupInfo") { _, id -> send(samplePayload("workgroup-info.json"), id) }
+        reply("unsubscribe") { body, _ -> subscribed -= body.getValue("chatID").jsonPrimitive.content }
         reply("subscribe") { body, id ->
             val chatID = body.getValue("chatID").jsonPrimitive.content
+            if (refusedWithoutAi(id)) return@reply
+            subscribed += chatID
             subscribes += chatID to id
             send(history(chatID), id)
             if (agentTyping) send(retarget(samplePayload("typing-status-on.json"), chatID), null)
@@ -78,6 +96,8 @@ class FakeChatMac(val mac: FakeMac, private val scope: CoroutineScope) {
      * `turnLifecycle(ended)`.
      */
     suspend fun streamReply(chatID: String = SAMPLE_CHAT, appends: Int) {
+        // No subscription survives AI off: the Mac pushes nothing.
+        if (!aiAvailable) return
         send(retarget(samplePayload("typing-status-on.json"), chatID), null)
         send(retarget(samplePayload("turn-lifecycle-started.json"), chatID), null)
         send(retarget(samplePayload("delivery-agent-opening.json"), chatID), null)
@@ -98,10 +118,35 @@ class FakeChatMac(val mac: FakeMac, private val scope: CoroutineScope) {
     /** Pushes `chatListChanged` with the sample list. */
     suspend fun pushChatList() = send(samplePayload("chat-list-changed.json"), null)
 
-    /** Sends `aiAvailabilityChanged(available)` and makes the next hello say the same. */
+    /** Turns AI on or off ([setAiAvailable]) and announces it ([announceAi]), as the Mac does. */
     suspend fun flipAi(available: Boolean) {
+        setAiAvailable(available)
+        announceAi()
+    }
+
+    /**
+     * Turns AI on or off on the Mac without telling the phone yet: off drops every subscription
+     * (`HB:2250-2263`), and from now on requests are gated and the list answered as
+     * [aiAvailable] says. The next hello carries it too.
+     */
+    fun setAiAvailable(available: Boolean) {
+        aiAvailable = available
         mac.helloAiAvailable = available
-        send(JsonObject(mapOf("aiAvailabilityChanged" to JsonObject(mapOf("available" to JsonPrimitive(available))))), null)
+        if (!available) subscribed.clear()
+    }
+
+    /** Sends `aiAvailabilityChanged` with [aiAvailable]: the link's poke, separate from any reply. */
+    suspend fun announceAi() =
+        send(JsonObject(mapOf("aiAvailabilityChanged" to JsonObject(mapOf("available" to JsonPrimitive(aiAvailable))))), null)
+
+    /**
+     * `requireAI` (`HB:2276-2300`): with AI off, a request with an ID gets the typed `aiUnavailable`
+     * error and one without is dropped; true when it was refused.
+     */
+    suspend fun refusedWithoutAi(requestID: Long?): Boolean {
+        if (aiAvailable) return false
+        if (requestID != null) send(samplePayload("error-ai-unavailable.json"), requestID)
+        return true
     }
 
     /** The unsolicited `error` a refused `deleteChat` gets (`HB:458-470`). */

@@ -87,11 +87,12 @@ class ChatsNavigationWiringTest {
         val chatID = FakeChatMac.SAMPLE_CHAT
         rig.navigator.openConversation(chatID)
         settle()
-        assertTrue(rig.chats.conversation(chatID).value is ConversationState.Shown)
         val content = rig.graph.conversationState(chatID)
+        assertNull("computed only while collected", content.value)
         val seen = CopyOnWriteArrayList<ConversationContent?>()
         val collector = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { content.collect { seen += it } }
         settle()
+        assertTrue(rig.chats.conversation(chatID).value is ConversationState.Shown)
         assertEquals(chatID, content.value?.chatID)
         // The Workgroups menu names the chat's claimed workgroup: its scope ID was resolved on open.
         assertEquals(listOf(WorkgroupLink(WORKGROUP, "Widget Review")), content.value?.workgroups)
@@ -109,9 +110,11 @@ class ChatsNavigationWiringTest {
         val listCollector = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { rig.graph.chatList.collect { } }
         rig.navigator.openConversation(chatID)
         val conversation = rig.graph.conversationState(chatID)
+        val conversationCollector = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { conversation.collect { } }
         settle()
         assertTrue(rig.graph.chatListNow() is ChatListContent.Rows)
         assertNotNull(conversation.value)
+        conversationCollector.cancel()
 
         rig.client.unpair()
         runCurrent()
@@ -216,6 +219,8 @@ class ChatsNavigationWiringTest {
     fun conversationUnderALiveViewStaysOpenAndIsVisibleAfterBack() = runTest {
         val rig = connected()
         val chatID = FakeChatMac.SAMPLE_CHAT
+        // A reader of the repository's conversation: snapshotted only while collected.
+        val reader = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { rig.chats.conversation(chatID).collect { } }
         rig.navigator.openConversation(chatID)
         settle()
         rig.navigator.openSession(SessionSummary("ptys_7K2M9Q4R8T1VH", "zsh", "", false), "zsh")
@@ -230,6 +235,7 @@ class ChatsNavigationWiringTest {
         rig.chatMac.streamReply(chatID, appends = 1)
         settle()
         assertEquals("a turn ending while visible is not Done", AgentState.IDLE, rig.chats.activity.value[chatID])
+        reader.cancel()
     }
 
     @Test

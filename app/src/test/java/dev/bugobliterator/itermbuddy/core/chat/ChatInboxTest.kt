@@ -170,6 +170,44 @@ class ChatInboxTest {
         assertEquals(0, inbox.queuedItems)
     }
 
+    /** An Error (an OutOfMemoryError in a big decode) fails that input only; the consumer goes on. */
+    @Test
+    fun consumerSurvivesAnError() = runTest {
+        val logs = CopyOnWriteArrayList<String>()
+        val consumed = CopyOnWriteArrayList<ChatInput>()
+        var stopped = 0
+        val inbox = ChatInbox(backgroundScope, log = { logs += it }, onStopped = { stopped++ }) { input ->
+            if (input is ChatInput.Payload) throw OutOfMemoryError("secret chat text")
+            consumed += input
+        }
+        inbox.accept(payload(0))
+        var posted = false
+        inbox.post { throw StackOverflowError() }
+        inbox.post { posted = true }
+        inbox.accept(delivery(1))
+        runCurrent()
+        assertEquals(listOf<ChatInput>(delivery(1)), consumed.toList())
+        assertTrue(posted)
+        assertFalse(inbox.stopped)
+        assertEquals(0, stopped)
+        assertEquals(
+            listOf("chat consumer failed on Payload(history): OutOfMemoryError", "chat consumer failed on posted work: StackOverflowError"),
+            logs.toList(),
+        )
+    }
+
+    @Test
+    fun stoppedConsumerIsReportedOnce() = runTest {
+        val job = Job()
+        var stopped = 0
+        val inbox = ChatInbox(CoroutineScope(StandardTestDispatcher(testScheduler) + job), onStopped = { stopped++ }) { }
+        runCurrent()
+        job.cancel()
+        runCurrent()
+        assertTrue(inbox.stopped)
+        assertEquals(1, stopped)
+    }
+
     @Test
     fun fullInboxSuspendsAndNeverDrops() = runTest {
         val gate = CompletableDeferred<Unit>()

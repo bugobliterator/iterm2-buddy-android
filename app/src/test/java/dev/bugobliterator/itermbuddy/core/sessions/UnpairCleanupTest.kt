@@ -21,6 +21,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -120,6 +122,8 @@ class UnpairCleanupTest {
         val chatID = FakeChatMac.SAMPLE_CHAT
         rig.chats.open(chatID)
         val conversation = rig.chats.conversation(chatID)
+        // The screen: a conversation nobody collects is not snapshotted.
+        val screen = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { conversation.collect { } }
         rig.chatMac.streamReply(chatID, appends = 2)
         advanceTimeBy(5.seconds)
         assertTrue(rig.chats.list.value is ChatListState.Loaded)
@@ -145,6 +149,7 @@ class UnpairCleanupTest {
         assertEquals("", rig.graph.chatSearch.query.value)
         assertEquals(emptyMap<String, Any>(), rig.graph.mentions.resolutions.value)
         assertEquals(0L, rig.graph.chatIcons.heldBytes)
+        screen.cancel()
     }
 
     @Test

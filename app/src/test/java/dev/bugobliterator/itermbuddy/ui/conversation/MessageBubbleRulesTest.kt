@@ -23,9 +23,12 @@ import dev.bugobliterator.itermbuddy.core.sessions.TabEntry
 import dev.bugobliterator.itermbuddy.core.sessions.WindowEntry
 import dev.bugobliterator.itermbuddy.ui.HomeDestination
 import dev.bugobliterator.itermbuddy.ui.HomeNavigator
+import dev.bugobliterator.itermbuddy.ui.chats.ChatIconRef
+import dev.bugobliterator.itermbuddy.ui.chats.chatIconRef
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -149,6 +152,22 @@ class MessageBubbleRulesTest {
         }
         val short = card(MessageBody.ClassicCommand(CommandContent.ExecuteCommand("ls"), safe = true)).lines
         assertFalse(short.any { it is CardLine.FullArgument })
+    }
+
+    /** A streaming rebuild (a new message around the same attachment) does not hash the image again. */
+    @Test
+    fun inlineImageDigestIsComputedOncePerAttachment() {
+        val image = AttachmentKind.File("shot.png", "image/png", 3, byteArrayOf(1, 2, 3))
+        fun refOf(text: String): ChatIconRef {
+            val body = MessageBody.Multipart(listOf(Subpart.Markdown(text), Subpart.AttachmentPart(Attachment(true, "c", image))))
+            return (bubbleBlocks(message(body), noResolutions)[1] as BubbleBlock.Image).ref
+        }
+        val first = refOf("Here")
+        val rebuilt = refOf("Here it is")
+        assertSame("the attachment's digest, kept with it", first.key, rebuilt.key)
+        assertEquals(chatIconRef(image.bytesView()), first)
+        val sameBytes = AttachmentKind.File("other.png", "image/png", 3, byteArrayOf(1, 2, 3))
+        assertEquals("the same bytes share a cache key", first.key, sameBytes.contentDigest)
     }
 
     @Test

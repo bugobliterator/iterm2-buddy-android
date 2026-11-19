@@ -11,6 +11,7 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamLink
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.ui.conversation.ChatDrafts
+import dev.bugobliterator.itermbuddy.ui.conversation.DraftSend
 import dev.bugobliterator.itermbuddy.ui.conversation.ConversationPresenter
 import dev.bugobliterator.itermbuddy.ui.conversation.ComposerSendStep
 import dev.bugobliterator.itermbuddy.ui.conversation.composerSendStep
@@ -22,6 +23,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -546,6 +550,43 @@ class ChatSendTest {
         runCurrent()
         assertTrue(rig.graph.chatDrafts.get(A).isBlank)
         assertEquals("ChatDrafts(chats=0)", rig.graph.chatDrafts.toString())
+    }
+
+    /**
+     * A rotation right after Send: the composer's scope is cancelled at once, the send still runs
+     * in the app's scope and clears the draft once, and the composer that comes back cannot send
+     * it again while it is out, nor after (the draft is empty).
+     */
+    @Test
+    fun sendOutlivesTheComposerAndCannotBeDoubled() = runTest {
+        val rig = SessionsRig(this)
+        rig.answerFetches()
+        rig.connect()
+        advanceTimeBy(5.seconds)
+        runCurrent()
+        rig.navigator.openConversation(SAMPLE)
+        advanceTimeBy(5.seconds)
+        runCurrent()
+        val drafts = rig.graph.chatDrafts
+        drafts.set(SAMPLE, draft("Ship it"))
+        val composer = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            assertTrue(rig.graph.chatsHome.sendDraft(SAMPLE))
+            awaitCancellation()
+        }
+        composer.cancel()
+        assertTrue(drafts.sendState(SAMPLE).value.sending)
+        assertFalse("the composer after the rotation offers no second send", rig.graph.chatsHome.sendDraft(SAMPLE))
+        advanceTimeBy(5.seconds)
+        runCurrent()
+        assertTrue("cleared from the outcome", drafts.get(SAMPLE).isBlank)
+        assertEquals(DraftSend(sending = false, finished = 1, outcome = SendOutcome.Sent), drafts.sendState(SAMPLE).value)
+        assertEquals(1, rig.chatMac.sent("publish").size)
+
+        assertTrue(rig.graph.chatsHome.sendDraft(SAMPLE))
+        advanceTimeBy(5.seconds)
+        runCurrent()
+        assertEquals(DraftSend(sending = false, finished = 2, outcome = SendOutcome.Empty), drafts.sendState(SAMPLE).value)
+        assertEquals("published once", 1, rig.chatMac.sent("publish").size)
     }
 
     @Test
