@@ -27,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -165,21 +166,53 @@ fun WorkgroupRoute(
     modifier: Modifier = Modifier,
 ) {
     DisposableEffect(watch) {
-        watch.start()
-        onDispose { watch.stop() }
+        val shown = showWorkgroupRoute(watch)
+        onDispose { shown.close() }
     }
     val state by watch.state.collectAsState()
+    val actions = remember(watch, onBack, onOpenSession) { workgroupRouteActions(watch, onBack, onOpenSession) }
+    WorkgroupScreen(state = state, fallbackTitle = fallbackTitle, actions = actions, tree = tree, modifier = modifier)
+}
+
+/**
+ * The route's lifetime on [watch], without Compose: started now, stopped when the returned
+ * handle closes (the route leaving composition). [WorkgroupRoute] calls it; tests drive it.
+ */
+fun showWorkgroupRoute(watch: WorkgroupWatch): AutoCloseable {
+    watch.start()
+    return AutoCloseable { watch.stop() }
+}
+
+/** The route's calls on [watch]: Back, refresh, and a member's session opened with [onOpenSession]. */
+fun workgroupRouteActions(
+    watch: WorkgroupWatch,
+    onBack: () -> Unit,
+    onOpenSession: (SessionSummary, String) -> Unit,
+): WorkgroupActions = object : WorkgroupActions {
+    override fun back() = onBack()
+
+    override fun refresh() = watch.refresh()
+
+    override fun openMember(target: MemberSession) = onOpenSession(target.session, target.title)
+}
+
+/**
+ * A workgroup destination whose watch is already gone (a frame between its pop and the next
+ * destination): the top bar with the title and Back over the loading state, never an empty screen.
+ */
+@Composable
+fun WorkgroupFallback(title: String, onBack: () -> Unit, modifier: Modifier = Modifier) {
     WorkgroupScreen(
-        state = state,
-        fallbackTitle = fallbackTitle,
+        state = WorkgroupState.Loading,
+        fallbackTitle = title,
         actions = object : WorkgroupActions {
             override fun back() = onBack()
 
-            override fun refresh() = watch.refresh()
+            override fun refresh() = Unit
 
-            override fun openMember(target: MemberSession) = onOpenSession(target.session, target.title)
+            override fun openMember(target: MemberSession) = Unit
         },
-        tree = tree,
+        tree = { null },
         modifier = modifier,
     )
 }

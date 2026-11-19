@@ -123,8 +123,8 @@ class MainActivity : ComponentActivity() {
             val notice by app.scanNotice.collectAsStateWithLifecycle()
             val unpairing by app.unpairing.collectAsStateWithLifecycle()
             val unpairFailed by app.unpairFailed.collectAsStateWithLifecycle()
-            val destination by sessions.navigator.destination.collectAsStateWithLifecycle()
-            val tab by sessions.navigator.tab.collectAsStateWithLifecycle()
+            // Tab and destination are one value: they never disagree for a frame.
+            val nav by sessions.navigator.state.collectAsStateWithLifecycle()
             val chatsAttention by sessions.chatsAttention.collectAsStateWithLifecycle()
             val tree by sessions.repository.state.collectAsStateWithLifecycle()
             val live by sessions.controller.state.collectAsStateWithLifecycle()
@@ -137,8 +137,9 @@ class MainActivity : ComponentActivity() {
                 AppRoot(
                     paired = paired,
                     home = HomeModel(
-                        state, destination, tree, live, unpairing, unpairFailed, version, relayOrigin,
-                        activeStream, video, debugBuild, videoStatsShown, query, macStatus, tab, chatsAttention,
+                        state, nav.destination, tree, live, unpairing, unpairFailed, version, relayOrigin,
+                        activeStream, video, debugBuild, videoStatsShown, query, macStatus, nav.tab, chatsAttention,
+                        nav.key, nav.stackKeys,
                     ),
                     homeActions = homeActions,
                     chats = sessions.chatsHome,

@@ -70,7 +70,8 @@ sealed interface NewChatStatus {
  * Creates chats for the New Chat screen, app-scoped (never composition state): one request at a
  * time ([create] while one is out does nothing); on [CreateOutcome.Created] it calls [open] with
  * the new chat (the navigator replaces the stack with its conversation, as iOS does,
- * `AM:2582-2602`), else [status] says whether to try again. [open] runs on [scope].
+ * `AM:2582-2602`), else [status] says whether to try again. [open] runs on [scope]. [clear]
+ * (unpair) drops a create still out: it neither opens nor reports.
  *
  * @param create [ChatRepository.create].
  */
@@ -84,30 +85,48 @@ class NewChatCreator(
 
     @Volatile private var lastMode: NewChatMode? = null
 
+    private val lock = Any()
+
+    /** The pairing epoch: bumped by [clear], so a create from before it neither opens nor reports. */
+    private var epoch = 0L
+
     /** Asks for a chat in [mode]; returns false when one is already being created. */
     fun create(mode: NewChatMode): Boolean {
-        while (true) {
-            val now = statusFlow.value
-            if (now == NewChatStatus.Creating) return false
-            if (statusFlow.compareAndSet(now, NewChatStatus.Creating)) break
+        val startedIn = synchronized(lock) {
+            if (statusFlow.value == NewChatStatus.Creating) return false
+            statusFlow.value = NewChatStatus.Creating
+            lastMode = mode
+            epoch
         }
-        lastMode = mode
         scope.launch {
             val outcome = try {
                 create.invoke(mode)
             } catch (e: CancellationException) {
-                statusFlow.value = NewChatStatus.Idle
+                finish(startedIn) { statusFlow.value = NewChatStatus.Idle }
                 throw e
             }
             when (outcome) {
-                is CreateOutcome.Created -> {
-                    statusFlow.value = NewChatStatus.Idle
-                    open(outcome.chatID)
-                }
-                is CreateOutcome.Failed -> statusFlow.value = NewChatStatus.Failed(outcome.retryable)
+                is CreateOutcome.Created -> if (finish(startedIn) { statusFlow.value = NewChatStatus.Idle }) open(outcome.chatID)
+                is CreateOutcome.Failed -> finish(startedIn) { statusFlow.value = NewChatStatus.Failed(outcome.retryable) }
             }
         }
         return true
+    }
+
+    /** Runs [update] only if no [clear] came since [startedIn]; says whether it ran. */
+    private inline fun finish(startedIn: Long, update: () -> Unit): Boolean = synchronized(lock) {
+        if (epoch != startedIn) return false
+        update()
+        true
+    }
+
+    /** Unpair: forgets the failure and the last mode, and a create still out opens nothing when it ends. */
+    fun clear() {
+        synchronized(lock) {
+            epoch++
+            lastMode = null
+            statusFlow.value = NewChatStatus.Idle
+        }
     }
 
     /** Try again with the mode that failed. */
@@ -118,8 +137,9 @@ class NewChatCreator(
 
     /** The owner dismissed the failure (or left the screen). */
     fun dismissFailure() {
-        val now = statusFlow.value
-        if (now is NewChatStatus.Failed) statusFlow.compareAndSet(now, NewChatStatus.Idle)
+        synchronized(lock) {
+            if (statusFlow.value is NewChatStatus.Failed) statusFlow.value = NewChatStatus.Idle
+        }
     }
 
     override fun toString(): String = "NewChatCreator(status=${statusFlow.value})"

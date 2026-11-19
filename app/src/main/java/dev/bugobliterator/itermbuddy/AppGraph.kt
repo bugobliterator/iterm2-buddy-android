@@ -27,6 +27,7 @@ import dev.bugobliterator.itermbuddy.ui.HomeNavigator
 import dev.bugobliterator.itermbuddy.ui.chats.ChatIconCache
 import dev.bugobliterator.itermbuddy.ui.chats.ChatListActions
 import dev.bugobliterator.itermbuddy.ui.chats.ChatListContent
+import dev.bugobliterator.itermbuddy.ui.chats.ChatListPresenter
 import dev.bugobliterator.itermbuddy.ui.chats.NewChatCreator
 import dev.bugobliterator.itermbuddy.ui.chats.chatListContents
 import dev.bugobliterator.itermbuddy.ui.chats.ChatSearch
@@ -58,15 +59,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
-import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -83,16 +83,18 @@ import kotlin.time.Duration.Companion.seconds
  *   ([controller]'s `open`/`close`), the conversations ([openConversation], [closeConversation]),
  *   the visible chat ([ChatRepository.setVisible]) and the workgroup watches
  *   ([workgroupWatch]); it reads the Mac's revision from [client]'s state to choose the browser
- *   view, takes its default tab from the first chat link up ([ChatRepository.lastLinkUp]) and
- *   leaves the Chats root when AI turns off ([ChatRepository.aiAvailable]);
+ *   view, takes its default tab from the first chat link up and leaves the Chats root when AI
+ *   turns off, from one ordered feed ([ChatRepository.availability]); pushes stop once the
+ *   pairing is gone, and its reset drops the shared chat contents under its lock ([clearShared]);
  * - [mentions] resolves @-mentions through the client; the chat list's snippets are noted with
  *   it on each list change, and again after its retry gate reopens on each chat link up
  *   ([ChatRepository.linkGeneration]) and when AI comes back on ([noteSnippetMentions]);
  * - [chatList] is the Chats root's content ([chatListContents], computed off the main thread
- *   while collected, and for [sharingStopMillis] after its last collector leaves); [chatIcons]
+ *   while collected, and for [sharingStopMillis] after its last collector leaves, its last value
+ *   kept for the next visit, never across an unpair); [chatIcons]
  *   holds its decoded icons; [chatListActions] are its calls; [chatsAttention] is the Chats tab's dot;
  * - [conversationState] is an open conversation's content (`conversationContents`, off the main
- *   thread), shared by every collector while the conversation is on a stack; [openConversation]
+ *   thread), computed from its open to its close and shared by every collector; [openConversation]
  *   and [closeConversation] are what the navigator calls: they open and close the chat in [chats],
  *   reopen the mention retry gate, and watch the chat's bound session with [boundSessions], which
  *   probes it again on each chat link up and when the chat's binding changes in the list, and
@@ -137,11 +139,17 @@ class HomeGraph(
     /** The workgroup watches of the workgroup views on the navigator's stacks, by workgroup ID. */
     private val workgroups = ConcurrentHashMap<String, StackedWorkgroup>()
 
-    /** The open conversations' shared contents, by chat ID. */
-    private val conversationStates = ConcurrentHashMap<String, StateFlow<ConversationContent?>>()
+    /** The conversations on the navigator's stacks. Initialised before [navigator], whose calls use it. */
+    private val openChats: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    /** Bumped on unpair: restarts [chatList], so no collector keeps the old pairing's rows. */
+    /** The open conversations' shared contents, by chat ID, each computed for as long as it is open. */
+    private val conversationStates = ConcurrentHashMap<String, OpenConversation>()
+
+    /** Bumped on unpair: the shared list's value from before it is never shown again. */
     private val chatListResets = MutableStateFlow(0L)
+
+    /** The list's presenter for the epoch it was made in: kept across collectors, so rows keep their models. */
+    @Volatile private var listPresenter: Pair<Long, ChatListPresenter>? = null
 
     val navigator = HomeNavigator(
         openStream = controller::open,
@@ -152,18 +160,37 @@ class HomeGraph(
         startWorkgroup = ::startWorkgroup,
         stopWorkgroup = ::stopWorkgroup,
         macRevision = { macRevisionOf(client.state.value) },
+        // Nothing is pushed once the pairing is gone, and the shared contents go under the
+        // navigator's lock right after its reset: an open racing the unpair leaves nothing behind.
+        accepting = { client.paired.value == true },
+        onReset = ::clearShared,
     )
 
     /**
-     * The Chats root's content. A collector that comes back within [sharingStopMillis] (rotation)
-     * finds it computed; after that, or after an unpair, it starts again from Loading.
+     * The list's content tagged with the reset epoch it was computed in. It stops computing
+     * [sharingStopMillis] after its last collector leaves (a rotation's gap keeps it running) but
+     * keeps its last value, so coming back shows it at once and then follows the repository.
      */
-    val chatList: StateFlow<ChatListContent> = chatListResets
-        .flatMapLatest {
-            chatListContents(chats.listSnapshot, chats.macRevision, chatSearch.query, mentions.resolutions, contentContext)
-                .onStart { emit(ChatListContent.Loading) }
+    private val sharedChatList: StateFlow<Pair<Long, ChatListContent>> = chatListResets
+        .flatMapLatest { epoch ->
+            chatListContents(chats.listSnapshot, chats.macRevision, chatSearch.query, mentions.resolutions, contentContext, presenter = presenterFor(epoch))
+                .map { epoch to it }
         }
-        .stateIn(scope, SharingStarted.WhileSubscribed(sharingStopMillis, replayExpirationMillis = 0), ChatListContent.Loading)
+        .stateIn(scope, SharingStarted.WhileSubscribed(sharingStopMillis), 0L to ChatListContent.Loading)
+
+    /** The Chats root's content: the last one computed, unless an unpair came since (then Loading). */
+    val chatList: Flow<ChatListContent> = combine(sharedChatList, chatListResets) { tagged, epoch -> current(tagged, epoch) }
+        .distinctUntilChanged()
+
+    /** [chatList]'s value now, for a screen's first frame. */
+    fun chatListNow(): ChatListContent = current(sharedChatList.value, chatListResets.value)
+
+    private fun current(tagged: Pair<Long, ChatListContent>, epoch: Long): ChatListContent =
+        if (tagged.first == epoch) tagged.second else ChatListContent.Loading
+
+    private fun presenterFor(epoch: Long): ChatListPresenter = synchronized(this) {
+        listPresenter?.takeIf { it.first == epoch }?.second ?: ChatListPresenter().also { listPresenter = epoch to it }
+    }
 
     /** Whether the Chats tab shows its dot ([chatsNeedAttention]). */
     val chatsAttention: StateFlow<Boolean> = chats.rows.map(::chatsNeedAttention).distinctUntilChanged()
@@ -171,11 +198,10 @@ class HomeGraph(
 
     /**
      * New Chat's creator: a created chat opens in place of the Chats stack (iOS
-     * `openConversation(replacingPath: true)`, `AM:2594`), unless the pairing went meanwhile.
+     * `openConversation(replacingPath: true)`, `AM:2594`); cleared on unpair, so a create still out
+     * then opens nothing.
      */
-    val newChat = NewChatCreator(scope, chats::create) { chatID ->
-        if (client.paired.value == true) navigator.openConversation(chatID, replacingStack = true)
-    }
+    val newChat = NewChatCreator(scope, chats::create) { chatID -> navigator.openConversation(chatID, replacingStack = true) }
 
     /** The Chats root's calls. */
     val chatListActions: ChatListActions = object : ChatListActions {
@@ -198,6 +224,8 @@ class HomeGraph(
     /** What the home's chat destinations read and call. */
     val chatsHome: ChatsHome = object : ChatsHome {
         override val chatList get() = this@HomeGraph.chatList
+
+        override fun chatListNow() = this@HomeGraph.chatListNow()
         override val chatQuery get() = chatSearch.query
         override val listActions get() = chatListActions
         override val aiAvailable get() = chats.aiAvailable
@@ -267,15 +295,16 @@ class HomeGraph(
         workgroups.remove(workgroupID)?.end()
     }
 
-    /** The conversations on the navigator's stacks. */
-    private val openChats: MutableSet<String> = ConcurrentHashMap.newKeySet()
-
     /**
      * Opens [chatID]'s conversation (a navigator push): subscribed, gate reopened, bound session
      * probed, and its claimed workgroups' names asked for (the Workgroups menu's labels).
      */
     fun openConversation(chatID: String) {
         openChats += chatID
+        // Computed from now until it closes, seen or not: coming back to it shows it at once.
+        val job = SupervisorJob(scope.coroutineContext[Job])
+        val state = conversationContent(chatID).stateIn(CoroutineScope(scope.coroutineContext + job), SharingStarted.Eagerly, null)
+        conversationStates.put(chatID, OpenConversation(job, state))?.job?.cancel()
         chats.open(chatID)
         mentions.reopenRetryGate()
         boundSessions.watch(chatID, boundGuid(chatID))
@@ -298,17 +327,17 @@ class HomeGraph(
         openChats -= chatID
         chats.close(chatID)
         boundSessions.unwatch(chatID)
-        conversationStates.remove(chatID)
+        conversationStates.remove(chatID)?.job?.cancel()
     }
 
     /**
-     * [chatID]'s conversation content, shared by every collector while the conversation is open
-     * (a recreated activity finds it computed); null until the first content. Kept until the
-     * conversation leaves the stacks, or the unpair.
+     * [chatID]'s conversation content: while the conversation is on the navigator's stacks, the
+     * one shared value computed since it opened (null until the first). For a chat not open (a
+     * screen outliving its pop), an unshared flow that computes only while collected and is never
+     * kept.
      */
-    fun conversationState(chatID: String): StateFlow<ConversationContent?> = conversationStates.computeIfAbsent(chatID) {
-        conversationContent(chatID).stateIn(scope, SharingStarted.WhileSubscribed(sharingStopMillis, replayExpirationMillis = 0), null)
-    }
+    fun conversationState(chatID: String): StateFlow<ConversationContent?> =
+        conversationStates[chatID]?.state ?: conversationContent(chatID).stateIn(scope, SharingStarted.WhileSubscribed(), null)
 
     /** [chatID]'s conversation screen content, computed off the main thread while collected. */
     fun conversationContent(chatID: String): Flow<ConversationContent> = conversationContents(
@@ -368,12 +397,14 @@ class HomeGraph(
     suspend fun send(chatID: String, draft: MentionDraft): SendOutcome = chats.send(chatID, draft)
 
     /**
-     * Unpair, after [HomeNavigator.reset]: restarts [chatList] from Loading and drops every shared
-     * conversation content and any workgroup watch left.
+     * Unpair, under the navigator's lock at the end of [HomeNavigator.reset]: [chatList] shows
+     * Loading until the next pairing's list, and every shared conversation content and any
+     * workgroup watch left are dropped.
      */
     fun clearShared() {
         chatListResets.value++
-        conversationStates.clear()
+        listPresenter = null
+        for (chatID in conversationStates.keys.toList()) conversationStates.remove(chatID)?.job?.cancel()
         openChats.clear()
         for (workgroupID in workgroups.keys.toList()) stopWorkgroup(workgroupID)
     }
@@ -382,6 +413,9 @@ class HomeGraph(
 
     override fun toString(): String = "HomeGraph(navigator=$navigator, workgroups=${workgroups.size}, conversations=${conversationStates.size})"
 }
+
+/** An open conversation's shared content and the job computing it. */
+private class OpenConversation(val job: Job, val state: StateFlow<ConversationContent?>)
 
 /** A workgroup view's watch and the job its coroutines run under. */
 private class StackedWorkgroup(val job: Job, val watch: WorkgroupWatch) {
@@ -465,16 +499,17 @@ fun wireHome(
         }
     }
     scope.launch { client.state.map(::macRevisionOf).distinctUntilChanged().collect(navigator::macRevisionChanged) }
-    // The default tab is chosen from the first link's hello; AI turning off leaves the Chats root.
-    scope.launch { chats.lastLinkUp.filterNotNull().collect { navigator.linkUp(it.aiAvailable) } }
-    scope.launch { chats.aiAvailable.drop(1).collect(navigator::aiAvailabilityChanged) }
+    // One ordered feed: the default tab from the first link's hello, and AI turning off leaves
+    // the Chats root (counted, so conflated flips are not lost).
+    scope.launch { chats.availability.collect(navigator::availabilityChanged) }
     clearOnUnpair(
         client.paired,
         scope,
         // Not the chat seen store: ChatRepository.clear() clears it on its consumer, after its
         // barrier against inputs from earlier links, so no mark still queued lands after the wipe.
         listOf(
-            navigator::reset, graph::clearShared, repository::clear, chats::clear, mentions::clear, boundSessions::clear,
+            // The navigator's reset also clears the graph's shared chat contents, under its lock.
+            navigator::reset, graph.newChat::clear, repository::clear, chats::clear, mentions::clear, boundSessions::clear,
             chatIcons::clear, inlineImages::clear, search::clear, chatSearch::clear, drafts::clear, chatDrafts::clear,
             inputMemories::clear,
         ),

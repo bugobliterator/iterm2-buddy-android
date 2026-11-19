@@ -8,6 +8,10 @@ import dev.bugobliterator.itermbuddy.core.chat.ChatSummary
 import dev.bugobliterator.itermbuddy.core.chat.DEFUNCT_SESSION_TEXT
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolution
 import dev.bugobliterator.itermbuddy.core.chat.ChatListSnapshot
+import dev.bugobliterator.itermbuddy.core.chat.CreateOutcome
+import dev.bugobliterator.itermbuddy.core.chat.NewChatMode
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
@@ -222,6 +226,37 @@ class ChatListRulesTest {
             assertEquals("case $index: the icon is hashed again", index + 2, hashed.size)
             before = after
         }
+    }
+
+    /** Unpair clears New Chat: a create still out then neither opens its chat nor reports. */
+    @Test
+    fun newChatCreatorClearDropsACreateStillOut() = runTest {
+        val reply = CompletableDeferred<CreateOutcome>()
+        val opened = CopyOnWriteArrayList<String>()
+        val creator = NewChatCreator(backgroundScope, { reply.await() }) { opened += it }
+        assertTrue(creator.create(NewChatMode.Orchestrator))
+        runCurrent()
+        assertEquals(NewChatStatus.Creating, creator.status.value)
+        creator.clear()
+        assertEquals(NewChatStatus.Idle, creator.status.value)
+        reply.complete(CreateOutcome.Failed(retryable = true))
+        runCurrent()
+        assertEquals("the old pairing's failure is not shown", NewChatStatus.Idle, creator.status.value)
+        creator.retry()
+        assertEquals("nothing to try again after clear", NewChatStatus.Idle, creator.status.value)
+
+        val created = CompletableDeferred<CreateOutcome>()
+        val second = NewChatCreator(backgroundScope, { created.await() }) { opened += it }
+        second.create(NewChatMode.Orchestrator)
+        runCurrent()
+        second.clear()
+        created.complete(CreateOutcome.Created("C0DE0000-0000-4000-8000-000000000009"))
+        runCurrent()
+        assertEquals(emptyList<String>(), opened.toList())
+        // A create after the clear opens as usual.
+        assertTrue(second.create(NewChatMode.Orchestrator))
+        runCurrent()
+        assertEquals(listOf("C0DE0000-0000-4000-8000-000000000009"), opened.toList())
     }
 
     @Test

@@ -73,31 +73,41 @@ class ChatHomeFeedsTest {
     }
 
     /**
-     * The link's AI flag is published with its generation: a reader woken by the link up reads the
-     * hello's `aiAvailable`, not the value left from the link before (the list snapshot follows a
-     * consumer step later).
+     * One ordered feed for the navigation: each link up carries its generation and the hello's AI
+     * flag (published once [ChatRepository.linkGeneration] holds it), and every AI-off grows a
+     * count, so a reader conflating a quick off, on, off still sees that AI turned off. Unpair
+     * empties it; the count and the generation never go back.
      */
     @Test
-    fun linkUpCarriesTheHellosAiAvailability() = runTest {
+    fun availabilityOrdersLinkUpsAndCountsAiOffs() = runTest {
         val rig = ChatRig(this)
-        assertNull(rig.repository.lastLinkUp.value)
-        val seen = CopyOnWriteArrayList<ChatLinkUp>()
+        assertNull(rig.repository.availability.value)
+        val seen = CopyOnWriteArrayList<ChatAvailability>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
-            rig.repository.lastLinkUp.filterNotNull().collect {
+            rig.repository.availability.filterNotNull().collect {
                 seen += it
-                // At the moment it is read, the generation agrees with it.
                 assertEquals(it.generation, rig.repository.linkGeneration.value)
             }
         }
         rig.mac.helloAiAvailable = false
         rig.connect()
         settle()
-        assertEquals(listOf(ChatLinkUp(1, aiAvailable = false)), seen.toList())
+        assertEquals(listOf(ChatAvailability(1, aiAvailable = false, aiOffs = 0)), seen.toList())
         rig.mac.helloAiAvailable = true
         rig.reconnect()
         settle()
-        assertEquals(listOf(ChatLinkUp(1, aiAvailable = false), ChatLinkUp(2, aiAvailable = true)), seen.toList())
-        assertTrue(rig.repository.aiAvailable.value)
+        assertEquals(ChatAvailability(2, aiAvailable = true, aiOffs = 0), seen.last())
+
+        rig.chatMac.flipAi(false)
+        rig.chatMac.flipAi(true)
+        rig.chatMac.flipAi(false)
+        settle()
+        assertEquals(ChatAvailability(2, aiAvailable = false, aiOffs = 2), rig.repository.availability.value)
+
+        rig.repository.clear()
+        settle()
+        assertNull(rig.repository.availability.value)
+        assertEquals(2L, rig.repository.linkGeneration.value)
     }
 
     private companion object {
