@@ -102,10 +102,35 @@ jobs:
       # Stage 1 (RealIterm2PairingTest): pair, ping, read the session tree and a session's
       # content. Stage 2 (RealIterm2SessionInputTest, RealIterm2LiveStreamTest): type a command
       # into the session and see it change; start a live stream, check its HEVC config and
-      # keyframe, and stop it. Stage 3 (RealIterm2AgentChatTest): create an orchestrator chat,
-      # get the fake model's streamed reply, then its tool call parked on the owner's approval.
-      # One JVM runs them one after another (app/build.gradle.kts).
-      - name: Pair, type into a session, stream it and chat
+      # keyframe, and stop it. One JVM runs them one after another (app/build.gradle.kts).
+      - name: Pair, type into a session and stream it
+        env:
+          REAL_ITERM2: '1'
+          REAL_ITERM2_PAIRING_FILE: ${{ runner.temp }}/real-iterm2/pairing.env
+          REAL_ITERM2_RELAY_URL: ws://127.0.0.1:8787/
+          REAL_ITERM2_CONNECT_TIMEOUT_SECONDS: '180'
+          REAL_ITERM2_REQUEST_TIMEOUT_SECONDS: '30'
+        run: >-
+          ./gradlew realIterm2Test
+          --tests '*.RealIterm2PairingTest'
+          --tests '*.RealIterm2SessionInputTest'
+          --tests '*.RealIterm2LiveStreamTest'
+
+      # The next realIterm2Test run replaces these results; keep them for the upload.
+      - name: Keep the stage 1 and 2 test results
+        if: success() || failure()
+        run: |
+          kept="$RUNNER_TEMP/real-iterm2/diagnostics/stages-1-2"
+          mkdir -p "$kept"
+          cp -R app/build/test-results/realIterm2Test "$kept/test-results" 2>/dev/null || true
+          cp -R app/build/reports/tests/realIterm2Test "$kept/reports" 2>/dev/null || true
+
+      # Stage 3 (RealIterm2AgentChatTest), last and in its own step: an Agent Chat turn can leave
+      # iTerm2's main thread blocked, which must not fail stages 1 and 2. It creates an
+      # orchestrator chat, gets the fake model's streamed reply, then its tool call parked on
+      # the owner's approval; on failure it prints iTerm2's windows, dialogs and main thread.
+      - name: Chat with the fake model
+        if: success() || failure()
         env:
           REAL_ITERM2: '1'
           REAL_ITERM2_PAIRING_FILE: ${{ runner.temp }}/real-iterm2/pairing.env
@@ -114,7 +139,7 @@ jobs:
           REAL_ITERM2_REQUEST_TIMEOUT_SECONDS: '30'
           REAL_ITERM2_CHAT_TIMEOUT_SECONDS: '120'
           REAL_ITERM2_FAKE_MODEL_URL: http://127.0.0.1:8790
-        run: ./gradlew realIterm2Test
+        run: ./gradlew realIterm2Test --tests '*.RealIterm2AgentChatTest'
 
       - name: Collect diagnostics
         if: always()

@@ -89,8 +89,14 @@ else
     note "fake model stats: not reachable on 127.0.0.1:${FAKE_MODEL_PORT}"
 fi
 if [[ -f "$FAKE_MODEL_LOG" ]]; then
-    note "fake model log: $(grep -c ' POST ' "$FAKE_MODEL_LOG") chat requests"
+    note "fake model log: $(grep -c ' POST ' "$FAKE_MODEL_LOG") POST requests"
+    # Shapes only (methods, paths, counts, lengths, decisions): safe for the job log.
+    log "fake model log, in full:"
+    indent < "$FAKE_MODEL_LOG"
 fi
+
+# Windows, dialogs, the main thread and iTerm2's filtered unified log, as text.
+bash "$REAL_ITERM2_SCRIPTS/dump-iterm2-state.sh" final
 
 if [[ -f "$RELAY_LOG" ]]; then
     note "relay log: $(wc -l < "$RELAY_LOG" | tr -d ' ') lines; joins: $(grep -c 'hello role=' "$RELAY_LOG") (mac $(grep -c 'hello role=mac' "$RELAY_LOG"), phone $(grep -c 'hello role=phone' "$RELAY_LOG")); rejects: $(grep -c ' reject ' "$RELAY_LOG")"

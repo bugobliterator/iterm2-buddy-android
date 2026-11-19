@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy.realiterm2
 
+import dev.bugobliterator.itermbuddy.core.CompanionClient
 import dev.bugobliterator.itermbuddy.core.chat.AgentState
 import dev.bugobliterator.itermbuddy.core.chat.ChatListState
 import dev.bugobliterator.itermbuddy.core.chat.ChatMessage
@@ -22,6 +23,7 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.realiterm2.RealIterm2Rig.Companion.failWith
 import dev.bugobliterator.itermbuddy.realiterm2.RealIterm2Rig.Companion.report
 import dev.bugobliterator.itermbuddy.wireHome
+import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import kotlin.time.Duration.Companion.seconds
@@ -72,6 +74,12 @@ import org.junit.Test
  * but this app does not encode approvals yet (the Approvals phase), and the fake model cannot
  * approve on the Mac's behalf, so the test stops at Waiting and deletes the parked chat.
  *
+ * Each send must reach the fake model within 30 s, or the test fails saying iTerm2 never called
+ * it. It prints the Mac's `macStatus` (main thread blocked, open alerts) as it changes, and on any
+ * failure `ci/real-iterm2/dump-iterm2-state.sh`: iTerm2's windows, dialog texts, main thread
+ * stack and filtered unified log. The workflow runs it in its own step, after stages 1 and 2, so
+ * a Mac it leaves blocked cannot fail them.
+ *
  * Reads `REAL_ITERM2_FAKE_MODEL_URL` (the fake's base URL) besides what [RealIterm2Rig] reads;
  * every step waits at most `REAL_ITERM2_CHAT_TIMEOUT_SECONDS`. Runs only under `realIterm2Test`
  * with `REAL_ITERM2=1`; skipped otherwise. It prints chat IDs, states, counts and lengths, never
@@ -121,8 +129,24 @@ class RealIterm2AgentChatTest {
             log = { report("home: $it") },
             chatLog = { report("chat: $it") },
         )
+        // The Mac reports a blocked main thread and its open alerts (revision 14 macStatus).
+        rig.scope.launch { home.client.macStatus.collect { report("mac status: $it") } }
         val client = rig.connect(home.client)
-        val chats = home.chats
+        try {
+            chatSteps(home.chats, client, fakeModelUrl)
+        } catch (failure: AssertionError) {
+            report("failed; mac status ${home.client.macStatus.value}; fake ${fakeStats(fakeModelUrl)}")
+            dumpMacState("chat-test-failure")
+            throw failure
+        }
+    }
+
+    private suspend fun chatSteps(
+        chats: ChatRepository,
+        client: CompanionClient,
+        fakeModelUrl: String,
+    ) {
+        val chatTimeout = rig.chatTimeout
 
         // AI on, and the list loaded.
         val availability = withTimeoutOrNull(chatTimeout) { chats.availability.first { it != null } }
@@ -159,7 +183,7 @@ class RealIterm2AgentChatTest {
 
             // A plain message: echo once, Working then Done, the streamed reply as one message.
             val before = activity.size
-            val greetingID = sendAndAwaitEcho(chats, chatID, GREETING, expectedEchoes = 1)
+            val greetingID = sendAndAwaitEcho(chats, chatID, GREETING, expectedEchoes = 1, fakeModelUrl)
             awaitSequence(activity, before, listOf(AgentState.WORKING, AgentState.DONE), "the first turn")
             val shown = chats.conversation(chatID).value as? ConversationState.Shown ?: failWith("the conversation is not shown")
             val echoIndex = shown.messages.indexOfFirst { it.uniqueID == greetingID }
@@ -174,7 +198,7 @@ class RealIterm2AgentChatTest {
 
             // The trigger: the fake calls session_execute_command, and iTerm2 parks it on approval.
             val beforeTrigger = activity.size
-            sendAndAwaitEcho(chats, chatID, "$TRIGGER session_guid=${session.guid}", expectedEchoes = 2)
+            sendAndAwaitEcho(chats, chatID, "$TRIGGER session_guid=${session.guid}", expectedEchoes = 2, fakeModelUrl)
             awaitSequence(activity, beforeTrigger, listOf(AgentState.WORKING, AgentState.WAITING), "the trigger's turn")
             val request = rig.poll(chatTimeout) {
                 val now = chats.conversation(chatID).value as? ConversationState.Shown
@@ -226,11 +250,36 @@ class RealIterm2AgentChatTest {
         }
     }
 
-    /** Sends [text] and returns its `uniqueID` once its echo is delivered, listed exactly once, with [text] as its body. */
-    private suspend fun sendAndAwaitEcho(chats: ChatRepository, chatID: String, text: String, expectedEchoes: Int): String {
+    /**
+     * Sends [text] and returns its `uniqueID` once its echo is delivered, listed exactly once, with
+     * [text] as its body. First the fake model must get a chat request within [MODEL_CALL_TIMEOUT]:
+     * iTerm2 starts the agent's turn before it echoes the message (ChatBroker fans the publish out
+     * to ChatService first), so a turn that never reaches the model also holds the echo back, and
+     * failing here says which.
+     */
+    private suspend fun sendAndAwaitEcho(
+        chats: ChatRepository,
+        chatID: String,
+        text: String,
+        expectedEchoes: Int,
+        fakeModelUrl: String,
+    ): String {
+        val chatRequestsBefore = fakeStats(fakeModelUrl).int("chatRequests") ?: 0
         val outcome = chats.send(chatID, MentionDraft(text, emptyList()))
         report("send (${text.length} chars): $outcome")
         assertEquals("send", SendOutcome.Sent, outcome)
+        rig.poll(MODEL_CALL_TIMEOUT) {
+            fakeStats(fakeModelUrl).int("chatRequests")?.takeIf { it > chatRequestsBefore }
+        } ?: run {
+            val stats = fakeStats(fakeModelUrl)
+            dumpMacState("no-model-call")
+            failWith(
+                "the fake model got no chat request within $MODEL_CALL_TIMEOUT of the send: iTerm2 did not call the model " +
+                    "(first paths ${stats["firstPaths"]}, path counts ${stats["pathCounts"]}); activity ${chats.activity.value[chatID]}, " +
+                    "conversation ${chats.conversation(chatID).value}; see the Mac state above",
+            )
+        }
+        report("the fake model got the turn's chat request")
         val shown = rig.poll(rig.chatTimeout) {
             (chats.conversation(chatID).value as? ConversationState.Shown)?.takeIf { now ->
                 now.echoes.size == expectedEchoes && now.echoes.values.all { it == EchoState.DELIVERED }
@@ -263,6 +312,25 @@ class RealIterm2AgentChatTest {
             now.messages.drop(after + 1).filter { it.author == Participant.AGENT }.map { "${it.body::class.simpleName}(${textOf(it.body)?.length})" }
     }
 
+    /**
+     * Prints `ci/real-iterm2/dump-iterm2-state.sh [label]` into the test output: iTerm2's windows,
+     * any dialog's texts and buttons, its main thread and its filtered unified log. macOS only.
+     */
+    private fun dumpMacState(label: String) {
+        val script = System.getProperty("fixtures.dir")?.let { File(it).absoluteFile.parentFile?.resolve("ci/real-iterm2/dump-iterm2-state.sh") }
+        if (script == null || !script.isFile || !System.getProperty("os.name").orEmpty().startsWith("Mac")) {
+            report("no Mac state dump here ($script)")
+            return
+        }
+        try {
+            val process = ProcessBuilder("bash", script.path, label).redirectErrorStream(true).start()
+            process.inputStream.bufferedReader().forEachLine { report("mac state: $it") }
+            if (!process.waitFor(DUMP_TIMEOUT_MINUTES, TimeUnit.MINUTES)) process.destroyForcibly()
+        } catch (e: Exception) {
+            report("the Mac state dump failed: ${e.javaClass.simpleName}")
+        }
+    }
+
     /** The fake model's counts and captured tool facts (`GET /fake/stats`; no content). */
     private fun fakeStats(baseUrl: String): JsonObject = try {
         http.newCall(Request.Builder().url("$baseUrl/fake/stats").build()).execute().use { response ->
@@ -282,6 +350,10 @@ class RealIterm2AgentChatTest {
         const val SESSION_SCOPE = "session:"
         const val NANOS_PER_MILLI = 1_000_000L
         val PARK_HOLD = 5.seconds
+
+        /** How long after a send the fake model must see the turn's chat request. */
+        val MODEL_CALL_TIMEOUT = 30.seconds
+        const val DUMP_TIMEOUT_MINUTES = 3L
         val LIST_SETTLE = 4.seconds
 
         /** The text of a text-bearing body (plain, Markdown, or their parts); null for any other kind. */
