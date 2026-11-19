@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Gathers what the first look at a failed (or passed) run needs into the diagnostics directory,
 # which the workflow uploads: a screenshot, the relay and TLS proxy logs (already there), the
-# companion defaults, the secure setting file, which seeded keychain items are still in the CI
+# companion defaults, the secure setting file, the Claude Code status probe's settings, which seeded keychain items are still in the CI
 # keychain (iTerm2 moves them to its data-protection keychain when it reads them), whether
 # NSWorkspace finds the plugins, the AI settings and the fake model's counts (its log and captured
 # request shape are already there), iTerm2's unified log and any iTerm2 crash reports.
@@ -64,6 +64,20 @@ for key in GenerativeAIAllowed UseRecommendedAIModel AiModel; do
     note "    $key = $(defaults read "$ITERM2_BUNDLE_ID" "$key" 2>&1)"
 done
 defaults read "$ITERM2_BUNDLE_ID" AIManualModelConfigurations > "$DIAGNOSTICS_DIR/defaults-ai-models.txt" 2>&1
+
+note "Claude Code status probe (the default GUID $STATUS_PROFILE_GUID, EnableAPIServer 1 and SetCookie 1 expected):"
+for key in "Default Bookmark Guid" EnableAPIServer SetCookie; do
+    note "    $key = $(defaults read "$ITERM2_BUNDLE_ID" "$key" 2>&1)"
+done
+for file in "$STATUS_PROFILE_FILE" "$ITERM2_APP_SUPPORT/disable-automation-auth" "$ITERM2_APP_SUPPORT/private/socket" "$ITERM2_IT2"; do
+    if [[ -e "$file" ]]; then
+        note "    $(ls -ld "$file")"
+    else
+        note "    $file is missing"
+    fi
+done
+[[ -f "$DIAGNOSTICS_DIR/claude-status-it2-stderr.txt" ]] &&
+    note "    it2 stderr: $(wc -l < "$DIAGNOSTICS_DIR/claude-status-it2-stderr.txt" | tr -d ' ') lines (claude-status-it2-stderr.txt)"
 
 if [[ -f "$CI_KEYCHAIN" ]]; then
     for account in "$MAC_PRIVATE_KEY_ACCOUNT" "$PHONE_PUBLIC_KEY_ACCOUNT" paired-relay-room-secret; do

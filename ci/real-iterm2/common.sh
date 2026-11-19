@@ -68,6 +68,15 @@ KEYCHAIN_SERVICE="com.googlecode.iterm2.companion"
 MAC_PRIVATE_KEY_ACCOUNT="mac-noise-static-private-key"
 PHONE_PUBLIC_KEY_ACCOUNT="paired-phone-noise-static-public-key"
 ITERM2_APP_SUPPORT="$HOME/Library/Application Support/iTerm2"
+# The Claude Code status probe (seed-claude-status.sh, RealIterm2ClaudeStatusTest): the Dynamic
+# Profile whose Subtitle is \(status), made the default, and the it2 iTerm2 bundles
+# (Contents/Resources/utilities, project.pbxproj:5036-5042). The test names the same path.
+STATUS_PROFILE_GUID="buddy-ci-status"
+STATUS_PROFILE_FILE="$ITERM2_APP_SUPPORT/DynamicProfiles/buddy-ci-status.json"
+ITERM2_IT2="$ITERM2_APP/Contents/Resources/utilities/it2"
+# "Allow all apps to connect": the fixed UUID in the root-owned disable-automation-auth file
+# (iTermAPIHelperDisableApplescriptAuthMagic, iTermAPIHelper.m:70).
+API_NOAUTH_MAGIC="61DF88DC-3423-4823-B725-22570E01C027"
 
 WORK_DIR="${REAL_ITERM2_WORK_DIR:-${RUNNER_TEMP:-/tmp}/real-iterm2}"
 DOWNLOADS_DIR="$WORK_DIR/downloads"
