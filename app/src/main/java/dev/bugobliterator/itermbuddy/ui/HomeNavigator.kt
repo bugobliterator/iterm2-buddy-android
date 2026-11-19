@@ -54,6 +54,12 @@ data class NavState(val tab: HomeTab, val destination: HomeDestination, val key:
 }
 
 /**
+ * The repository's counters at an unpair ([HomeNavigator.reset]): its link [generation] and AI-off
+ * count [aiOffs] as they stand, which may be ahead of the values the navigator has received.
+ */
+data class LinkFloor(val generation: Long, val aiOffs: Long)
+
+/**
  * The home's navigation, app-scoped (built in [dev.bugobliterator.itermbuddy.HomeGraph]), so it
  * outlives Activity recreation. Two tabs ([HomeTab]), each with its own back stack whose root is
  * its list (`IOS/App/iTerm2CompanionApp.swift:155-176`); [state] is the selected tab and the top
@@ -100,6 +106,8 @@ data class NavState(val tab: HomeTab, val destination: HomeDestination, val key:
  * @param accepting whether pushes are taken (the app passes "paired").
  * @param onReset runs under the navigator's lock at the end of [reset], after everything was
  *   closed, so nothing is pushed between the two (the home drops its shared chat contents there).
+ * @param resetFloor read by [reset]: the old pairing's link-ups and AI-offs up to it, still on
+ *   their way to [availabilityChanged], are ignored, so they cannot choose the next pairing's tab.
  */
 class HomeNavigator(
     private val openStream: (SessionSummary) -> Unit,
@@ -112,6 +120,7 @@ class HomeNavigator(
     private val macRevision: () -> Int = { 0 },
     private val accepting: () -> Boolean = { true },
     private val onReset: () -> Unit = {},
+    private val resetFloor: () -> LinkFloor = { LinkFloor(0, 0) },
 ) {
     private val lock = Any()
     private val stacks = HashMap<HomeTab, List<HomeDestination>>().apply { for (tab in HomeTab.entries) put(tab, listOf(tab.root)) }
@@ -133,7 +142,10 @@ class HomeNavigator(
 
     /** Whether a call is being applied (on this thread, under [lock]), and the calls made from its callbacks. */
     private var applying = false
-    private val nested = ArrayDeque<() -> Unit>()
+    private val nested = ArrayDeque<Step>()
+
+    /** A navigator call: [mutation], reconciled, then [after] (still under the lock). */
+    private class Step(val mutation: () -> Unit, val after: (() -> Unit)?)
 
     /** [tab]'s stack, root first (a copy). */
     fun stack(tab: HomeTab): List<HomeDestination> = synchronized(lock) { stacks.getValue(tab) }
@@ -228,37 +240,36 @@ class HomeNavigator(
 
     /**
      * Unpair: closes any stream, every conversation and workgroup watch, empties both stacks and
-     * selects the Chats root, then runs [onReset], all under the lock; the next pairing's first
-     * link chooses the default tab again.
+     * selects the Chats root, raises the link floor to [resetFloor], then runs [onReset], all in one
+     * step under the lock (queued as one when called from a callback, so [onReset] still follows
+     * the closing); the next pairing's first link chooses the default tab again.
      */
-    fun reset() {
-        synchronized(lock) {
-            try {
-                change {
-                    for (tab in HomeTab.entries) stacks[tab] = listOf(tab.root)
-                    tab = HomeTab.CHATS
-                    tabDecided = false
-                }
-            } finally {
-                onReset()
-            }
-        }
-    }
+    fun reset() = change(
+        mutation = {
+            for (tab in HomeTab.entries) stacks[tab] = listOf(tab.root)
+            tab = HomeTab.CHATS
+            tabDecided = false
+            val floor = resetFloor()
+            seenGeneration = maxOf(seenGeneration, floor.generation)
+            seenAiOffs = maxOf(seenAiOffs, floor.aiOffs)
+        },
+        after = onReset,
+    )
 
     /**
-     * Runs [mutation] under the lock and reconciles; a call from inside a callback is queued and
-     * runs after the current one, so callbacks never see a half-applied change.
+     * Runs [mutation] under the lock and reconciles, then [after]; a call from inside a callback
+     * is queued and runs after the current one, so callbacks never see a half-applied change.
      */
-    private fun change(mutation: () -> Unit) {
+    private fun change(after: (() -> Unit)? = null, mutation: () -> Unit) {
         synchronized(lock) {
             if (applying) {
-                nested.addLast(mutation)
+                nested.addLast(Step(mutation, after))
                 return
             }
             applying = true
             var failure: Throwable? = null
             try {
-                var next: (() -> Unit)? = mutation
+                var next: Step? = Step(mutation, after)
                 while (next != null) {
                     failure = apply(next, failure)
                     next = nested.removeFirstOrNull()
@@ -272,7 +283,7 @@ class HomeNavigator(
     }
 
     /** One mutation and its comparison; returns the first failure (with [failure] as the earlier one). */
-    private fun apply(mutation: () -> Unit, failure: Throwable?): Throwable? {
+    private fun apply(change: Step, failure: Throwable?): Throwable? {
         var first = failure
         fun step(block: () -> Unit) {
             try {
@@ -284,7 +295,7 @@ class HomeNavigator(
         }
         val before = Held.of(stacks)
         // A mutation that throws midway is still reconciled: whatever it changed is opened or closed.
-        step(mutation)
+        step(change.mutation)
         val after = Held.of(stacks)
         if (before.session?.guid != after.session?.guid) {
             if (before.session != null) step(closeStream)
@@ -301,6 +312,7 @@ class HomeNavigator(
             visibleChat = visible
             step { setVisibleChat(visible) }
         }
+        change.after?.let(::step)
         return first
     }
 

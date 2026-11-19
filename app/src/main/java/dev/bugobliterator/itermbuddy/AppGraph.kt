@@ -24,12 +24,13 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamInput
 import dev.bugobliterator.itermbuddy.core.stream.StreamLink
 import dev.bugobliterator.itermbuddy.core.stream.StreamSink
 import dev.bugobliterator.itermbuddy.ui.HomeNavigator
+import dev.bugobliterator.itermbuddy.ui.LinkFloor
 import dev.bugobliterator.itermbuddy.ui.chats.ChatIconCache
 import dev.bugobliterator.itermbuddy.ui.chats.ChatListActions
 import dev.bugobliterator.itermbuddy.ui.chats.ChatListContent
 import dev.bugobliterator.itermbuddy.ui.chats.ChatListPresenter
 import dev.bugobliterator.itermbuddy.ui.chats.NewChatCreator
-import dev.bugobliterator.itermbuddy.ui.chats.chatListContents
+import dev.bugobliterator.itermbuddy.ui.chats.taggedChatListContents
 import dev.bugobliterator.itermbuddy.ui.chats.ChatSearch
 import dev.bugobliterator.itermbuddy.ui.chats.ImageBytesDecoder
 import dev.bugobliterator.itermbuddy.ui.chats.noteSnippetMentions
@@ -51,7 +52,6 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
@@ -64,7 +64,6 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
@@ -89,7 +88,7 @@ import kotlin.time.Duration.Companion.seconds
  * - [mentions] resolves @-mentions through the client; the chat list's snippets are noted with
  *   it on each list change, and again after its retry gate reopens on each chat link up
  *   ([ChatRepository.linkGeneration]) and when AI comes back on ([noteSnippetMentions]);
- * - [chatList] is the Chats root's content ([chatListContents], computed off the main thread
+ * - [chatList] is the Chats root's content ([taggedChatListContents], computed off the main thread
  *   while collected, and for [sharingStopMillis] after its last collector leaves, its last value
  *   kept for the next visit, never across an unpair); [chatIcons]
  *   holds its decoded icons; [chatListActions] are its calls; [chatsAttention] is the Chats tab's dot;
@@ -111,7 +110,6 @@ import kotlin.time.Duration.Companion.seconds
  *   ([clearShared]), the mentions, bound-session verdicts, icons and images forgotten, and the
  *   searches, drafts and input memories emptied.
  */
-@OptIn(ExperimentalCoroutinesApi::class)
 class HomeGraph(
     private val scope: CoroutineScope,
     val client: CompanionClient,
@@ -145,10 +143,7 @@ class HomeGraph(
     /** The open conversations' shared contents, by chat ID, each computed for as long as it is open. */
     private val conversationStates = ConcurrentHashMap<String, OpenConversation>()
 
-    /** Bumped on unpair: the shared list's value from before it is never shown again. */
-    private val chatListResets = MutableStateFlow(0L)
-
-    /** The list's presenter for the epoch it was made in: kept across collectors, so rows keep their models. */
+    /** The list's presenter for the pairing epoch it was made in: kept across collectors, so rows keep their models. */
     @Volatile private var listPresenter: Pair<Long, ChatListPresenter>? = null
 
     val navigator = HomeNavigator(
@@ -164,26 +159,30 @@ class HomeGraph(
         // navigator's lock right after its reset: an open racing the unpair leaves nothing behind.
         accepting = { client.paired.value == true },
         onReset = ::clearShared,
+        // At an unpair, the old pairing's link-ups and AI-offs still on their way are ignored.
+        resetFloor = { LinkFloor(chats.linkGeneration.value, chats.aiOffCount) },
     )
 
     /**
-     * The list's content tagged with the reset epoch it was computed in. It stops computing
-     * [sharingStopMillis] after its last collector leaves (a rotation's gap keeps it running) but
-     * keeps its last value, so coming back shows it at once and then follows the repository.
+     * The list's content tagged with the pairing epoch of the snapshot it came from. It stops
+     * computing [sharingStopMillis] after its last collector leaves (a rotation's gap keeps it
+     * running) but keeps its last value, so coming back shows it at once and then follows the
+     * repository.
      */
-    private val sharedChatList: StateFlow<Pair<Long, ChatListContent>> = chatListResets
-        .flatMapLatest { epoch ->
-            chatListContents(chats.listSnapshot, chats.macRevision, chatSearch.query, mentions.resolutions, contentContext, presenter = presenterFor(epoch))
-                .map { epoch to it }
-        }
-        .stateIn(scope, SharingStarted.WhileSubscribed(sharingStopMillis), 0L to ChatListContent.Loading)
+    private val sharedChatList: StateFlow<Pair<Long, ChatListContent>> =
+        taggedChatListContents(chats.listSnapshot, chats.macRevision, chatSearch.query, mentions.resolutions, contentContext, ::presenterFor)
+            .stateIn(scope, SharingStarted.WhileSubscribed(sharingStopMillis), 0L to ChatListContent.Loading)
 
-    /** The Chats root's content: the last one computed, unless an unpair came since (then Loading). */
-    val chatList: Flow<ChatListContent> = combine(sharedChatList, chatListResets) { tagged, epoch -> current(tagged, epoch) }
+    /**
+     * The Chats root's content: the last one computed, shown only while its snapshot belongs to
+     * the current pairing ([ChatRepository.pairingEpoch], bumped the moment the chats are
+     * cleared), else Loading, even if the chat consumer never runs the clear.
+     */
+    val chatList: Flow<ChatListContent> = combine(sharedChatList, chats.pairingEpoch) { tagged, epoch -> current(tagged, epoch) }
         .distinctUntilChanged()
 
     /** [chatList]'s value now, for a screen's first frame. */
-    fun chatListNow(): ChatListContent = current(sharedChatList.value, chatListResets.value)
+    fun chatListNow(): ChatListContent = current(sharedChatList.value, chats.pairingEpoch.value)
 
     private fun current(tagged: Pair<Long, ChatListContent>, epoch: Long): ChatListContent =
         if (tagged.first == epoch) tagged.second else ChatListContent.Loading
@@ -324,10 +323,11 @@ class HomeGraph(
 
     /** Closes [chatID]'s conversation (a navigator pop); its shared content goes with it. */
     fun closeConversation(chatID: String) {
+        // Its content stops first, so nothing computes for a chat the repository is closing.
+        conversationStates.remove(chatID)?.job?.cancel()
         openChats -= chatID
         chats.close(chatID)
         boundSessions.unwatch(chatID)
-        conversationStates.remove(chatID)?.job?.cancel()
     }
 
     /**
@@ -397,12 +397,11 @@ class HomeGraph(
     suspend fun send(chatID: String, draft: MentionDraft): SendOutcome = chats.send(chatID, draft)
 
     /**
-     * Unpair, under the navigator's lock at the end of [HomeNavigator.reset]: [chatList] shows
-     * Loading until the next pairing's list, and every shared conversation content and any
-     * workgroup watch left are dropped.
+     * Unpair, under the navigator's lock at the end of [HomeNavigator.reset]: every shared
+     * conversation content and any workgroup watch left are dropped, and the list's presenter
+     * forgotten ([chatList] itself follows [ChatRepository.pairingEpoch]).
      */
     fun clearShared() {
-        chatListResets.value++
         listPresenter = null
         for (chatID in conversationStates.keys.toList()) conversationStates.remove(chatID)?.job?.cancel()
         openChats.clear()

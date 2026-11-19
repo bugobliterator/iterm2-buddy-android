@@ -520,6 +520,46 @@ class HomeNavigatorTest {
         assertEquals(HomeTab.SESSIONS, other.state.value.tab)
     }
 
+    /**
+     * The repository had already counted the old pairing's next link (and an AI-off) when the
+     * unpair came, but the value was still on its way: delivered after [HomeNavigator.reset], it is
+     * at or below the floor and decides nothing.
+     */
+    @Test
+    fun aLinkUpStillOnItsWayAtResetIsIgnored() {
+        var floor = LinkFloor(0, 0)
+        val floored = HomeNavigator({}, {}, {}, {}, {}, resetFloor = { floor })
+        floored.availabilityChanged(ChatAvailability(1, aiAvailable = true, aiOffs = 0))
+        floor = LinkFloor(generation = 2, aiOffs = 1)
+        floored.reset()
+        floored.availabilityChanged(ChatAvailability(2, aiAvailable = false, aiOffs = 1))
+        assertEquals("the old pairing's link chose nothing", HomeTab.CHATS, floored.state.value.tab)
+        assertEquals(HomeDestination.ChatList, floored.state.value.destination)
+        // The new pairing's first link decides.
+        floored.availabilityChanged(ChatAvailability(3, aiAvailable = false, aiOffs = 1))
+        assertEquals(HomeTab.SESSIONS, floored.state.value.tab)
+    }
+
+    @Test
+    fun aResetFromACallbackRunsItsHookAfterTheClose() {
+        val order = CopyOnWriteArrayList<String>()
+        lateinit var resetting: HomeNavigator
+        resetting = HomeNavigator(
+            openStream = {},
+            closeStream = {},
+            openChat = {
+                order += "openChat $it"
+                resetting.reset()
+            },
+            closeChat = { order += "closeChat $it" },
+            setVisibleChat = { order += "visible $it" },
+            onReset = { order += "hook" },
+        )
+        resetting.openConversation(CHAT)
+        assertEquals(listOf("openChat $CHAT", "visible $CHAT", "closeChat $CHAT", "visible null", "hook"), order.toList())
+        assertEquals(HomeDestination.ChatList, resetting.state.value.destination)
+    }
+
     private companion object {
         const val SENTINEL = "SENTINEL-secret-name"
         const val CHAT = "C0DE0000-0000-4000-8000-000000000001"
