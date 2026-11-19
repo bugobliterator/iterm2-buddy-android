@@ -54,6 +54,7 @@ import dev.bugobliterator.itermbuddy.core.chat.ChatMessage
 import dev.bugobliterator.itermbuddy.core.chat.ChatRepository
 import dev.bugobliterator.itermbuddy.core.chat.ChatSummary
 import dev.bugobliterator.itermbuddy.core.chat.ConversationState
+import dev.bugobliterator.itermbuddy.core.chat.DeleteFromOutcome
 import dev.bugobliterator.itermbuddy.core.chat.MESSAGE_DELETION_REVISION
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolution
 import dev.bugobliterator.itermbuddy.core.chat.NotSendableReason
@@ -299,7 +300,7 @@ interface ConversationActions {
     fun deleteUnsent(uniqueID: String)
 
     /** Delete From Here, confirmed: [uniqueID]'s message and every one after it ([ChatRepository.deleteFrom]). */
-    fun deleteFromHere(uniqueID: String)
+    suspend fun deleteFromHere(uniqueID: String): DeleteFromOutcome
 }
 
 /**
@@ -309,7 +310,7 @@ interface ConversationActions {
  * arrives; the banners; and [composer] below. Loading, too large and failed states fill the body.
  * The owner's own messages offer "Delete From Here" from a ⋯ menu beside them when
  * [ConversationContent.deletesFromHere] holds (a long press would fight the text selection), and
- * it asks first.
+ * it asks first; a refusal shows [deleteFromRefusalText].
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -321,6 +322,8 @@ fun ConversationScreen(
     composer: @Composable () -> Unit = {},
 ) {
     var deletingFrom by rememberSaveable { mutableStateOf<String?>(null) }
+    var refusal by rememberSaveable { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
@@ -371,13 +374,31 @@ fun ConversationScreen(
             confirmButton = {
                 TextButton(onClick = {
                     deletingFrom = null
-                    actions.deleteFromHere(pending)
+                    scope.launch { refusal = deleteFromRefusalText(actions.deleteFromHere(pending)) }
                 }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { deletingFrom = null }) { Text("Cancel") } },
         )
     }
+    val refused = refusal
+    if (refused != null) {
+        AlertDialog(
+            onDismissRequest = { refusal = null },
+            text = { Text(refused) },
+            confirmButton = { TextButton(onClick = { refusal = null }) { Text("OK") } },
+        )
+    }
 }
+
+/** What a confirmed Delete From Here that was refused tells the owner; null when it went ahead. */
+fun deleteFromRefusalText(outcome: DeleteFromOutcome): String? = when (outcome) {
+    DeleteFromOutcome.DELETED -> null
+    DeleteFromOutcome.SEND_IN_FLIGHT -> WAIT_FOR_SEND_TEXT
+    else -> DELETE_FROM_FAILED_TEXT
+}
+
+const val WAIT_FOR_SEND_TEXT = "Wait for your message to send"
+const val DELETE_FROM_FAILED_TEXT = "Couldn't delete these messages. Try again once the chat has loaded."
 
 /** What the Delete From Here confirmation says. */
 const val DELETE_FROM_HERE_TEXT = "This message and everything after it are deleted from the chat, on your Mac too."
@@ -433,6 +454,7 @@ private fun Transcript(
     val atBottom by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0 } }
     var unseen by remember { mutableStateOf(false) }
     val tail = remember(items) { transcriptTail(items) }
+    val offers = remember(items, onDeleteFromHere != null) { if (onDeleteFromHere == null) emptySet() else deleteFromHereOffers(items) }
     val previous = remember { arrayOfNulls<TranscriptTail>(1) }
     // Read in composition, before the new rows are laid out: where the list was before the change.
     val wasAtBottom = atBottom
@@ -461,7 +483,7 @@ private fun Transcript(
             verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom),
         ) {
             items(items.asReversed(), key = { it.key }) { item ->
-                val deleteFrom = onDeleteFromHere?.takeIf { offersDeleteFromHere(item) }
+                val deleteFrom = onDeleteFromHere?.takeIf { item.key in offers }
                 MessageBubble(item, images, onMention, onUnsent = onUnsent, onDeleteFromHere = deleteFrom)
             }
         }
