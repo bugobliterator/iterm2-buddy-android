@@ -9,8 +9,13 @@ import dev.bugobliterator.itermbuddy.core.chat.ChatListState
 import dev.bugobliterator.itermbuddy.core.chat.ChatMessage
 import dev.bugobliterator.itermbuddy.core.chat.ChatRepository
 import dev.bugobliterator.itermbuddy.core.chat.ChatSink
+import dev.bugobliterator.itermbuddy.core.chat.DeleteFromOutcome
+import dev.bugobliterator.itermbuddy.core.chat.MentionDraft
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolver
+import dev.bugobliterator.itermbuddy.core.chat.NewChatMode
+import dev.bugobliterator.itermbuddy.core.chat.SendOutcome
 import dev.bugobliterator.itermbuddy.core.chat.WorkgroupWatch
+import dev.bugobliterator.itermbuddy.core.sessions.SessionTree
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
 import dev.bugobliterator.itermbuddy.core.sessions.TreeState
 import dev.bugobliterator.itermbuddy.core.sessions.clearOnUnpair
@@ -18,23 +23,36 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.core.stream.StreamInput
 import dev.bugobliterator.itermbuddy.core.stream.StreamLink
 import dev.bugobliterator.itermbuddy.core.stream.StreamSink
-import dev.bugobliterator.itermbuddy.ui.SessionNavigator
+import dev.bugobliterator.itermbuddy.ui.HomeNavigator
 import dev.bugobliterator.itermbuddy.ui.chats.ChatIconCache
+import dev.bugobliterator.itermbuddy.ui.chats.ChatListActions
 import dev.bugobliterator.itermbuddy.ui.chats.ChatListContent
+import dev.bugobliterator.itermbuddy.ui.chats.NewChatCreator
 import dev.bugobliterator.itermbuddy.ui.chats.chatListContents
 import dev.bugobliterator.itermbuddy.ui.chats.ChatSearch
 import dev.bugobliterator.itermbuddy.ui.chats.ImageBytesDecoder
 import dev.bugobliterator.itermbuddy.ui.chats.noteSnippetMentions
+import dev.bugobliterator.itermbuddy.ui.chatsNeedAttention
 import dev.bugobliterator.itermbuddy.ui.conversation.ChatDrafts
+import dev.bugobliterator.itermbuddy.ui.conversation.ConversationActions
 import dev.bugobliterator.itermbuddy.ui.conversation.ConversationContent
 import dev.bugobliterator.itermbuddy.ui.conversation.ConversationMentions
+import dev.bugobliterator.itermbuddy.ui.conversation.GoToSession
+import dev.bugobliterator.itermbuddy.ui.conversation.LinkTarget
+import dev.bugobliterator.itermbuddy.ui.conversation.WorkgroupLink
 import dev.bugobliterator.itermbuddy.ui.conversation.conversationContents
+import dev.bugobliterator.itermbuddy.ui.conversation.mentionSession
+import dev.bugobliterator.itermbuddy.ui.home.ChatsHome
 import dev.bugobliterator.itermbuddy.ui.live.ComposerDrafts
 import dev.bugobliterator.itermbuddy.ui.live.LiveInputMemories
 import dev.bugobliterator.itermbuddy.ui.sessions.SessionSearch
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -44,8 +62,11 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -58,49 +79,152 @@ import kotlin.time.Duration.Companion.seconds
  * - [client] sends chat-scoped messages to [chats] (its chat sink, the repository's inbox), and the
  *   repository sends through the client;
  * - [repository] reads the client's state, events and requests;
- * - [navigator] drives [controller]'s `open`/`close`, and reads the Mac's revision from [client]'s
- *   state to choose the browser view (at open, and again as the revision changes);
+ * - [navigator] (two tabs, a back stack each) alone opens and closes the stream
+ *   ([controller]'s `open`/`close`), the conversations ([openConversation], [closeConversation]),
+ *   the visible chat ([ChatRepository.setVisible]) and the workgroup watches
+ *   ([workgroupWatch]); it reads the Mac's revision from [client]'s state to choose the browser
+ *   view, takes its default tab from the first chat link up ([ChatRepository.lastLinkUp]) and
+ *   leaves the Chats root when AI turns off ([ChatRepository.aiAvailable]);
  * - [mentions] resolves @-mentions through the client; the chat list's snippets are noted with
  *   it on each list change, and again after its retry gate reopens on each chat link up
  *   ([ChatRepository.linkGeneration]) and when AI comes back on ([noteSnippetMentions]);
  * - [chatList] is the Chats root's content ([chatListContents], computed off the main thread
- *   while collected); [chatIcons] holds its decoded icons;
- * - [conversationContent] is a conversation's content (`conversationContents`, off the main
- *   thread); [openConversation] and [closeConversation] are what the navigator calls: they open
- *   and close the chat in [chats], reopen the mention retry gate, and watch the chat's bound
- *   session with [boundSessions], which probes it again on each chat link up and when the chat's
- *   binding changes in the list; [inlineImages] holds decoded inline images (48 MiB);
+ *   while collected, and for [sharingStopMillis] after its last collector leaves); [chatIcons]
+ *   holds its decoded icons; [chatListActions] are its calls; [chatsAttention] is the Chats tab's dot;
+ * - [conversationState] is an open conversation's content (`conversationContents`, off the main
+ *   thread), shared by every collector while the conversation is on a stack; [openConversation]
+ *   and [closeConversation] are what the navigator calls: they open and close the chat in [chats],
+ *   reopen the mention retry gate, and watch the chat's bound session with [boundSessions], which
+ *   probes it again on each chat link up and when the chat's binding changes in the list, and
+ *   ask [mentions] for the names of the workgroups it claims (its Workgroups menu);
+ *   [conversationActions] are a conversation's calls; [inlineImages] holds decoded inline images (48 MiB);
+ * - [newChat] creates chats and opens each in place of the Chats stack;
  * - [search], [chatSearch], [drafts], [chatDrafts] and [inputMemories] hold what the owner typed in the UI, app-scoped;
- * - [watchWorkgroup] makes a workgroup view's [WorkgroupWatch], fed [foreground] (set by the
- *   process lifecycle through [setForeground]) and whether [client] is connected;
- * - on every unpair (local, Mac-sent, or a re-scan), [navigator] is reset (closing the stream),
- *   [repository] and [chats] cleared (the chat repository clears its seen marks itself, on its
- *   consumer), the mentions, bound-session verdicts, icons and images forgotten, and the searches,
- *   drafts and input memories emptied.
+ * - [watchWorkgroup] makes a [WorkgroupWatch], fed [foreground] (set by the process lifecycle
+ *   through [setForeground]) and whether [client] is connected; the navigator keeps one per
+ *   workgroup on its stacks ([workgroupWatch]), so a member's live view and Back do not reload it;
+ * - on every unpair (local, Mac-sent, or a re-scan), [navigator] is reset (closing the stream,
+ *   the conversations and the workgroup watches), [repository] and [chats] cleared (the chat
+ *   repository clears its seen marks itself, on its consumer), the shared chat contents reset
+ *   ([clearShared]), the mentions, bound-session verdicts, icons and images forgotten, and the
+ *   searches, drafts and input memories emptied.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class HomeGraph(
+    private val scope: CoroutineScope,
     val client: CompanionClient,
     val controller: StreamController,
     val repository: SessionTreeRepository,
     val chats: ChatRepository,
-    val navigator: SessionNavigator,
     val search: SessionSearch,
     val drafts: ComposerDrafts,
     val inputMemories: LiveInputMemories,
     val mentions: MentionResolver,
     val chatSearch: ChatSearch,
     val chatIcons: ChatIconCache<ImageBitmap>,
-    val chatList: StateFlow<ChatListContent>,
     val boundSessions: BoundSessionProbe,
     val inlineImages: ChatIconCache<ImageBitmap>,
     val chatDrafts: ChatDrafts,
     private val contentContext: CoroutineContext,
+    private val sharingStopMillis: Long = LIST_SHARING_STOP_MILLIS,
     private val workgroupLog: (String) -> Unit = {},
 ) {
     private val foregroundFlow = MutableStateFlow(true)
 
     /** Whether the app is in the foreground (the process lifecycle's `ON_START`/`ON_STOP`). */
     val foreground: StateFlow<Boolean> = foregroundFlow.asStateFlow()
+
+    /** The workgroup watches of the workgroup views on the navigator's stacks, by workgroup ID. */
+    private val workgroups = ConcurrentHashMap<String, StackedWorkgroup>()
+
+    /** The open conversations' shared contents, by chat ID. */
+    private val conversationStates = ConcurrentHashMap<String, StateFlow<ConversationContent?>>()
+
+    /** Bumped on unpair: restarts [chatList], so no collector keeps the old pairing's rows. */
+    private val chatListResets = MutableStateFlow(0L)
+
+    val navigator = HomeNavigator(
+        openStream = controller::open,
+        closeStream = controller::close,
+        openChat = ::openConversation,
+        closeChat = ::closeConversation,
+        setVisibleChat = chats::setVisible,
+        startWorkgroup = ::startWorkgroup,
+        stopWorkgroup = ::stopWorkgroup,
+        macRevision = { macRevisionOf(client.state.value) },
+    )
+
+    /**
+     * The Chats root's content. A collector that comes back within [sharingStopMillis] (rotation)
+     * finds it computed; after that, or after an unpair, it starts again from Loading.
+     */
+    val chatList: StateFlow<ChatListContent> = chatListResets
+        .flatMapLatest {
+            chatListContents(chats.listSnapshot, chats.macRevision, chatSearch.query, mentions.resolutions, contentContext)
+                .onStart { emit(ChatListContent.Loading) }
+        }
+        .stateIn(scope, SharingStarted.WhileSubscribed(sharingStopMillis, replayExpirationMillis = 0), ChatListContent.Loading)
+
+    /** Whether the Chats tab shows its dot ([chatsNeedAttention]). */
+    val chatsAttention: StateFlow<Boolean> = chats.rows.map(::chatsNeedAttention).distinctUntilChanged()
+        .stateIn(scope, SharingStarted.Eagerly, false)
+
+    /**
+     * New Chat's creator: a created chat opens in place of the Chats stack (iOS
+     * `openConversation(replacingPath: true)`, `AM:2594`), unless the pairing went meanwhile.
+     */
+    val newChat = NewChatCreator(scope, chats::create) { chatID ->
+        if (client.paired.value == true) navigator.openConversation(chatID, replacingStack = true)
+    }
+
+    /** The Chats root's calls. */
+    val chatListActions: ChatListActions = object : ChatListActions {
+        override fun openChat(chatID: String) = navigator.openConversation(chatID)
+
+        override fun refreshChats() = chats.refresh()
+
+        override fun newChat() {
+            newChat.dismissFailure()
+            navigator.openNewChat()
+        }
+
+        override fun setChatMuted(chatID: String, muted: Boolean) = chats.setMuted(chatID, muted)
+
+        override fun deleteChat(chatID: String) = chats.delete(chatID)
+
+        override fun setChatQuery(query: String) = chatSearch.set(query)
+    }
+
+    /** What the home's chat destinations read and call. */
+    val chatsHome: ChatsHome = object : ChatsHome {
+        override val chatList get() = this@HomeGraph.chatList
+        override val chatQuery get() = chatSearch.query
+        override val listActions get() = chatListActions
+        override val aiAvailable get() = chats.aiAvailable
+        override val newChatStatus get() = newChat.status
+
+        override fun createChat(mode: NewChatMode) {
+            newChat.create(mode)
+        }
+
+        override fun retryCreateChat() = newChat.retry()
+
+        override fun dismissCreateChatFailure() = newChat.dismissFailure()
+
+        override val icons get() = chatIcons
+        override val images get() = inlineImages
+        override val drafts get() = chatDrafts
+
+        override fun conversation(chatID: String) = conversationState(chatID)
+
+        override fun conversationActions(chatID: String) = this@HomeGraph.conversationActions(chatID)
+
+        override suspend fun send(chatID: String, draft: MentionDraft) = this@HomeGraph.send(chatID, draft)
+
+        override fun workgroupWatch(workgroupID: String) = this@HomeGraph.workgroupWatch(workgroupID)
+
+        override fun currentTree(): SessionTree? = (repository.state.value as? TreeState.Loaded)?.tree
+    }
 
     /** The app came to the foreground, or left it: tells the chats and every workgroup watch. */
     fun setForeground(foreground: Boolean) {
@@ -126,17 +250,64 @@ class HomeGraph(
         return watch
     }
 
-    /** Opens [chatID]'s conversation (a navigator push): subscribed, gate reopened, bound session probed. */
+    /**
+     * The watch of [workgroupID]'s view while one is on the navigator's stacks, else null. The
+     * view starts it while shown and stops it when it leaves ([dev.bugobliterator.itermbuddy.ui.workgroup.WorkgroupRoute]);
+     * it lives until the view is popped.
+     */
+    fun workgroupWatch(workgroupID: String): WorkgroupWatch? = workgroups[workgroupID]?.watch
+
+    private fun startWorkgroup(workgroupID: String) {
+        val job = SupervisorJob(scope.coroutineContext[Job])
+        val watch = watchWorkgroup(CoroutineScope(scope.coroutineContext + job), workgroupID)
+        workgroups.put(workgroupID, StackedWorkgroup(job, watch))?.end()
+    }
+
+    private fun stopWorkgroup(workgroupID: String) {
+        workgroups.remove(workgroupID)?.end()
+    }
+
+    /** The conversations on the navigator's stacks. */
+    private val openChats: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /**
+     * Opens [chatID]'s conversation (a navigator push): subscribed, gate reopened, bound session
+     * probed, and its claimed workgroups' names asked for (the Workgroups menu's labels).
+     */
     fun openConversation(chatID: String) {
+        openChats += chatID
         chats.open(chatID)
         mentions.reopenRetryGate()
         boundSessions.watch(chatID, boundGuid(chatID))
+        noteWorkgroupScopes(chats.listSnapshot.value.list)
     }
 
-    /** Closes [chatID]'s conversation (a navigator pop). */
+    /**
+     * Asks the Mac to name the workgroups the open conversations claim, as mentions (`@wg-…`):
+     * on each open, and as the list changes (a list that arrives after the open). The resolver
+     * asks only for names it does not have.
+     */
+    internal fun noteWorkgroupScopes(list: ChatListState) {
+        val entries = (list as? ChatListState.Loaded)?.entries ?: return
+        val scopes = entries.filter { it.chat.id in openChats && it.chat.orchestrationEnabled }.flatMap { it.chat.workgroupScopes }
+        if (scopes.isNotEmpty()) mentions.note(scopes.map { "@$it" })
+    }
+
+    /** Closes [chatID]'s conversation (a navigator pop); its shared content goes with it. */
     fun closeConversation(chatID: String) {
+        openChats -= chatID
         chats.close(chatID)
         boundSessions.unwatch(chatID)
+        conversationStates.remove(chatID)
+    }
+
+    /**
+     * [chatID]'s conversation content, shared by every collector while the conversation is open
+     * (a recreated activity finds it computed); null until the first content. Kept until the
+     * conversation leaves the stacks, or the unpair.
+     */
+    fun conversationState(chatID: String): StateFlow<ConversationContent?> = conversationStates.computeIfAbsent(chatID) {
+        conversationContent(chatID).stateIn(scope, SharingStarted.WhileSubscribed(sharingStopMillis, replayExpirationMillis = 0), null)
     }
 
     /** [chatID]'s conversation screen content, computed off the main thread while collected. */
@@ -158,7 +329,66 @@ class HomeGraph(
         context = contentContext,
     )
 
+    /** [chatID]'s conversation calls: navigation through [navigator], the rest through [chats]. */
+    fun conversationActions(chatID: String): ConversationActions = object : ConversationActions {
+        override fun back() = navigator.back()
+
+        override fun retry() = chats.retry(chatID)
+
+        override fun setMuted(muted: Boolean) = chats.setMuted(chatID, muted)
+
+        override fun goToSession(target: GoToSession) = navigator.openSession(target.session, target.title)
+
+        override fun openMention(target: LinkTarget) {
+            when (target) {
+                is LinkTarget.Session -> {
+                    val tree = (repository.state.value as? TreeState.Loaded)?.tree
+                    val shown = mentionSession(target.guid, target.name, tree)
+                    navigator.openSession(shown.session, shown.title)
+                }
+                is LinkTarget.Workgroup -> navigator.openWorkgroup(target.workgroupID, target.name)
+                // The text itself opens a URL (a Compose link annotation); nothing reaches here.
+                is LinkTarget.Url -> Unit
+            }
+        }
+
+        override fun openWorkgroup(workgroup: WorkgroupLink) = navigator.openWorkgroup(workgroup.workgroupID, workgroup.label)
+
+        override fun retrySend(uniqueID: String) {
+            // App-scoped: leaving the screen does not cut the send short. Its outcome shows in the transcript.
+            scope.launch { chats.retrySend(chatID, uniqueID) }
+        }
+
+        override fun deleteUnsent(uniqueID: String) = chats.discardUnsent(chatID, uniqueID)
+
+        override suspend fun deleteFromHere(uniqueID: String): DeleteFromOutcome = chats.deleteFrom(chatID, uniqueID)
+    }
+
+    /** Sends [draft] to [chatID] ([ChatRepository.send]): the composer's Send. */
+    suspend fun send(chatID: String, draft: MentionDraft): SendOutcome = chats.send(chatID, draft)
+
+    /**
+     * Unpair, after [HomeNavigator.reset]: restarts [chatList] from Loading and drops every shared
+     * conversation content and any workgroup watch left.
+     */
+    fun clearShared() {
+        chatListResets.value++
+        conversationStates.clear()
+        openChats.clear()
+        for (workgroupID in workgroups.keys.toList()) stopWorkgroup(workgroupID)
+    }
+
     private fun boundGuid(chatID: String): String? = boundGuid(chats.listSnapshot.value.list, chatID)
+
+    override fun toString(): String = "HomeGraph(navigator=$navigator, workgroups=${workgroups.size}, conversations=${conversationStates.size})"
+}
+
+/** A workgroup view's watch and the job its coroutines run under. */
+private class StackedWorkgroup(val job: Job, val watch: WorkgroupWatch) {
+    fun end() {
+        watch.stop()
+        job.cancel()
+    }
 }
 
 /** [chatID]'s bound session in [list], or null (unbound, or not listed yet). */
@@ -179,6 +409,8 @@ private fun boundGuid(list: ChatListState, chatID: String): String? =
  * @param chatLog the mention resolver's, bound-session probe's and workgroup watches' diagnostics
  *   (IDs, counts and failure kinds only).
  * @param listContext where [HomeGraph.chatList] and conversations' content are computed.
+ * @param listSharingStopMillis how long the chat list and a conversation's content keep computing
+ *   after their last collector leaves (a rotation's gap).
  */
 fun wireHome(
     scope: CoroutineScope,
@@ -191,6 +423,7 @@ fun wireHome(
     log: (String) -> Unit = {},
     chatLog: (String) -> Unit = {},
     listContext: CoroutineContext = Dispatchers.Default,
+    listSharingStopMillis: Long = LIST_SHARING_STOP_MILLIS,
 ): HomeGraph {
     val sink = ForwardingStreamSink()
     val chatSink = ForwardingChatSink()
@@ -200,8 +433,6 @@ fun wireHome(
     val chats = newChats(client)
     chatSink.target = chats.sink
     val repository = newRepository(client)
-    val navigator = SessionNavigator(open = controller::open, close = controller::close, macRevision = { macRevisionOf(client.state.value) })
-    scope.launch { client.state.map(::macRevisionOf).distinctUntilChanged().collect(navigator::macRevisionChanged) }
     val search = SessionSearch()
     val drafts = ComposerDrafts()
     val inputMemories = LiveInputMemories()
@@ -218,38 +449,45 @@ fun wireHome(
     val boundSessions = BoundSessionProbe(client, scope, log = chatLog)
     val inlineImages = ChatIconCache(imageDecoder, INLINE_IMAGE_BUDGET_BYTES)
     val chatDrafts = ChatDrafts()
-    // A new link probes the open conversations' bound sessions again; a binding that changes in
-    // the list (or first appears there) is probed once.
+    // A new link probes the open conversations' bound sessions again.
     scope.launch { chats.linkGeneration.drop(1).collect { boundSessions.linkUp() } }
+    val graph = HomeGraph(
+        scope, client, controller, repository, chats, search, drafts, inputMemories, mentions, chatSearch, chatIcons,
+        boundSessions, inlineImages, chatDrafts, listContext, listSharingStopMillis, chatLog,
+    )
+    val navigator = graph.navigator
+    // A binding that changes in the list (or first appears there) is probed once; the open
+    // conversations' claimed workgroups are named once the list carries them.
     scope.launch {
         chats.listSnapshot.map { it.list }.distinctUntilChanged().collect { list ->
             boundSessions.refreshBindings { chatID -> boundGuid(list, chatID) }
+            graph.noteWorkgroupScopes(list)
         }
     }
-    val chatList = chatListContents(chats.listSnapshot, chats.macRevision, chatSearch.query, mentions.resolutions, listContext)
-        .stateIn(scope, SharingStarted.WhileSubscribed(LIST_SHARING_STOP_MILLIS), ChatListContent.Loading)
+    scope.launch { client.state.map(::macRevisionOf).distinctUntilChanged().collect(navigator::macRevisionChanged) }
+    // The default tab is chosen from the first link's hello; AI turning off leaves the Chats root.
+    scope.launch { chats.lastLinkUp.filterNotNull().collect { navigator.linkUp(it.aiAvailable) } }
+    scope.launch { chats.aiAvailable.drop(1).collect(navigator::aiAvailabilityChanged) }
     clearOnUnpair(
         client.paired,
         scope,
         // Not the chat seen store: ChatRepository.clear() clears it on its consumer, after its
         // barrier against inputs from earlier links, so no mark still queued lands after the wipe.
         listOf(
-            navigator::reset, repository::clear, chats::clear, mentions::clear, boundSessions::clear, chatIcons::clear,
-            inlineImages::clear, search::clear, chatSearch::clear, drafts::clear, chatDrafts::clear, inputMemories::clear,
+            navigator::reset, graph::clearShared, repository::clear, chats::clear, mentions::clear, boundSessions::clear,
+            chatIcons::clear, inlineImages::clear, search::clear, chatSearch::clear, drafts::clear, chatDrafts::clear,
+            inputMemories::clear,
         ),
         log,
     )
-    return HomeGraph(
-        client, controller, repository, chats, navigator, search, drafts, inputMemories, mentions, chatSearch, chatIcons, chatList,
-        boundSessions, inlineImages, chatDrafts, listContext, chatLog,
-    )
+    return graph
 }
 
 /** The decoded inline images' shared bitmap budget (*Global Constraints*). */
 private const val INLINE_IMAGE_BUDGET_BYTES = 48 * 1024 * 1024
 
 /** How long [HomeGraph.chatList] keeps computing after its last collector (rotation) leaves. */
-private const val LIST_SHARING_STOP_MILLIS = 5_000L
+const val LIST_SHARING_STOP_MILLIS = 5_000L
 
 /** The client's stream sink before the controller exists; forwards every input once it does. */
 private class ForwardingStreamSink : StreamSink {

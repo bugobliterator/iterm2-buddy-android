@@ -4,19 +4,27 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -35,9 +43,11 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -48,10 +58,17 @@ import dev.bugobliterator.itermbuddy.core.stream.ActiveStream
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.wire.MacStatus
 import dev.bugobliterator.itermbuddy.ui.HomeDestination
+import dev.bugobliterator.itermbuddy.ui.HomeTab
 import dev.bugobliterator.itermbuddy.ui.bannerOffersReconnect
 import dev.bugobliterator.itermbuddy.ui.browser.BrowserSessionScreen
+import dev.bugobliterator.itermbuddy.ui.chats.ChatListScreen
+import dev.bugobliterator.itermbuddy.ui.chats.NewChatScreen
 import dev.bugobliterator.itermbuddy.ui.connectionBanner
 import dev.bugobliterator.itermbuddy.ui.connectionLabel
+import dev.bugobliterator.itermbuddy.ui.conversation.ChatComposer
+import dev.bugobliterator.itermbuddy.ui.conversation.ConversationBody
+import dev.bugobliterator.itermbuddy.ui.conversation.ConversationContent
+import dev.bugobliterator.itermbuddy.ui.conversation.ConversationScreen
 import dev.bugobliterator.itermbuddy.ui.keepsScreenOn
 import dev.bugobliterator.itermbuddy.ui.live.LiveSessionActions
 import dev.bugobliterator.itermbuddy.ui.live.LiveSessionScreen
@@ -60,6 +77,8 @@ import dev.bugobliterator.itermbuddy.ui.live.NoPersonalizedLearning
 import dev.bugobliterator.itermbuddy.ui.sessions.SessionListScreen
 import dev.bugobliterator.itermbuddy.ui.settings.SettingsScreen
 import dev.bugobliterator.itermbuddy.ui.settings.decoderRowText
+import dev.bugobliterator.itermbuddy.ui.showsBottomBar
+import dev.bugobliterator.itermbuddy.ui.workgroup.WorkgroupRoute
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
@@ -69,6 +88,9 @@ import kotlinx.coroutines.flow.map
  */
 interface HomeActions : LiveSessionActions {
     fun openSession(session: SessionSummary, title: String)
+
+    /** The bottom bar: the owner selected [tab] ([dev.bugobliterator.itermbuddy.ui.HomeNavigator.selectTab]). */
+    fun selectTab(tab: HomeTab)
 
     fun openSettings()
 
@@ -85,7 +107,9 @@ interface HomeActions : LiveSessionActions {
 /**
  * Everything the home shows, collected by the activity from app-scoped flows. [video] is read by
  * the live view and Settings themselves (its stats change with every frame); [activeStream] is
- * the controller's adopted stream (its config stays for Fit while a window is too large).
+ * the controller's adopted stream (its config stays for Fit while a window is too large). [tab]
+ * is the selected tab and [chatsAttention] the Chats item's dot. The chat destinations collect
+ * their own flows from [ChatsHome].
  */
 data class HomeModel(
     val state: ClientState,
@@ -102,6 +126,8 @@ data class HomeModel(
     val videoStatsShown: Boolean,
     val query: String = "",
     val macStatus: MacStatus? = null,
+    val tab: HomeTab = HomeTab.SESSIONS,
+    val chatsAttention: Boolean = false,
 )
 
 /**
@@ -119,24 +145,44 @@ fun macAlertBanner(status: MacStatus?): String? = when {
 }
 
 /**
- * The paired home: a [Scaffold] for [HomeTab][dev.bugobliterator.itermbuddy.ui.HomeTab]
- * `SESSIONS` (no bottom bar while it is the only tab), rendering [HomeModel.destination].
- * System back on any destination but the list calls [HomeActions.back]. The screen is kept on
- * only while a session view shows ([keepsScreenOn]), whatever the stream's state, and the flag is
- * cleared on leaving it. Session destinations render [LiveSessionScreen] or [BrowserSessionScreen],
- * which attach and detach the decoder's surface; nothing in composition opens or closes a stream.
+ * The paired home: two tabs, Chats and Sessions (`IOS/App/iTerm2CompanionApp.swift:155-176`),
+ * rendering [HomeModel.destination], the top of the selected tab's stack. The bottom bar (the
+ * Chats item with a dot when a chat is unread or waiting) shows on the tab roots only
+ * ([showsBottomBar]), and not while the keyboard is up. System back on any other destination
+ * calls [HomeActions.back]. The screen is kept on only while a session view shows
+ * ([keepsScreenOn]), whatever the stream's state, and the flag is cleared on leaving it. Session
+ * destinations render [LiveSessionScreen] or [BrowserSessionScreen], which attach and detach the
+ * decoder's surface; nothing in composition opens or closes a stream or a conversation.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun HomeScaffold(model: HomeModel, actions: HomeActions, modifier: Modifier = Modifier) {
+fun HomeScaffold(model: HomeModel, actions: HomeActions, chats: ChatsHome, modifier: Modifier = Modifier) {
     val destination = model.destination
-    BackHandler(enabled = destination != HomeDestination.SessionList) { actions.back() }
+    val root = showsBottomBar(destination)
+    BackHandler(enabled = !root) { actions.back() }
     val view = LocalView.current
     val keepOn = keepsScreenOn(destination)
     DisposableEffect(view, keepOn) {
         view.keepScreenOn = keepOn
         onDispose { view.keepScreenOn = false }
     }
+    if (!root) {
+        HomeDestinationView(destination, model, actions, chats, modifier)
+        return
+    }
+    Column(modifier = modifier.fillMaxSize()) {
+        // The bar below takes the navigation bar's inset; the root's own scaffold must not too.
+        Box(modifier = Modifier.weight(1f).fillMaxWidth().consumeWindowInsets(WindowInsets.navigationBars)) {
+            HomeDestinationView(destination, model, actions, chats, Modifier)
+        }
+        if (!WindowInsets.isImeVisible) HomeBottomBar(model.tab, model.chatsAttention, actions::selectTab)
+    }
+}
+
+@Composable
+private fun HomeDestinationView(destination: HomeDestination, model: HomeModel, actions: HomeActions, chats: ChatsHome, modifier: Modifier) {
     when (destination) {
+        HomeDestination.ChatList -> ChatsRoot(model, actions, chats, modifier)
         HomeDestination.SessionList -> SessionsHome(model, actions, modifier)
         HomeDestination.Settings -> {
             val source = model.video
@@ -157,9 +203,153 @@ fun HomeScaffold(model: HomeModel, actions: HomeActions, modifier: Modifier = Mo
                 modifier = modifier,
             )
         }
+        HomeDestination.NewChat -> NewChat(model, actions, chats, modifier)
+        is HomeDestination.Conversation -> Conversation(destination.chatID, model, chats, modifier)
+        is HomeDestination.Workgroup -> chats.workgroupWatch(destination.workgroupID)?.let { watch ->
+            WorkgroupRoute(
+                watch = watch,
+                fallbackTitle = destination.title,
+                tree = chats::currentTree,
+                onBack = actions::back,
+                onOpenSession = actions::openSession,
+                modifier = modifier,
+            )
+        }
         is HomeDestination.LiveSession -> LiveSession(destination.session, destination.title, model, actions, modifier)
         is HomeDestination.BrowserSession -> BrowserSession(destination.session, destination.title, model, actions, modifier)
     }
+}
+
+/** Chats and Sessions; the Chats item shows a dot when [chatsAttention]. */
+@Composable
+private fun HomeBottomBar(tab: HomeTab, chatsAttention: Boolean, onSelect: (HomeTab) -> Unit) {
+    NavigationBar {
+        NavigationBarItem(
+            selected = tab == HomeTab.CHATS,
+            onClick = { onSelect(HomeTab.CHATS) },
+            icon = {
+                BadgedBox(badge = { if (chatsAttention) Badge() }) {
+                    Text("💬", modifier = Modifier.clearAndSetSemantics { })
+                }
+            },
+            label = { Text("Chats") },
+            modifier = Modifier.semantics { if (chatsAttention) stateDescription = "Needs attention" },
+        )
+        NavigationBarItem(
+            selected = tab == HomeTab.SESSIONS,
+            onClick = { onSelect(HomeTab.SESSIONS) },
+            icon = { Text(">_", style = MaterialTheme.typography.titleMedium, modifier = Modifier.clearAndSetSemantics { }) },
+            label = { Text("Sessions") },
+        )
+    }
+}
+
+/** The Chats tab's root: [ChatListScreen] with the home's status, menu and banners. */
+@Composable
+private fun ChatsRoot(model: HomeModel, actions: HomeActions, chats: ChatsHome, modifier: Modifier) {
+    val content by chats.chatList.collectAsStateWithLifecycle()
+    val query by chats.chatQuery.collectAsStateWithLifecycle()
+    ChatListScreen(
+        content = content,
+        query = query,
+        actions = chats.listActions,
+        icons = chats.icons,
+        modifier = modifier,
+        topBarActions = { HomeTopBarActions(model, actions) },
+        banners = { HomeBanners(model, actions) },
+    )
+}
+
+/** New Chat: a session from the tree, or the orchestrator; the created chat opens in its place. */
+@Composable
+private fun NewChat(model: HomeModel, actions: HomeActions, chats: ChatsHome, modifier: Modifier) {
+    val aiAvailable by chats.aiAvailable.collectAsStateWithLifecycle()
+    val status by chats.newChatStatus.collectAsStateWithLifecycle()
+    NewChatScreen(
+        aiAvailable = aiAvailable,
+        tree = (model.tree as? TreeState.Loaded)?.tree,
+        status = status,
+        onBack = actions::back,
+        onCreate = chats::createChat,
+        onRetry = chats::retryCreateChat,
+        onDismissFailure = chats::dismissCreateChatFailure,
+        modifier = modifier,
+    )
+}
+
+/**
+ * [chatID]'s conversation, from its shared content (a placeholder while the first is computed),
+ * with [ChatComposer] below the transcript.
+ */
+@Composable
+private fun Conversation(chatID: String, model: HomeModel, chats: ChatsHome, modifier: Modifier) {
+    val state = remember(chatID) { chats.conversation(chatID) }
+    val shown by state.collectAsStateWithLifecycle()
+    val content = shown ?: remember(chatID) { loadingConversation(chatID) }
+    val conversationActions = remember(chatID) { chats.conversationActions(chatID) }
+    ConversationScreen(
+        content = content,
+        actions = conversationActions,
+        images = chats.images,
+        modifier = modifier,
+        composer = {
+            ChatComposer(
+                chatID = chatID,
+                drafts = chats.drafts,
+                whyNotSendable = content.whyNotSendable,
+                warnsOfPendingRequest = content.warnsOfPendingRequest,
+                tree = (model.tree as? TreeState.Loaded)?.tree,
+                send = { draft -> chats.send(chatID, draft) },
+            )
+        },
+    )
+}
+
+/** What a conversation shows before its first content: iOS's fallback title and a spinner. */
+private fun loadingConversation(chatID: String) = ConversationContent(
+    chatID = chatID,
+    title = "Chat",
+    body = ConversationBody.Loading,
+    muted = false,
+    showsMute = false,
+    goToSession = null,
+    workgroups = emptyList(),
+    sendable = false,
+)
+
+/** The connection status and the ⋮ menu (Settings) on each tab root's top bar. */
+@Composable
+private fun HomeTopBarActions(model: HomeModel, actions: HomeActions) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Text(
+        text = "● ${connectionLabel(model.state)}",
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier.padding(end = 4.dp),
+    )
+    Box {
+        IconButton(
+            onClick = { menuOpen = true },
+            modifier = Modifier.semantics { contentDescription = "More options" },
+        ) { Text("⋮", style = MaterialTheme.typography.titleLarge) }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            DropdownMenuItem(
+                text = { Text("Settings") },
+                onClick = {
+                    menuOpen = false
+                    actions.openSettings()
+                },
+            )
+        }
+    }
+}
+
+/** The connection banner and the Mac alert banner, under each tab root's top bar. */
+@Composable
+private fun HomeBanners(model: HomeModel, actions: HomeActions) {
+    connectionBanner(model.state)?.let { text ->
+        ConnectionBannerRow(text, bannerOffersReconnect(model.state), actions::reconnect)
+    }
+    macAlertBanner(model.macStatus)?.let { text -> MacAlertBannerRow(text) }
 }
 
 /**
@@ -227,7 +417,6 @@ private fun MacAlertBannerRow(text: String, modifier: Modifier = Modifier) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SessionsHome(model: HomeModel, actions: HomeActions, modifier: Modifier) {
-    var menuOpen by remember { mutableStateOf(false) }
     // The query is app-scoped (HomeModel.query); only the field's focus is local.
     val query = model.query
     var searchFocused by remember { mutableStateOf(false) }
@@ -242,37 +431,13 @@ private fun SessionsHome(model: HomeModel, actions: HomeActions, modifier: Modif
         topBar = {
             TopAppBar(
                 title = { Text("Sessions") },
-                actions = {
-                    Text(
-                        text = "● ${connectionLabel(model.state)}",
-                        style = MaterialTheme.typography.labelLarge,
-                        modifier = Modifier.padding(end = 4.dp),
-                    )
-                    Box {
-                        IconButton(
-                            onClick = { menuOpen = true },
-                            modifier = Modifier.semantics { contentDescription = "More options" },
-                        ) { Text("⋮", style = MaterialTheme.typography.titleLarge) }
-                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Settings") },
-                                onClick = {
-                                    menuOpen = false
-                                    actions.openSettings()
-                                },
-                            )
-                        }
-                    }
-                },
+                actions = { HomeTopBarActions(model, actions) },
             )
         },
     ) { padding ->
         // The IME padding keeps the list's last rows above the keyboard while searching.
         Column(modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
-            connectionBanner(model.state)?.let { text ->
-                ConnectionBannerRow(text, bannerOffersReconnect(model.state), actions::reconnect)
-            }
-            macAlertBanner(model.macStatus)?.let { text -> MacAlertBannerRow(text) }
+            HomeBanners(model, actions)
             SessionSearchField(
                 query = query,
                 onQueryChange = actions::setSearchQuery,

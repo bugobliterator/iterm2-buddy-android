@@ -6,6 +6,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.WaitReason
+import dev.bugobliterator.itermbuddy.core.chat.AgentState
+import dev.bugobliterator.itermbuddy.core.chat.ChatRow
+import dev.bugobliterator.itermbuddy.ui.home.ChatsHome
 import dev.bugobliterator.itermbuddy.ui.home.HomeActions
 import dev.bugobliterator.itermbuddy.ui.home.HomeModel
 import dev.bugobliterator.itermbuddy.ui.home.HomeScaffold
@@ -23,13 +26,22 @@ enum class AppScreen {
 }
 
 /**
- * The home's tabs: one today, so no bottom bar ([showsBottomBar]); a Chats tab later is one more
- * value and one more destination.
+ * The home's tabs (`IOS/App/iTerm2CompanionApp.swift:157-176`), each with its own back stack
+ * ([HomeNavigator]) whose [root] is its list.
  */
-enum class HomeTab { SESSIONS }
+enum class HomeTab(val root: HomeDestination) {
+    CHATS(HomeDestination.ChatList),
+    SESSIONS(HomeDestination.SessionList),
+}
 
-/** A bottom bar appears only once there is a second [HomeTab]. */
-fun showsBottomBar(): Boolean = HomeTab.entries.size > 1
+/** The bottom bar shows on the tab roots only, so a pushed screen (the live view above all) keeps the whole screen. */
+fun showsBottomBar(destination: HomeDestination): Boolean = HomeTab.entries.any { it.root == destination }
+
+/**
+ * Whether the Chats item in the bottom bar shows a dot: a chat is unread, or its agent waits on
+ * the owner (an Android addition; iOS's tab has no badge).
+ */
+fun chatsNeedAttention(rows: List<ChatRow>): Boolean = rows.any { it.unread || it.state == AgentState.WAITING }
 
 /**
  * [AppScreen.LOADING] only while [paired] is unknown and the client is [ClientState.Connecting]
@@ -83,6 +95,7 @@ fun AppRoot(
     paired: Boolean?,
     home: HomeModel,
     homeActions: HomeActions,
+    chats: ChatsHome,
     pairingActions: PairingActions,
     scanNotice: ScanNotice?,
     modifier: Modifier = Modifier,
@@ -97,6 +110,6 @@ fun AppRoot(
             unpairing = home.unpairing,
             unpairFailed = home.unpairFailed,
         )
-        AppScreen.HOME -> HomeScaffold(home, homeActions, modifier)
+        AppScreen.HOME -> HomeScaffold(home, homeActions, chats, modifier)
     }
 }

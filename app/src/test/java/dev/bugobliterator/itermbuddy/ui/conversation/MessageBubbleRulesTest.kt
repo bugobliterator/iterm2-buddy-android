@@ -22,7 +22,7 @@ import dev.bugobliterator.itermbuddy.core.sessions.SessionTree
 import dev.bugobliterator.itermbuddy.core.sessions.TabEntry
 import dev.bugobliterator.itermbuddy.core.sessions.WindowEntry
 import dev.bugobliterator.itermbuddy.ui.HomeDestination
-import dev.bugobliterator.itermbuddy.ui.SessionNavigator
+import dev.bugobliterator.itermbuddy.ui.HomeNavigator
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -253,7 +253,7 @@ class MessageBubbleRulesTest {
         assertEquals("Fix flaky widget test", target.title)
 
         val opened = mutableListOf<SessionSummary>()
-        val navigator = SessionNavigator(open = { opened += it }, close = {}, macRevision = { 15 })
+        val navigator = HomeNavigator(openStream = { opened += it }, closeStream = {}, openChat = {}, closeChat = {}, setVisibleChat = {}, macRevision = { 15 })
         navigator.openSession(target.session, target.title)
         assertEquals(listOf(rawGuid), opened.map { it.guid })
         val destination = navigator.destination.value as HomeDestination.LiveSession

@@ -48,11 +48,13 @@ import kotlin.time.Duration.Companion.minutes
  * [chatSeen]) and the navigator.
  *
  * @param events where the repository reads pushes; null for the client's own `events`.
+ * @param listSharingStopMillis how long the shared chat list keeps computing after its last reader.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal class SessionsRig(
     private val test: TestScope,
     events: ((CompanionClient) -> Flow<MacMessage>)? = null,
+    listSharingStopMillis: Long = 5_000,
 ) {
     private val macKeys = newStaticKeyPair()
     val code = PairingCode(macKeys.second, "sessions-rig-pid", ORIGIN)
@@ -99,6 +101,9 @@ internal class SessionsRig(
         newChats = { link ->
             ChatRepository(link, test.backgroundScope, chatSeen, nowMillis = { test.testScheduler.currentTime }, log = { logs += it })
         },
+        // The chat list's and conversations' content in virtual time, on the test's dispatcher.
+        listContext = EmptyCoroutineContext,
+        listSharingStopMillis = listSharingStopMillis,
     )
     val client get() = graph.client
     val repository get() = graph.repository
