@@ -28,26 +28,9 @@ if pgrep -x iTerm2 >/dev/null; then
     die "iTerm2 is already running; it must read the seeded state at its first launch"
 fi
 
-hex_of() {
-    printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'
-}
-
 # --- 1. The secure setting --------------------------------------------------------------------
 
-setting_key="EnableCompanionPairing"
-setting_file="$ITERM2_APP_SUPPORT/$setting_key.secureSetting"
-mkdir -p "$ITERM2_APP_SUPPORT"
-magic="$(hex_of "$setting_file") $(printf '%s' "$setting_key" | shasum -a 256 | awk '{ print $1 }')"
-staged="$WORK_DIR/$setting_key.secureSetting"
-# printf '%s\n%s', as iTerm2's own privileged write does: no newline after the value.
-printf '%s\n%s' "$magic" "$(hex_of true)" > "$staged"
-sudo install -o root -g wheel -m 0644 "$staged" "$setting_file" || die "could not install $setting_file as root"
-rm -f "$staged"
-owner="$(stat -f '%u' "$setting_file")"
-[[ "$owner" == 0 ]] || die "$setting_file is owned by uid $owner, not root; iTerm2 would ignore it"
-log "wrote $setting_file (root-owned, $(wc -c < "$setting_file" | tr -d ' ') bytes):"
-sed 's/^/    /' "$setting_file"
-echo
+install_secure_setting EnableCompanionPairing true
 
 # --- 2. User defaults -------------------------------------------------------------------------
 

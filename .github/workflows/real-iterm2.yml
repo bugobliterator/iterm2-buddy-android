@@ -1,8 +1,9 @@
 name: Real iTerm2
 
 # Runs the app's own CompanionClient, as the phone, against a real iTerm2 3.7.7 on a macOS
-# runner, through a local relay behind TLS: pairing, the session tree, typing into a session and
-# its live HEVC stream. See ci/real-iterm2/README.md.
+# runner, through a local relay behind TLS: pairing, the session tree, typing into a session, its
+# live HEVC stream, and Agent Chat against a local fake model (no model key, no secret). See
+# ci/real-iterm2/README.md.
 #
 # Manual only: it is slow and depends on iterm2.com, so it never runs on every push to main.
 on:
@@ -23,7 +24,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pairing-input-and-stream:
+  pairing-input-stream-and-chat:
     # Apple Silicon, macOS 15: iTerm2 3.7.7 needs macOS 13 or later, and later stages need the
     # hardware HEVC encoder, which Apple Silicon has.
     runs-on: macos-15
@@ -70,14 +71,30 @@ jobs:
       - name: Install the companion plugin
         run: bash ci/real-iterm2/install-companion-plugin.sh
 
+      # Stage 3's setup (the AI plugin, the AI settings, the fake model) does not stop stages 1
+      # and 2: when one of these steps fails, RealIterm2AgentChatTest fails instead, saying AI is
+      # off or the fake model is unreachable.
+      - name: Install the AI plugin
+        continue-on-error: true
+        run: bash ci/real-iterm2/install-ai-plugin.sh
+
       - name: Generate the pairing keys
         run: bash ci/real-iterm2/generate-pairing.sh
 
       - name: Seed iTerm2's pairing
         run: bash ci/real-iterm2/seed-pairing.sh
 
+      # EnableAI and a manual model at the fake model, credential none (no key anywhere).
+      - name: Seed iTerm2's AI settings
+        continue-on-error: true
+        run: bash ci/real-iterm2/seed-ai.sh
+
       - name: Start the relay and the TLS proxy
         run: bash ci/real-iterm2/start-relay.sh
+
+      - name: Start the fake model
+        continue-on-error: true
+        run: bash ci/real-iterm2/start-fake-model.sh
 
       - name: Launch iTerm2
         run: bash ci/real-iterm2/launch-iterm2.sh
@@ -85,14 +102,18 @@ jobs:
       # Stage 1 (RealIterm2PairingTest): pair, ping, read the session tree and a session's
       # content. Stage 2 (RealIterm2SessionInputTest, RealIterm2LiveStreamTest): type a command
       # into the session and see it change; start a live stream, check its HEVC config and
-      # keyframe, and stop it. One JVM runs them one after another (app/build.gradle.kts).
-      - name: Pair, type into a session and stream it
+      # keyframe, and stop it. Stage 3 (RealIterm2AgentChatTest): create an orchestrator chat,
+      # get the fake model's streamed reply, then its tool call parked on the owner's approval.
+      # One JVM runs them one after another (app/build.gradle.kts).
+      - name: Pair, type into a session, stream it and chat
         env:
           REAL_ITERM2: '1'
           REAL_ITERM2_PAIRING_FILE: ${{ runner.temp }}/real-iterm2/pairing.env
           REAL_ITERM2_RELAY_URL: ws://127.0.0.1:8787/
           REAL_ITERM2_CONNECT_TIMEOUT_SECONDS: '180'
           REAL_ITERM2_REQUEST_TIMEOUT_SECONDS: '30'
+          REAL_ITERM2_CHAT_TIMEOUT_SECONDS: '120'
+          REAL_ITERM2_FAKE_MODEL_URL: http://127.0.0.1:8790
         run: ./gradlew realIterm2Test
 
       - name: Collect diagnostics

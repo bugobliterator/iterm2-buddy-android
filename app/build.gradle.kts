@@ -129,6 +129,8 @@ val realIterm2Environment = listOf(
     "REAL_ITERM2_RELAY_URL",
     "REAL_ITERM2_CONNECT_TIMEOUT_SECONDS",
     "REAL_ITERM2_REQUEST_TIMEOUT_SECONDS",
+    "REAL_ITERM2_CHAT_TIMEOUT_SECONDS",
+    "REAL_ITERM2_FAKE_MODEL_URL",
 )
 
 tasks.withType<Test>().configureEach {

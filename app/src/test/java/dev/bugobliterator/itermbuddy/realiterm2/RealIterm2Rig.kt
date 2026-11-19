@@ -3,6 +3,7 @@ package dev.bugobliterator.itermbuddy.realiterm2
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.ClientTimeouts
 import dev.bugobliterator.itermbuddy.core.CompanionClient
+import dev.bugobliterator.itermbuddy.core.chat.ChatSink
 import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
 import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
@@ -52,7 +53,9 @@ import org.junit.Assume.assumeTrue
  *   talks to the relay directly while signing for the https origin iTerm2 uses through the TLS proxy;
  * - `REAL_ITERM2_CONNECT_TIMEOUT_SECONDS` (default 180): the bound on reaching Connected;
  * - `REAL_ITERM2_REQUEST_TIMEOUT_SECONDS` (default 30): the bound on each request, and on each
- *   wait for iTerm2 to show what a test did.
+ *   wait for iTerm2 to show what a test did;
+ * - `REAL_ITERM2_CHAT_TIMEOUT_SECONDS` (default 120): the bound on each Agent Chat step, which
+ *   waits on iTerm2's agent and the fake model as well as on the link.
  *
  * [report] prints states, counts and sizes; nothing here prints terminal content.
  */
@@ -67,6 +70,8 @@ class RealIterm2Rig : AutoCloseable {
     val states = CopyOnWriteArrayList<ClientState>()
 
     val requestTimeout: Duration by lazy { secondsFromEnv("REAL_ITERM2_REQUEST_TIMEOUT_SECONDS", DEFAULT_REQUEST_TIMEOUT) }
+
+    val chatTimeout: Duration by lazy { secondsFromEnv("REAL_ITERM2_CHAT_TIMEOUT_SECONDS", DEFAULT_CHAT_TIMEOUT) }
 
     private val linkIdFlow = MutableStateFlow<Long?>(null)
 
@@ -86,8 +91,9 @@ class RealIterm2Rig : AutoCloseable {
      * Builds the client from the seeded pairing without starting it, so a stream controller can
      * be built on it before any link comes up, as the app wires them. [streamSink] gets every
      * stream input, as the app's stream controller does; the rig notes each link's id on the way.
+     * [chatSink] gets every chat input, as the app's chat repository does (`wireHome`).
      */
-    fun client(streamSink: StreamSink? = null): CompanionClient {
+    fun client(streamSink: StreamSink? = null, chatSink: ChatSink? = null): CompanionClient {
         check(built == null) { "a client is already built" }
         val pairing = SeededPairing.load(File(requiredEnv("REAL_ITERM2_PAIRING_FILE")))
         val relayUrl = System.getenv("REAL_ITERM2_RELAY_URL")?.takeIf { it.isNotBlank() } ?: DEFAULT_RELAY_URL
@@ -119,6 +125,7 @@ class RealIterm2Rig : AutoCloseable {
                 report("client: $line")
             },
             streamSink = sink,
+            chatSink = chatSink,
         )
         built = client
         return client
@@ -224,6 +231,7 @@ class RealIterm2Rig : AutoCloseable {
         const val DEFAULT_RELAY_URL = "ws://127.0.0.1:8787/"
         val DEFAULT_CONNECT_TIMEOUT = 180.seconds
         val DEFAULT_REQUEST_TIMEOUT = 30.seconds
+        val DEFAULT_CHAT_TIMEOUT = 120.seconds
         val POLL_INTERVAL = 250.milliseconds
         private val CLOSE_TIMEOUT = 5.seconds
         private const val KEY_HEX_DIGITS = 64
@@ -246,7 +254,7 @@ class RealIterm2Rig : AutoCloseable {
         fun isPng(bytes: ByteArray): Boolean =
             bytes.size > PNG_SIGNATURE.size && bytes.copyOf(PNG_SIGNATURE.size).contentEquals(PNG_SIGNATURE)
 
-        private fun requiredEnv(name: String): String =
+        fun requiredEnv(name: String): String =
             System.getenv(name)?.takeIf { it.isNotBlank() } ?: error("$name is not set; ci/real-iterm2/README.md lists what the test reads")
 
         private fun secondsFromEnv(name: String, default: Duration): Duration =

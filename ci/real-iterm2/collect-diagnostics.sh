@@ -3,7 +3,8 @@
 # which the workflow uploads: a screenshot, the relay and TLS proxy logs (already there), the
 # companion defaults, the secure setting file, which seeded keychain items are still in the CI
 # keychain (iTerm2 moves them to its data-protection keychain when it reads them), whether
-# NSWorkspace finds the plugin, iTerm2's unified log and any iTerm2 crash reports.
+# NSWorkspace finds the plugins, the AI settings and the fake model's counts (its log and captured
+# request shape are already there), iTerm2's unified log and any iTerm2 crash reports.
 #
 # Never fails: every step is best effort. Prints no key material.
 
@@ -32,7 +33,7 @@ if pgrep -x iTerm2 >/dev/null; then
 else
     note "iTerm2 is NOT running"
 fi
-for name in relay tls-proxy; do
+for name in relay tls-proxy fake-model; do
     pid_file="$WORK_DIR/$name.pid"
     if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
         note "$name is running (pid $(cat "$pid_file"))"
@@ -48,13 +49,21 @@ for key in CompanionPairingAllowed CompanionRelayOrigin CompanionResolverURL NoS
 done
 defaults read "$ITERM2_BUNDLE_ID" 2>/dev/null | grep -iE 'companion|NoSyncDisableClaude' > "$DIAGNOSTICS_DIR/defaults-companion.txt"
 
-setting_file="$ITERM2_APP_SUPPORT/EnableCompanionPairing.secureSetting"
-if [[ -f "$setting_file" ]]; then
-    note "secure setting: $(ls -l "$setting_file")"
-    cp "$setting_file" "$DIAGNOSTICS_DIR/EnableCompanionPairing.secureSetting.txt"
-else
-    note "secure setting: $setting_file is missing"
-fi
+for setting in EnableCompanionPairing EnableAI; do
+    setting_file="$ITERM2_APP_SUPPORT/$setting.secureSetting"
+    if [[ -f "$setting_file" ]]; then
+        note "secure setting: $(ls -l "$setting_file")"
+        cp "$setting_file" "$DIAGNOSTICS_DIR/$setting.secureSetting.txt"
+    else
+        note "secure setting: $setting_file is missing"
+    fi
+done
+
+note "AI defaults (UseRecommendedAIModel 0 and the fake model's entry are expected):"
+for key in GenerativeAIAllowed UseRecommendedAIModel AiModel; do
+    note "    $key = $(defaults read "$ITERM2_BUNDLE_ID" "$key" 2>&1)"
+done
+defaults read "$ITERM2_BUNDLE_ID" AIManualModelConfigurations > "$DIAGNOSTICS_DIR/defaults-ai-models.txt" 2>&1
 
 if [[ -f "$CI_KEYCHAIN" ]]; then
     for account in "$MAC_PRIVATE_KEY_ACCOUNT" "$PHONE_PUBLIC_KEY_ACCOUNT" paired-relay-room-secret; do
@@ -66,10 +75,22 @@ if [[ -f "$CI_KEYCHAIN" ]]; then
     done
 fi
 
-plugin="$(osascript -l JavaScript -e "ObjC.import('AppKit');
-    var url = \$.NSWorkspace.sharedWorkspace.URLForApplicationWithBundleIdentifier('$COMPANION_PLUGIN_BUNDLE_ID');
-    url.isNil() ? 'not found' : url.path.js" 2>&1)"
-note "NSWorkspace companion plugin: $plugin"
+for bundle_id in "$COMPANION_PLUGIN_BUNDLE_ID" "$AI_PLUGIN_BUNDLE_ID"; do
+    plugin="$(osascript -l JavaScript -e "ObjC.import('AppKit');
+        var url = \$.NSWorkspace.sharedWorkspace.URLForApplicationWithBundleIdentifier('$bundle_id');
+        url.isNil() ? 'not found' : url.path.js" 2>&1)"
+    note "NSWorkspace $bundle_id: $plugin"
+done
+
+# Counts and the captured tool facts only; the fake model never reports content.
+if curl --silent --fail --max-time 5 "http://127.0.0.1:${FAKE_MODEL_PORT}/fake/stats" -o "$DIAGNOSTICS_DIR/fake-model-stats.json"; then
+    note "fake model stats: $(cat "$DIAGNOSTICS_DIR/fake-model-stats.json")"
+else
+    note "fake model stats: not reachable on 127.0.0.1:${FAKE_MODEL_PORT}"
+fi
+if [[ -f "$FAKE_MODEL_LOG" ]]; then
+    note "fake model log: $(grep -c ' POST ' "$FAKE_MODEL_LOG") chat requests"
+fi
 
 if [[ -f "$RELAY_LOG" ]]; then
     note "relay log: $(wc -l < "$RELAY_LOG" | tr -d ' ') lines; joins: $(grep -c 'hello role=' "$RELAY_LOG") (mac $(grep -c 'hello role=mac' "$RELAY_LOG"), phone $(grep -c 'hello role=phone' "$RELAY_LOG")); rejects: $(grep -c ' reject ' "$RELAY_LOG")"
