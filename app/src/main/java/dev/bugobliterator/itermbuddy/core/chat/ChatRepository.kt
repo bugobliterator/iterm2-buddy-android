@@ -212,6 +212,9 @@ data class ChatAvailability(val generation: Long, val aiAvailable: Boolean, val 
 /**
  * The chat list, its rows and AI availability as one value, published together, so a reader
  * never sees a new list with the previous rows. [toString] shows counts only.
+ *
+ * Equality compares [list] and [rows] by identity (the repository publishes a new one only when
+ * it changed), never by content, so no comparison reads every entry and its icon's bytes.
  */
 data class ChatListSnapshot(
     val list: ChatListState,
@@ -220,6 +223,14 @@ data class ChatListSnapshot(
     /** The pairing it belongs to ([ChatRepository.pairingEpoch] when it was published). */
     val pairingEpoch: Long = 0,
 ) {
+    override fun equals(other: Any?): Boolean =
+        other is ChatListSnapshot && other.list === list && other.rows === rows && other.aiAvailable == aiAvailable &&
+            other.pairingEpoch == pairingEpoch
+
+    override fun hashCode(): Int =
+        ((System.identityHashCode(list) * 31 + System.identityHashCode(rows)) * 31 + aiAvailable.hashCode()) * 31 +
+            pairingEpoch.hashCode()
+
     override fun toString(): String =
         "ChatListSnapshot(list=$list, rows=${rows.size}, aiAvailable=$aiAvailable, pairingEpoch=$pairingEpoch)"
 }
@@ -227,8 +238,9 @@ data class ChatListSnapshot(
 /**
  * The repository's bounds, all injectable: request bounds as iOS's (`AM:2223`, `AM:2939`), the
  * send echo and delete waits used by later actions, how often an open transcript's snapshot may
- * be republished while it streams ([snapshotInterval]), and the activity tracker's timings
- * ([ChatActivityTracker]).
+ * be republished while it streams ([snapshotInterval]), the activity tracker's timings
+ * ([ChatActivityTracker]), and how long a suspect empty list is held before the list is fetched
+ * to confirm it ([emptyListConfirm]).
  */
 data class ChatTimeouts(
     val list: Duration = 15.seconds,
@@ -239,6 +251,7 @@ data class ChatTimeouts(
     val snapshotInterval: Duration = 100.milliseconds,
     val parkDebounce: Duration = 1_500.milliseconds,
     val snapshotSettle: Duration = 1.seconds,
+    val emptyListConfirm: Duration = 3.seconds,
 )
 
 /**
@@ -270,7 +283,17 @@ data class ChatTimeouts(
  *
  * **AI off.** The Mac drops every subscription and lists no chats while AI is off (`HB:283-288`,
  * `HB:2250-2269`), so list values are not applied then: the entries, seen marks, Done latches and
- * transcripts are kept, read-only, until AI is back and the list is fetched again.
+ * transcripts are kept, read-only, until AI is back and the list is fetched again. The Mac
+ * announces the flip separately from its replies (`link.poke(.aiAvailability)`), so a list
+ * computed after the flip can arrive first: a list with no chats while chats are listed is held,
+ * not applied, until the next `aiAvailabilityChanged` (off: dropped), a second empty list in a row
+ * (applied), a list with chats (dropped for it), or [ChatTimeouts.emptyListConfirm], when the
+ * list is fetched to confirm it. A held list changes nothing: an open chat is not deleted by it.
+ *
+ * **Leaving the list.** A chat missing from an applied list loses its cached transcript at once
+ * (an open one stays readable, deleted, until the owner leaves it); its seen mark, Done latch and
+ * too-large mark go only when it is missing from two applied lists in a row, or when the owner
+ * deletes it, so one spurious list costs no unread state.
  *
  * **Histories and deliveries.** A history replaces the chat's transcript when the chat is open or
  * cached and is dropped otherwise (watched chats cost no transcript memory); it seeds the activity
@@ -294,12 +317,18 @@ data class ChatTimeouts(
  * **Unread.** A chat is unread when the Mac's `lastModified` is past the owner's mark
  * ([ChatSeenStore], Mac values only, never phone time), or its turn ended unseen (Done). A chat's
  * first appearance sets its mark (one store write per list). Marked seen: on opening; at each list
- * value while it is visible; at the first list value past an own send ([noteOwnSend]); and at a
+ * value while it is visible; at the first list value past an own send ([noteOwnSend]); at a
  * list value that moved while the chat's newest visible delivery on this link is the owner's
- * (typed on the Mac, `CLM:122-129`).
+ * (typed on the Mac, `CLM:122-129`); and at a history whose newest visible message is the owner's
+ * (typed on the Mac while this phone was away: the history seeds that newest author).
  *
  * **Memory.** Transcripts are kept for open conversations and the `closedTranscripts` most
- * recently closed ([ChatBudgets]); attachment bytes under [ChatBudgets.attachments] per transcript.
+ * recently closed ([ChatBudgets]); attachment bytes under [ChatBudgets.attachments] per transcript
+ * and [ChatBudgets.sharedImageBytes] across all of them. A conversation flow nobody collects is
+ * not snapshotted (unless [snapshotUncollected]); it is brought up to date when a collector comes.
+ *
+ * **A stopped consumer** (its scope cancelled) answers the list and every conversation with a
+ * non-retryable Failed, never Loading forever.
  *
  * **Sending** ([send], `AM:3087-3135`) needs a history for the chat on the current link: the echo
  * comes back only through the subscription. The owner's message is published fire-and-forget on
@@ -339,6 +368,8 @@ data class ChatTimeouts(
  * @param log diagnostics: chat IDs, counts, sizes, cases and exception classes only, never content.
  * @param newUuid the `uniqueID` of each message sent (sent uppercase).
  * @param wallClockMillis the phone's wall clock: a sent message's `sentDate`, nothing else.
+ * @param snapshotUncollected whether conversation flows nobody collects are snapshotted anyway,
+ *   for tests that read their values directly; the app leaves it false.
  */
 class ChatRepository(
     private val link: StreamLink,
@@ -351,6 +382,7 @@ class ChatRepository(
     private val log: (String) -> Unit = {},
     private val newUuid: () -> UUID = UUID::randomUUID,
     private val wallClockMillis: () -> Long = System::currentTimeMillis,
+    private val snapshotUncollected: Boolean = false,
 ) {
     init {
         require(subscribeConcurrency >= 1) { "subscribeConcurrency must be at least 1" }
@@ -452,6 +484,32 @@ class ChatRepository(
     }
 
     private val oversized = OversizedChats()
+
+    /** The image bytes every held transcript keeps, under [ChatBudgets.sharedImageBytes]. */
+    private val images = SharedImageAllowance(budgets.sharedImageBytes)
+
+    /**
+     * A list with no chats arrived while chats are listed, and is held: AI may have gone off
+     * with its announcement still on the way (see the class notes). Never across a link.
+     */
+    private var heldEmptyList = false
+    private var emptyListConfirm: Job? = null
+
+    /** Names the scheduled confirmation; a superseded one's post does nothing. */
+    private var emptyListConfirmSerial = 0L
+
+    /** Chats missing from the latest list applied (not from the one before): their marks are kept until the next. */
+    private val absentOnce = HashSet<String>()
+
+    /** Seen-mark writes so far: the rows are rebuilt when it moves. */
+    private var seenChanges = 0L
+
+    /** What the published list state and rows were built from (by identity), so an unchanged step rebuilds neither. */
+    private var listBuiltFrom: List<ChatListEntry>? = null
+    private var listBuiltKey = -1
+    private var rowsBuiltFrom: List<ChatListEntry>? = null
+    private var rowsBuiltStates: Map<String, AgentState>? = null
+    private var rowsBuiltSeen = -1L
     private var subscriptions = ChatSubscriptions(oversized)
     private var currentLink: Long? = null
 
@@ -592,6 +650,15 @@ class ChatRepository(
     internal var heldTranscripts: Int = 0
         private set
 
+    /** For tests: image bytes the held transcripts keep, as of the last publish. */
+    @Volatile
+    internal var heldImageBytes: Long = 0
+        private set
+
+    /** The consumer has stopped (its scope was cancelled): every screen shows a failure. */
+    @Volatile
+    private var consumerStopped = false
+
     @Volatile
     private var tooLargeSnapshot: Set<String> = emptySet()
 
@@ -599,7 +666,7 @@ class ChatRepository(
     internal fun tooLargeChats(): Set<String> = tooLargeSnapshot
 
     /** The client's chat sink. Declared last: its consumer reads the state above. */
-    private val inbox: ChatInbox = ChatInbox(scope, budgets, log) { input ->
+    private val inbox: ChatInbox = ChatInbox(scope, budgets, log, onStopped = ::consumerStopped) { input ->
         handle(input)
         // The input being consumed still holds its slot.
         afterStep(drained = inbox.queuedItems <= 1)
@@ -613,8 +680,29 @@ class ChatRepository(
      * Loading again once it is closed and its transcript no longer kept. The same instance for the
      * life of the pairing (see [conversationFlows]). Thread-safe.
      */
-    fun conversation(chatID: String): StateFlow<ConversationState> =
-        conversationFlows.computeIfAbsent(chatID) { MutableStateFlow(ConversationState.Loading()) }
+    fun conversation(chatID: String): StateFlow<ConversationState> {
+        conversationFlows[chatID]?.let { return it }
+        var created = false
+        val flow = conversationFlows.computeIfAbsent(chatID) {
+            created = true
+            MutableStateFlow(if (consumerStopped) STOPPED_CONVERSATION else ConversationState.Loading())
+        }
+        if (created && !snapshotUncollected) {
+            // Not snapshotted while nobody collects it: brought up to date when a collector comes.
+            scope.launch { flow.subscriptionCount.collect { if (it > 0) post { refreshConversation(chatID) } } }
+        }
+        return flow
+    }
+
+    /** The consumer stopped: nothing will publish again, so every screen says so instead of loading for good. */
+    private fun consumerStopped() {
+        consumerStopped = true
+        log("the chat consumer has stopped: chats show a failure")
+        val failed = ChatListState.Failed(retryable = false)
+        listFlow.value = failed
+        snapshotFlow.value = ChatListSnapshot(failed, rowsFlow.value, aiFlow.value, snapshotEpoch)
+        conversationFlows.values.forEach { it.value = STOPPED_CONVERSATION }
+    }
 
     /**
      * The owner opened [chatID] (a navigator push): it is kept and subscribed while open, and seen.
@@ -852,10 +940,15 @@ class ChatRepository(
     private fun deleteNow(chatID: String) {
         val listed = entries
         if (listed != null && chatID in entryByID) setEntries(listed.filter { it.chat.id != chatID })
-        // At once, as iOS does: no typing or activity lingers until the Mac's list comes.
-        tracker.forget(chatID)
+        // At once, as iOS does: no typing, activity or mark lingers until the Mac's list comes. An
+        // open chat stays readable until the owner leaves it.
         failedThisLink -= chatID
-        leftList(chatID)
+        if (chatID in open) {
+            forgetMarks(chatID)
+            leftWhileOpen += chatID
+        } else {
+            forgetChat(chatID)
+        }
         // No longer wanted: the plan unsubscribes it (iOS tears its watch down too).
         planNeeded = true
         val linkId = currentLink
@@ -1154,6 +1247,9 @@ class ChatRepository(
         // The next link fetches the list anyway, and its list is the Mac's word on mutes.
         endDeleteWait()
         pendingMutes.clear()
+        dropHeldEmptyList("the link ended")
+        // Requests failed by the link closing are no load failure: the next link loads them.
+        failedThisLink.clear()
         currentLink = null
         listInFlight = false
         log("chat link $linkId down: ${cost.subscribes} subscribes, ${cost.histories} histories, ${cost.bytes} bytes")
@@ -1203,16 +1299,34 @@ class ChatRepository(
         failedThisLink -= chatID
         cost.histories++
         cost.bytes += frameBytes
-        tracker.onHistory(chatID, history.messages.lastOrNull { !it.hidden }, isVisible(chatID))
+        val newestVisible = history.messages.lastOrNull { !it.hidden }
+        tracker.onHistory(chatID, newestVisible, isVisible(chatID))
+        if (newestVisible != null) historyNewest(chatID, newestVisible.author)
         val conversation = conversations[chatID]
         if (conversation != null) {
-            conversation.transcript = Transcript(history.messages, budgets.attachments)
+            // The old transcript's image bytes go back before the new one draws on the allowance.
+            conversation.transcript?.release()
+            conversation.transcript = Transcript(history.messages, budgets.attachments, images)
             conversation.historyLink = linkId
             conversation.lostAppend = false
         }
         echoesAfterHistory(chatID, history.messages, linkId, conversation?.transcript)
         planNeeded = true
         noteAllWantedLanded()
+    }
+
+    /**
+     * A history's newest visible message is by [author]: it seeds the chat's newest delivery
+     * author for this link, and when it is the owner's (typed on the Mac while this phone was
+     * away), a `lastModified` the list moved past the mark meanwhile is the owner's own bump,
+     * not news (the rule [applyList] applies to a delivery, `CLM:122-129`).
+     */
+    private fun historyNewest(chatID: String, author: Participant) {
+        newestDeliveryAuthor[chatID] = author
+        if (author != Participant.USER) return
+        val modified = entryByID[chatID]?.chat?.lastModifiedMillis ?: return
+        val mark = seen.seen(chatID) ?: return
+        if (modified > mark) markSeen(chatID, modified)
     }
 
     private fun delivery(delivery: MacMessage.Delivery, linkId: Long) {
@@ -1268,6 +1382,7 @@ class ChatRepository(
                 cost.bytes += input.sizeBytes
                 tracker.onHistory(chatID, null, isVisible(chatID))
                 conversations[chatID]?.let {
+                    it.transcript?.release()
                     it.transcript = null
                     it.historyLink = null
                 }
@@ -1315,6 +1430,53 @@ class ChatRepository(
             log("a chat list of ${newEntries.size} while AI is off: not applied")
             return
         }
+        if (newEntries.isEmpty() && !entries.isNullOrEmpty()) {
+            if (!heldEmptyList) {
+                // AI may have gone off with its announcement still on the way (the Mac pokes it
+                // separately): hold it, and fetch the list later to confirm it if nothing else comes.
+                log("an empty chat list while ${entries?.size} are listed: held")
+                heldEmptyList = true
+                scheduleEmptyListConfirm()
+                return
+            }
+            // A second empty list in a row: two lists without them.
+            log("a second empty chat list: applied")
+            dropHeldEmptyList(null)
+            applyListNow(newEntries)
+            applyListNow(newEntries)
+            return
+        }
+        dropHeldEmptyList("a list with chats came")
+        applyListNow(newEntries)
+    }
+
+    /** Fetches the list after [ChatTimeouts.emptyListConfirm] while the held empty list is still held. */
+    private fun scheduleEmptyListConfirm() {
+        val linkId = currentLink ?: return
+        emptyListConfirm?.cancel()
+        val serial = ++emptyListConfirmSerial
+        emptyListConfirm = scope.launch {
+            delay(timeouts.emptyListConfirm)
+            post {
+                if (serial == emptyListConfirmSerial && heldEmptyList && ai && currentLink == linkId) {
+                    log("fetching the chat list to confirm a held empty one")
+                    requestList()
+                }
+            }
+        }
+    }
+
+    /** The held empty list, if any, is dropped ([why]; null when it was applied). */
+    private fun dropHeldEmptyList(why: String?) {
+        if (!heldEmptyList) return
+        heldEmptyList = false
+        emptyListConfirm?.cancel()
+        emptyListConfirm = null
+        emptyListConfirmSerial++
+        if (why != null) log("the held empty chat list was dropped: $why")
+    }
+
+    private fun applyListNow(newEntries: List<ChatListEntry>) {
         val previous = entries
         setEntries(withPendingMutes(newEntries))
         if (pendingDeletes.isNotEmpty()) {
@@ -1327,7 +1489,11 @@ class ChatRepository(
         listOnThisLink = true
         listFailed = false
         listGeneration++
-        previous?.forEach { if (it.chat.id !in entryByID) leftList(it.chat.id) }
+        // Missing from the list before this one too: two lists in a row without it.
+        val absentBefore = absentOnce.toList()
+        absentOnce.clear()
+        for (chatID in absentBefore) if (chatID !in entryByID) forgetChat(chatID)
+        previous?.forEach { if (it.chat.id !in entryByID && it.chat.id !in absentBefore) leftList(it.chat.id) }
         val firstMarks = HashMap<String, Double>()
         for (entry in newEntries) {
             val chatID = entry.chat.id
@@ -1338,16 +1504,25 @@ class ChatRepository(
             val pastSend = sendMarks[chatID]?.let { modified > it.modified } == true
             when {
                 mark == null -> firstMarks[chatID] = modified
-                isVisible(chatID) -> seen.markSeen(chatID, modified)
-                pastSend -> seen.markSeen(chatID, modified)
-                moved && newestDeliveryAuthor[chatID] == Participant.USER -> seen.markSeen(chatID, modified)
+                isVisible(chatID) -> markSeen(chatID, modified)
+                pastSend -> markSeen(chatID, modified)
+                moved && newestDeliveryAuthor[chatID] == Participant.USER -> markSeen(chatID, modified)
             }
             if (pastSend) sendMarks -= chatID
             previousModified[chatID] = modified
         }
         // One write for every first appearance (a fresh pairing lists them all at once).
-        if (firstMarks.isNotEmpty()) seen.markSeenAll(firstMarks)
+        if (firstMarks.isNotEmpty()) {
+            seen.markSeenAll(firstMarks)
+            seenChanges++
+        }
         planNeeded = true
+    }
+
+    /** [ChatSeenStore.markSeen], noted for the rows. */
+    private fun markSeen(chatID: String, lastModifiedMillis: Double) {
+        seen.markSeen(chatID, lastModifiedMillis)
+        seenChanges++
     }
 
     private fun setEntries(newEntries: List<ChatListEntry>?) {
@@ -1357,14 +1532,39 @@ class ChatRepository(
     }
 
     /**
-     * [chatID] left the list. An open chat keeps its activity and mark while the owner reads it
-     * (it is latched deleted), and is forgotten when closed unless listed again.
+     * [chatID] left the list. Its cached transcript goes (an open one stays readable, latched
+     * deleted, until the owner leaves it); its marks and latches stay until a second list in a
+     * row lacks it too ([absentOnce]).
      */
     private fun leftList(chatID: String) {
-        if (chatID in open) leftWhileOpen += chatID else forgetChat(chatID)
+        absentOnce += chatID
+        if (chatID in open) {
+            leftWhileOpen += chatID
+        } else {
+            dropConversation(chatID)
+            dropSettledEchoes(chatID)
+        }
     }
 
-    /** A chat that is gone: its cached transcript, activity, marks and too-large mark go (`AM:2242-2254`). */
+    /** [chatID]'s conversation and transcript go; its image bytes go back to the shared allowance. */
+    private fun dropConversation(chatID: String) {
+        closed -= chatID
+        conversations.remove(chatID)?.transcript?.release()
+    }
+
+    /** A gone chat's marks and latches: activity, seen and too-large marks, own-send marks (`AM:2242-2254`). */
+    private fun forgetMarks(chatID: String) {
+        pendingMutes -= chatID
+        absentOnce -= chatID
+        tracker.forget(chatID)
+        seen.forget(chatID)
+        seenChanges++
+        oversized.tryAgain(chatID)
+        sendMarks -= chatID
+        previousModified -= chatID
+        newestDeliveryAuthor -= chatID
+    }
+
     /**
      * [newEntries] with this link's pending mute flips held over them; a flip the list carries is
      * no longer pending (the Mac persisted it).
@@ -1384,17 +1584,15 @@ class ChatRepository(
         }
     }
 
+    /**
+     * A chat that is gone: its marks and latches ([forgetMarks]), and unless the owner still
+     * reads it, its transcript and sends.
+     */
     private fun forgetChat(chatID: String) {
-        pendingMutes -= chatID
+        forgetMarks(chatID)
+        if (chatID in open) return
         leftWhileOpen -= chatID
-        tracker.forget(chatID)
-        seen.forget(chatID)
-        oversized.tryAgain(chatID)
-        sendMarks -= chatID
-        previousModified -= chatID
-        newestDeliveryAuthor -= chatID
-        closed -= chatID
-        conversations -= chatID
+        dropConversation(chatID)
         echoes -= chatID
     }
 
@@ -1404,7 +1602,8 @@ class ChatRepository(
         if (!ai || entry.chat.id in entryByID) return
         setEntries(listOf(entry) + current)
         leftWhileOpen -= entry.chat.id
-        if (seen.seen(entry.chat.id) == null) seen.markSeen(entry.chat.id, entry.chat.lastModifiedMillis)
+        absentOnce -= entry.chat.id
+        if (seen.seen(entry.chat.id) == null) markSeen(entry.chat.id, entry.chat.lastModifiedMillis)
         previousModified[entry.chat.id] = entry.chat.lastModifiedMillis
         planNeeded = true
     }
@@ -1559,6 +1758,8 @@ class ChatRepository(
     private fun aiOff() {
         if (!ai) return
         log("chat AI is off on the Mac")
+        // An empty list held just before it was this flip's: never applied.
+        dropHeldEmptyList("AI went off")
         ai = false
         aiOffs++
         availabilityFlow.value = ChatAvailability(linkGenerationFlow.value, aiAvailable = false, aiOffs)
@@ -1571,6 +1772,7 @@ class ChatRepository(
     private fun aiOn() {
         if (ai) return
         log("chat AI is on on the Mac")
+        dropHeldEmptyList("AI came on")
         ai = true
         availabilityFlow.value = ChatAvailability(linkGenerationFlow.value, aiAvailable = true, aiOffs)
         // AM:4470-4486: the list was empty and every subscription was dropped; neither comes back by itself.
@@ -1602,18 +1804,20 @@ class ChatRepository(
         }
         open -= chatID
         if (chatID in leftWhileOpen) {
-            // Deleted while open: readable only until the owner leaves it (AM:441-442).
-            forgetChat(chatID)
+            // Deleted while open: readable only until the owner leaves it (AM:441-442). Its marks
+            // go with the next list that lacks it too, or went already.
+            leftWhileOpen -= chatID
+            dropConversation(chatID)
+            if (chatID in absentOnce) dropSettledEchoes(chatID) else echoes -= chatID
         } else if (conversations[chatID]?.transcript != null) {
             closed += chatID
             while (closed.size > budgets.closedTranscripts) {
                 val evicted = closed.first()
-                closed -= evicted
-                conversations -= evicted
+                dropConversation(evicted)
                 dropSettledEchoes(evicted)
             }
         } else {
-            conversations -= chatID
+            dropConversation(chatID)
             dropSettledEchoes(chatID)
         }
         planNeeded = true
@@ -1636,7 +1840,7 @@ class ChatRepository(
 
     /** The owner sees [chatID] now: its mark moves to the Mac's latest value and Done ends. */
     private fun ownerSaw(chatID: String) {
-        entryByID[chatID]?.let { seen.markSeen(chatID, it.chat.lastModifiedMillis) }
+        entryByID[chatID]?.let { markSeen(chatID, it.chat.lastModifiedMillis) }
         tracker.markRead(chatID)
     }
 
@@ -1667,8 +1871,11 @@ class ChatRepository(
         failedThisLink.clear()
         open.clear()
         closed.clear()
+        conversations.values.forEach { it.transcript?.release() }
         conversations.clear()
         leftWhileOpen.clear()
+        absentOnce.clear()
+        dropHeldEmptyList("unpaired")
         conversationFlows.values.forEach { it.value = ConversationState.Loading(NotSendableReason.NOT_CONNECTED) }
         visibleChat = null
         tracker.visibilityChanged(null)
@@ -1689,6 +1896,7 @@ class ChatRepository(
         timerSerial++
         oversized.clear()
         seen.clear()
+        seenChanges++
         planNeeded = false
         publish(nowMillis())
     }
@@ -1786,25 +1994,53 @@ class ChatRepository(
         expireEchoes(now)
         aiFlow.value = ai
         val listed = entries
-        listFlow.value = when {
-            currentLink != null && !ai -> ChatListState.AiUnavailable
-            listed == null -> if (listFailed) ChatListState.Failed(retryable = true) else ChatListState.Loading
-            else -> ChatListState.Loaded(listed, refreshing = listInFlight, refreshFailed = listFailed)
+        // The list state and the rows are rebuilt only when what they show changed: a delta
+        // streaming into a chat changes neither, and comparing them reads every entry's icon.
+        val listKey = listKey()
+        if (listed !== listBuiltFrom || listKey != listBuiltKey) {
+            listBuiltFrom = listed
+            listBuiltKey = listKey
+            listFlow.value = when {
+                currentLink != null && !ai -> ChatListState.AiUnavailable
+                listed == null -> if (listFailed) ChatListState.Failed(retryable = true) else ChatListState.Loading
+                else -> ChatListState.Loaded(listed, refreshing = listInFlight, refreshFailed = listFailed)
+            }
         }
         val states = tracker.states.value
-        rowsFlow.value = listed.orEmpty().map { entry ->
-            val chatID = entry.chat.id
-            val state = states[chatID] ?: AgentState.UNKNOWN
-            val mark = seen.seen(chatID)
-            ChatRow(entry, state, unread = state == AgentState.DONE || (mark != null && entry.chat.lastModifiedMillis > mark))
+        if (listed !== rowsBuiltFrom || states !== rowsBuiltStates || seenChanges != rowsBuiltSeen) {
+            rowsBuiltFrom = listed
+            rowsBuiltStates = states
+            rowsBuiltSeen = seenChanges
+            rowsFlow.value = listed.orEmpty().map { entry ->
+                val chatID = entry.chat.id
+                val state = states[chatID] ?: AgentState.UNKNOWN
+                val mark = seen.seen(chatID)
+                ChatRow(entry, state, unread = state == AgentState.DONE || (mark != null && entry.chat.lastModifiedMillis > mark))
+            }
         }
+        // Compared by identity: the same list and rows make an equal snapshot, kept as it is.
         snapshotFlow.value = ChatListSnapshot(listFlow.value, rowsFlow.value, ai, snapshotEpoch)
         for ((chatID, flow) in conversationFlows) {
+            // Nobody collects it: not snapshotted until a collector comes (refreshConversation).
+            if (!snapshotUncollected && flow.subscriptionCount.value == 0) continue
             val next = conversationState(chatID, now)
             if (next != flow.value) flow.value = next
         }
         heldTranscripts = conversations.values.count { it.transcript != null }
+        heldImageBytes = images.heldBytes
         tooLargeSnapshot = oversized.tooLarge
+    }
+
+    /** What the list state shows besides its entries, as bits. */
+    private fun listKey(): Int =
+        (if (currentLink != null) 1 else 0) or (if (ai) 2 else 0) or (if (listFailed) 4 else 0) or (if (listInFlight) 8 else 0)
+
+    /** A collector came for [chatID]'s flow: it gets the conversation as it stands now. */
+    private fun refreshConversation(chatID: String) {
+        val flow = conversationFlows[chatID] ?: return
+        conversations[chatID]?.snapshotAtMillis = null
+        val next = conversationState(chatID, nowMillis())
+        if (next != flow.value) flow.value = next
     }
 
     private fun conversationState(chatID: String, now: Long): ConversationState {
@@ -1840,7 +2076,9 @@ class ChatRepository(
             )
         }
         return when {
-            currentLink != null && !ai -> ConversationState.Failed(retryable = false)
+            // Offline (a lock, a reconnect): connecting, never a failure left from the link that went.
+            currentLink == null -> ConversationState.Loading(NotSendableReason.NOT_CONNECTED)
+            !ai -> ConversationState.Failed(retryable = false)
             chatID in failedThisLink -> ConversationState.Failed(retryable = true)
             else -> ConversationState.Loading(whyNotSendable(chatID) ?: NotSendableReason.NOT_LOADED)
         }
@@ -1895,6 +2133,10 @@ const val MESSAGE_DELETION_REVISION = 12
 private val SEND_WITHOUT_CONSUMER: SendOutcome = SendOutcome.NotSendable(NotSendableReason.NOT_CONNECTED)
 private val SEND_THAT_THREW: SendOutcome = SendOutcome.NotSendable(NotSendableReason.SEND_FAILED)
 private val CREATE_WITHOUT_CONSUMER: CreateOutcome = CreateOutcome.Failed(retryable = true)
+
+/** Every conversation once the chat consumer has stopped: nothing will load it in this process. */
+private val STOPPED_CONVERSATION: ConversationState =
+    ConversationState.Failed(retryable = false, whyNotSendable = NotSendableReason.LOAD_FAILED)
 
 /** [ChatRepository]'s request hand-off: the launch has not returned yet / has / the request finished first. */
 private const val LAUNCHING = 0

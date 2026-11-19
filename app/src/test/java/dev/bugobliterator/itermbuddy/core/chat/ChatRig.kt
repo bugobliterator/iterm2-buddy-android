@@ -67,6 +67,8 @@ internal class ChatRig(
     newUuid: () -> UUID = Random(SEED).let { random -> { UUID(random.nextLong(), random.nextLong()) } },
     /** The phone's wall clock, for a sent message's `sentDate`. */
     wallClockMillis: () -> Long = { MAC_TIME.toLong() + test.testScheduler.currentTime },
+    /** Whether conversations nobody collects are still snapshotted: tests read `conversation(id).value` directly. */
+    snapshotUncollected: Boolean = true,
 ) {
     private val macKeys = newStaticKeyPair()
     private val code = PairingCode(macKeys.second, "chat-repository-test-pid", ORIGIN)
@@ -151,6 +153,7 @@ internal class ChatRig(
         log = { logs += it },
         newUuid = newUuid,
         wallClockMillis = wallClockMillis,
+        snapshotUncollected = snapshotUncollected,
     )
 
     val mac = FakeMac(relay, code, macKeys.first, test.backgroundScope)
@@ -201,6 +204,8 @@ internal class ChatRig(
 
     init {
         mac.onRequestScripted("publish") { envelope ->
+            // requireAI drops a publish (no request ID) silently while AI is off (HB:2289-2293).
+            if (chatMac.refusedWithoutAi(requestIDOf(envelope))) return@onRequestScripted
             if (echoPublishes) echo(envelope.getValue("payload").jsonObject.getValue("publish").jsonObject)
         }
         val unconfined = UnconfinedTestDispatcher(test.testScheduler)
@@ -210,15 +215,16 @@ internal class ChatRig(
         mac.onRequestScripted("listChatsAndSessions") { envelope ->
             listRequests.incrementAndGet()
             val id = requestIDOf(envelope)
-            val frame = listFrame?.invoke(id) ?: envelope(listPayload("chatsAndSessions"), id)
+            // Built when it is sent, as the Mac's main actor does: AI turned off meanwhile lists no chats.
+            val frame = { listFrame?.invoke(id) ?: envelope(listPayload("chatsAndSessions"), id) }
             val hold = listHold
             if (hold == null) {
-                mac.sendRaw(frame)
+                mac.sendRaw(frame())
             } else {
                 test.backgroundScope.launch {
                     delay(hold)
                     try {
-                        mac.sendRaw(frame)
+                        mac.sendRaw(frame())
                     } catch (e: CancellationException) {
                         throw e
                     } catch (_: Exception) {
@@ -230,6 +236,8 @@ internal class ChatRig(
         mac.onRequestScripted("subscribe") { envelope ->
             val id = requestIDOf(envelope)
             val chatID = envelope.getValue("payload").jsonObject.getValue("subscribe").jsonObject.getValue("chatID").jsonPrimitive.content
+            if (chatMac.refusedWithoutAi(id)) return@onRequestScripted
+            chatMac.subscribed += chatID
             subscribes += chatID
             maxInFlight.accumulateAndGet(inFlight.incrementAndGet(), ::maxOf)
             val hold = holdNext.remove(chatID)
@@ -285,8 +293,8 @@ internal class ChatRig(
         awaitConnected(before + 1)
     }
 
-    /** The chat list as the Mac sends it with payload [case]. */
-    fun listPayload(case: String): JsonObject = listPayloadOf(case, chats)
+    /** The chat list as the Mac sends it with payload [case]: no chats while AI is off (`HB:448-455`). */
+    fun listPayload(case: String): JsonObject = listPayloadOf(case, if (chatMac.aiAvailable) chats else emptyList())
 
     /** Pushes `chatListChanged` with [chats]. */
     suspend fun pushList() = mac.sendRaw(envelope(listPayload("chatListChanged"), null))

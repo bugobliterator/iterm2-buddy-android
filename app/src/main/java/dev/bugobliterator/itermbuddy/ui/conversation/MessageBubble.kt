@@ -62,7 +62,6 @@ import dev.bugobliterator.itermbuddy.core.chat.markdownDescription
 import dev.bugobliterator.itermbuddy.core.chat.permissionCategory
 import dev.bugobliterator.itermbuddy.ui.chats.ChatIconCache
 import dev.bugobliterator.itermbuddy.ui.chats.ChatIconRef
-import dev.bugobliterator.itermbuddy.ui.chats.chatIconRef
 
 /** The read-only request card's last line: answering is a later phase. */
 const val ANSWER_ON_MAC_TEXT = "Answer this on your Mac. Answering from the phone comes in a later update."
@@ -205,7 +204,9 @@ private fun attachmentBlock(kind: AttachmentKind): BubbleBlock = when (kind) {
     is AttachmentKind.Code -> BubbleBlock.Code(kind.text)
     is AttachmentKind.StatusUpdate -> BubbleBlock.Text(listOf(InlineRun(kind.display)), TextTone.SECONDARY)
     is AttachmentKind.File -> {
-        val ref = if (kind.isImage) chatIconRef(kind.bytesView()) else null
+        // The digest is computed once per attachment: a streaming rebuild does not hash it again.
+        val bytes = if (kind.isImage) kind.bytesView()?.takeIf { it.hasRemaining() } else null
+        val ref = bytes?.let { ChatIconRef(checkNotNull(kind.contentDigest), it) }
         if (ref != null) BubbleBlock.Image(ref, kind.name) else BubbleBlock.Paperclip(kind.name)
     }
     is AttachmentKind.FileId -> BubbleBlock.Paperclip(kind.name)

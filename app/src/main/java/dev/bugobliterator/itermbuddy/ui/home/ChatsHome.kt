@@ -1,9 +1,7 @@
 package dev.bugobliterator.itermbuddy.ui.home
 
 import androidx.compose.ui.graphics.ImageBitmap
-import dev.bugobliterator.itermbuddy.core.chat.MentionDraft
 import dev.bugobliterator.itermbuddy.core.chat.NewChatMode
-import dev.bugobliterator.itermbuddy.core.chat.SendOutcome
 import dev.bugobliterator.itermbuddy.core.chat.WorkgroupWatch
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTree
 import dev.bugobliterator.itermbuddy.ui.chats.ChatIconCache
@@ -59,8 +57,11 @@ interface ChatsHome {
 
     fun conversationActions(chatID: String): ConversationActions
 
-    /** The composer's Send for [chatID]. */
-    suspend fun send(chatID: String, draft: MentionDraft): SendOutcome
+    /**
+     * The composer's Send for [chatID]: sends its draft in the app's scope and clears it from the
+     * outcome ([ChatDrafts.sendInBackground]); false while a send for it is still out.
+     */
+    fun sendDraft(chatID: String): Boolean
 
     /** The watch of a workgroup view on the navigator's stacks; null once it is popped. */
     fun workgroupWatch(workgroupID: String): WorkgroupWatch?

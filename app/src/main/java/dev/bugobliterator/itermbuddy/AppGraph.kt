@@ -10,10 +10,8 @@ import dev.bugobliterator.itermbuddy.core.chat.ChatMessage
 import dev.bugobliterator.itermbuddy.core.chat.ChatRepository
 import dev.bugobliterator.itermbuddy.core.chat.ChatSink
 import dev.bugobliterator.itermbuddy.core.chat.DeleteFromOutcome
-import dev.bugobliterator.itermbuddy.core.chat.MentionDraft
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolver
 import dev.bugobliterator.itermbuddy.core.chat.NewChatMode
-import dev.bugobliterator.itermbuddy.core.chat.SendOutcome
 import dev.bugobliterator.itermbuddy.core.chat.WorkgroupWatch
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTree
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
@@ -93,7 +91,8 @@ import kotlin.time.Duration.Companion.seconds
  *   kept for the next visit, never across an unpair); [chatIcons]
  *   holds its decoded icons; [chatListActions] are its calls; [chatsAttention] is the Chats tab's dot;
  * - [conversationState] is an open conversation's content (`conversationContents`, off the main
- *   thread), computed from its open to its close and shared by every collector; [openConversation]
+ *   thread), shared by every collector from its open to its close, computed while collected (and
+ *   [sharingStopMillis] after) with its last value kept for the next visit; [openConversation]
  *   and [closeConversation] are what the navigator calls: they open and close the chat in [chats],
  *   reopen the mention retry gate, and watch the chat's bound session with [boundSessions], which
  *   probes it again on each chat link up and when the chat's binding changes in the list, and
@@ -246,7 +245,7 @@ class HomeGraph(
 
         override fun conversationActions(chatID: String) = this@HomeGraph.conversationActions(chatID)
 
-        override suspend fun send(chatID: String, draft: MentionDraft) = this@HomeGraph.send(chatID, draft)
+        override fun sendDraft(chatID: String) = this@HomeGraph.sendDraft(chatID)
 
         override fun workgroupWatch(workgroupID: String) = this@HomeGraph.workgroupWatch(workgroupID)
 
@@ -300,9 +299,12 @@ class HomeGraph(
      */
     fun openConversation(chatID: String) {
         openChats += chatID
-        // Computed from now until it closes, seen or not: coming back to it shows it at once.
+        // Computed while collected and for [sharingStopMillis] after (a rotation's gap), not
+        // while nobody looks (a locked phone, a live view on top); its last value is kept until
+        // it closes, so coming back shows it at once and then follows the chat.
         val job = SupervisorJob(scope.coroutineContext[Job])
-        val state = conversationContent(chatID).stateIn(CoroutineScope(scope.coroutineContext + job), SharingStarted.Eagerly, null)
+        val state = conversationContent(chatID)
+            .stateIn(CoroutineScope(scope.coroutineContext + job), SharingStarted.WhileSubscribed(sharingStopMillis), null)
         conversationStates.put(chatID, OpenConversation(job, state))?.job?.cancel()
         chats.open(chatID)
         mentions.reopenRetryGate()
@@ -393,8 +395,12 @@ class HomeGraph(
         override suspend fun deleteFromHere(uniqueID: String): DeleteFromOutcome = chats.deleteFrom(chatID, uniqueID)
     }
 
-    /** Sends [draft] to [chatID] ([ChatRepository.send]): the composer's Send. */
-    suspend fun send(chatID: String, draft: MentionDraft): SendOutcome = chats.send(chatID, draft)
+    /**
+     * The composer's Send: [chatID]'s draft goes to [ChatRepository.send] in the app's scope, as
+     * [ConversationActions.retrySend] does, and the draft is cleared from its outcome, so a
+     * rotation right after the tap neither loses the Sent nor offers a second send of it.
+     */
+    fun sendDraft(chatID: String): Boolean = chatDrafts.sendInBackground(scope, chatID) { draft -> chats.send(chatID, draft) }
 
     /**
      * Unpair, under the navigator's lock at the end of [HomeNavigator.reset]: every shared

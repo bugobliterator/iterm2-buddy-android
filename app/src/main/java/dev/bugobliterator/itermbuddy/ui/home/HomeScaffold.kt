@@ -323,7 +323,7 @@ private fun Conversation(chatID: String, model: HomeModel, chats: ChatsHome, mod
                 whyNotSendable = content.whyNotSendable,
                 warnsOfPendingRequest = content.warnsOfPendingRequest,
                 tree = (model.tree as? TreeState.Loaded)?.tree,
-                send = { draft -> chats.send(chatID, draft) },
+                send = { chats.sendDraft(chatID) },
             )
         },
     )

@@ -114,6 +114,8 @@ class RealIterm2AgentChatTest {
                     timeouts = ChatTimeouts(list = chatTimeout, subscribe = chatTimeout, create = chatTimeout, echo = chatTimeout),
                     nowMillis = nowMillis,
                     log = { report("chat: $it") },
+                    // This test reads conversations without collecting them.
+                    snapshotUncollected = true,
                 )
             },
             log = { report("home: $it") },

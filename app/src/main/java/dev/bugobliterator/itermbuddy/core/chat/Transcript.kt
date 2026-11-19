@@ -16,7 +16,9 @@ import java.util.Locale
  *   message, or adding one, folds the open buffer into its body and closes it.
  * - File attachment bytes are under one [AttachmentBudgets.maxTranscriptImageBytes] allowance for
  *   the whole transcript, held across live deliveries (each of which was decoded with a fresh
- *   allowance): over it, an attachment keeps its name, type and size and drops its bytes.
+ *   allowance), and under the process's [SharedImageAllowance] when one is given (every transcript
+ *   held draws on it, and [release] gives this one's bytes back): over either, an attachment keeps
+ *   its name, type and size and drops its bytes.
  * - IDs passed to [removeAll] stay as tombstones for this transcript's life, so a delta naming one
  *   is ignored; a new `history` builds a new transcript, without them.
  *
@@ -24,7 +26,11 @@ import java.util.Locale
  * may rebuild a streamed body): confine a transcript to one thread and hand others [messages].
  * [toString] shows counts only.
  */
-class Transcript(history: List<ChatMessage>, internal val budgets: AttachmentBudgets = AttachmentBudgets()) {
+class Transcript(
+    history: List<ChatMessage>,
+    internal val budgets: AttachmentBudgets = AttachmentBudgets(),
+    private var shared: SharedImageAllowance? = null,
+) {
     private val entries = ArrayList<ChatMessage>(history.size)
     private val indexByID = HashMap<String, Int>(history.size * 2)
     private val removedIDs = HashSet<String>()
@@ -32,9 +38,12 @@ class Transcript(history: List<ChatMessage>, internal val budgets: AttachmentBud
     /** The one open buffer, for the first message with its [OpenBuffer.messageID]; null when none is open. */
     private var open: OpenBuffer? = null
 
-    /** File attachment bytes kept across the whole transcript. */
+    /** File attachment bytes kept across the whole transcript (counted in the shared allowance too). */
     var keptImageBytes: Long = 0
-        private set
+        private set(value) {
+            shared?.let { it.heldBytes += value - field }
+            field = value
+        }
 
     /** Bumped by every change: an upsert, a merged delta or a removal. */
     var version: Long = 0
@@ -124,6 +133,15 @@ class Transcript(history: List<ChatMessage>, internal val budgets: AttachmentBud
         entries.forEachIndexed { at, message -> indexByID.putIfAbsent(message.uniqueID, at) }
         changed(null)
         return true
+    }
+
+    /**
+     * The transcript is dropped: its kept bytes go back to the shared allowance. Call it once,
+     * when the transcript is no longer held; it draws on no allowance after.
+     */
+    fun release() {
+        shared?.let { it.heldBytes -= keptImageBytes }
+        shared = null
     }
 
     override fun toString(): String =
@@ -221,6 +239,8 @@ class Transcript(history: List<ChatMessage>, internal val budgets: AttachmentBud
     private fun admitImages(message: ChatMessage, alreadyKept: Long): ChatMessage {
         val body = message.body as? MessageBody.Multipart ?: return message
         var remaining = budgets.maxTranscriptImageBytes - alreadyKept
+        // What every other transcript holds counts too; this one's own, beside [alreadyKept], is being replaced.
+        shared?.let { remaining = minOf(remaining, it.limitBytes - (it.heldBytes - keptImageBytes) - alreadyKept) }
         var stripped = false
         val parts = body.parts.map { part ->
             val attachment = (part as? Subpart.AttachmentPart)?.attachment
@@ -373,3 +393,16 @@ private fun ChatMessage.keptImageBytes(): Long {
 }
 
 private fun String.upper(): String = uppercase(Locale.ROOT)
+
+/**
+ * Image bytes kept across every [Transcript] the process holds, under [limitBytes]
+ * ([ChatBudgets.sharedImageBytes]), so the worst case does not grow with how many transcripts
+ * are held. Single-threaded, like the transcripts drawing on it (the chat consumer).
+ */
+class SharedImageAllowance(val limitBytes: Long) {
+    /** Bytes the transcripts drawing on this keep now. */
+    var heldBytes: Long = 0
+        internal set
+
+    override fun toString(): String = "SharedImageAllowance(limitBytes=$limitBytes, heldBytes=$heldBytes)"
+}

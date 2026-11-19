@@ -34,6 +34,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.map
@@ -190,7 +191,8 @@ class CompanionApp : Application() {
                 ChatRepository(
                     link,
                     scope,
-                    FileChatSeenStore.inNoBackupDir(this) { Log.w(CHAT_TAG, it) },
+                    // Written on IO: the chat consumer never waits on a sync.
+                    FileChatSeenStore.inNoBackupDir(this, Dispatchers.IO.asExecutor()) { Log.w(CHAT_TAG, it) },
                     nowMillis = SystemClock::uptimeMillis,
                     log = { Log.i(CHAT_TAG, it) },
                 )

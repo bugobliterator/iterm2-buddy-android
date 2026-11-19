@@ -21,16 +21,21 @@ import kotlinx.coroutines.launch
  * [ChatInput.PayloadTooLarge] (whose bytes are gone). Default 4096 items and 16 MiB.
  *
  * The repository: transcripts are kept for open conversations and the [closedTranscripts] most
- * recently closed (default 3); a transcript's attachment bytes are under [attachments].
+ * recently closed (default 3); a transcript's attachment bytes are under [attachments] (4 MiB an
+ * image, 32 MiB a transcript), and every transcript held, open or closed, shares one
+ * [sharedImageBytes] allowance (default 32 MiB for the process), so the kept image bytes stay
+ * under 32 MiB however many transcripts are held (it was 32 MiB for each, up to four times that).
  */
 data class ChatBudgets(
     val inboxItems: Int = 4096,
     val inboxBytes: Long = DEFAULT_INBOX_BYTES,
     val closedTranscripts: Int = 3,
     val attachments: AttachmentBudgets = AttachmentBudgets(),
+    val sharedImageBytes: Long = DEFAULT_SHARED_IMAGE_BYTES,
 ) {
     init {
         require(closedTranscripts >= 0) { "closedTranscripts must not be negative" }
+        require(sharedImageBytes >= 0) { "sharedImageBytes must not be negative" }
     }
 }
 
@@ -46,9 +51,11 @@ data class ChatBudgets(
  *
  * **Consumer.** [consume] must never await a reply from the Mac (the receive loop that would read
  * it may be waiting on this inbox) and should not block: a request runs in its own coroutine and
- * [post]s its outcome back. An exception from [consume], a `CancellationException` of its own
- * included (a `withTimeout` inside it, say), is logged by its class and the input's kind, and the
- * consumer goes on with the next input; only the cancellation of [scope] stops it. Once it has
+ * [post]s its outcome back. Anything [consume] or a posted block throws, an `Error` such as an
+ * `OutOfMemoryError` from a big decode and a `CancellationException` of its own (a `withTimeout`
+ * inside it, say) included, is logged by its class and the input's kind, and the consumer goes on
+ * with the next input; only the cancellation of [scope] stops it, and [onStopped] is then called
+ * once (on the thread that stopped it), so its owner can show it instead of waiting forever. Once it has
  * stopped, [accept] throws [ChatInboxStoppedException] at once (also to an accept already waiting
  * for room), which the session treats as a sink failure that did not take the input, rather than
  * waiting out its stall bound on every frame: a chat reply's request fails at once. Link markers
@@ -62,6 +69,7 @@ class ChatInbox(
     scope: CoroutineScope,
     private val budgets: ChatBudgets = ChatBudgets(),
     private val log: (String) -> Unit = {},
+    private val onStopped: () -> Unit = {},
     private val consume: suspend (ChatInput) -> Unit,
 ) : ChatSink {
     private sealed interface Item
@@ -114,7 +122,9 @@ class ChatInbox(
                     // its own (a timeout inside it): one failed input, not a dead consumer.
                     if (!currentCoroutineContext().isActive) throw e
                     log("chat consumer failed on ${item.kind()}: ${e.javaClass.simpleName}")
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
+                    // An Error too (an OutOfMemoryError while decoding a big history): that input
+                    // is lost, but a dead consumer would leave every chat screen loading for good.
                     log("chat consumer failed on ${item.kind()}: ${e.javaClass.simpleName}")
                 } finally {
                     if (item is Incoming) usage.update { it.copy(items = it.items - 1, bytes = it.bytes - item.bytes) }
@@ -125,6 +135,7 @@ class ChatInbox(
             usage.update { it.copy(stopped = true) }
             // Nothing more will run: posted work still queued is dropped and told so.
             items.cancel()
+            onStopped()
         }
     }
 
@@ -196,3 +207,6 @@ class ChatInboxStoppedException(kind: String) : IllegalStateException("the chat 
 
 /** Default for [ChatBudgets.inboxBytes]: 16 MiB. */
 const val DEFAULT_INBOX_BYTES: Long = 16L shl 20
+
+/** Default for [ChatBudgets.sharedImageBytes]: 32 MiB of kept image bytes across every transcript held. */
+const val DEFAULT_SHARED_IMAGE_BYTES: Long = 32L shl 20

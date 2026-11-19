@@ -1,6 +1,8 @@
 package dev.bugobliterator.itermbuddy.core.chat
 
 import java.nio.ByteBuffer
+import java.security.MessageDigest
+import java.util.HexFormat
 
 /**
  * What a chat message says: upstream `Message.Content` (`Message.swift:286-336`), reduced to what
@@ -162,6 +164,15 @@ sealed interface AttachmentKind {
 
         /** How many bytes are kept: 0 when none are. */
         val keptByteCount: Int get() = content?.size ?: 0
+
+        /**
+         * The SHA-256 of the kept bytes as lowercase hex, or null when none are kept: computed once
+         * per attachment and kept with it, so a bubble rebuilt at every streamed delta does not hash
+         * its image again. Thread-safe.
+         */
+        val contentDigest: String? by lazy {
+            content?.let { HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(it)) }
+        }
 
         val isImage: Boolean get() = isImageMimeType(mimeType)
 
