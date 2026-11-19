@@ -5,6 +5,7 @@ import dev.bugobliterator.itermbuddy.core.sessions.PeerEntry
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTree
 import dev.bugobliterator.itermbuddy.core.sessions.claudeStateOf
+import dev.bugobliterator.itermbuddy.core.sessions.claudeStatusOf
 import java.util.Locale
 
 /**
@@ -61,11 +62,15 @@ fun peerTitle(peer: PeerEntry): String {
 }
 
 /**
- * The second line of a session row: its subtitle, or null when it has none or when it is a Claude
- * Code status ([rowClaudeState]), which the row shows as its chip instead (idle as nothing).
+ * The second line of a session row: its subtitle, or null when it has none. A subtitle that starts
+ * with a Claude Code status ([rowClaudeState]) shows the status as the row's chip (idle as
+ * nothing) and only the rest of the subtitle here (`\(status) \(path)` shows the path); nothing
+ * when the subtitle is the status word alone.
  */
-fun rowSubtitle(summary: SessionSummary): String? =
-    if (rowClaudeState(summary) != null) null else summary.subtitle.ifEmpty { null }
+fun rowSubtitle(summary: SessionSummary): String? {
+    val status = claudeStatusOf(summary)
+    return (status?.rest ?: summary.subtitle).ifEmpty { null }
+}
 
 /** The Claude Code state a session row shows, read from its subtitle; never for a browser. */
 fun rowClaudeState(summary: SessionSummary): ClaudeSessionState? = claudeStateOf(summary)
@@ -91,9 +96,9 @@ private fun shownTexts(summary: SessionSummary): List<String> =
  * The query is split on whitespace and every term must appear (case-insensitive, `Locale.ROOT`)
  * somewhere among the texts shown for the session: its window title, tab title, name, subtitle
  * line ([rowSubtitle]), Claude Code chip ([claudeStateLabel]), peer role name and row title
- * (`"Planner: claude"`). A status the row shows as a chip is matched by the chip's words, not the
- * raw subtitle, so a hidden `idle` matches nothing. So a window or tab title that matches
- * shows all of its sessions. A blank query gives [sessionRows]. Nothing here is logged.
+ * (`"Planner: claude"`), so a window or tab title that matches shows all of its sessions. A
+ * status word is matched by the chip's words, not as typed in the subtitle, so a hidden `idle`
+ * matches nothing; the rest of a status subtitle matches as shown. A blank query gives [sessionRows]. Nothing here is logged.
  */
 fun filterSessionRows(tree: SessionTree, query: String): List<SessionRow> {
     val terms = query.lowercase(Locale.ROOT).split(WHITESPACE).filter { it.isNotEmpty() }

@@ -112,6 +112,8 @@ internal class SessionsRig(
         listSharingStopMillis = listSharingStopMillis,
         sessionPollInterval = sessionPollInterval,
         claudeTipStore = claudeTipStore,
+        // The tip's store work in virtual time, on the test's dispatcher.
+        tipContext = EmptyCoroutineContext,
     )
     val client get() = graph.client
     val repository get() = graph.repository

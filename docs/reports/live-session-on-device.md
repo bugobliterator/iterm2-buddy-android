@@ -71,7 +71,7 @@ without pulling. Pull to refresh works.
 8. Go to Chats, or lock the phone, for a minute; come back: the chip catches up at once. (While
    away the phone asks nothing; this needs the Mac's side or a log of `fetchSessionTree`
    requests to confirm.)
-9. Unpair and pair again: the tip shows again after the first connect, until a status is seen
+9. Unpair and pair again: the tip shows again on the first tree with no status, until a status is seen
    or it is dismissed.
 
 **Result:**

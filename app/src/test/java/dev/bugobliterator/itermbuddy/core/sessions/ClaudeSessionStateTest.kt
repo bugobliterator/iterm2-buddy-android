@@ -34,6 +34,15 @@ class ClaudeSessionStateTest {
     }
 
     @Test
+    fun theRestOfTheSubtitleIsKept() {
+        assertEquals(ClaudeStatus(ClaudeSessionState.WORKING, "~/src"), claudeStatusFromSubtitle("working ~/src"))
+        assertEquals(ClaudeStatus(ClaudeSessionState.ERROR, "(Rate Limited)"), claudeStatusFromSubtitle("  Error\t (Rate Limited) "))
+        assertEquals(ClaudeStatus(ClaudeSessionState.IDLE, "~/src  widget"), claudeStatusFromSubtitle("idle  ~/src  widget"))
+        assertEquals("only the status word: no rest", ClaudeStatus(ClaudeSessionState.DONE, ""), claudeStatusFromSubtitle(" done\n"))
+        assertNull(claudeStatusFromSubtitle("vim working"))
+    }
+
+    @Test
     fun anythingElseIsNoState() {
         for (subtitle in listOf("", "   ", "~/src", "vim", "~/src/widget", "planning", "tail -f build.log", "waitingroom")) {
             assertNull("\"$subtitle\"", claudeStateFromSubtitle(subtitle))
