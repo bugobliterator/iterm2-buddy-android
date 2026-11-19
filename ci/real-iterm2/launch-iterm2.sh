@@ -40,3 +40,5 @@ log "iTerm2 parked at the relay: $(grep -m1 'hello role=mac' "$RELAY_LOG")"
 sleep 5
 screenshot parked
 pgrep -x iTerm2 >/dev/null || die "iTerm2 exited after parking"
+# What the screenshot shows, as text in the job log (windows, any dialog, the main thread).
+bash "$REAL_ITERM2_SCRIPTS/dump-iterm2-state.sh" after-launch || true

@@ -103,12 +103,20 @@ what was typed.
 | Install the AI plugin | `install-ai-plugin.sh` | The same for `iTermAI-1.1.zip`, with iTerm2's AI plugin key. Until its zip is pinned, it prints the zip's sha256. |
 | Mint the pairing | `generate-pairing.sh` | Runs `GenerateCiPairing.java` to make a Mac X25519 key pair, a phone X25519 key pair, a room secret and a pairing ID. It writes them to `$RUNNER_TEMP/real-iterm2/pairing.env` with mode 600. |
 | Seed iTerm2 | `seed-pairing.sh` | Writes the root-owned `EnableCompanionPairing` secure setting with sudo and sets the defaults (relay origin, an empty resolver for direct mode, the paired ID, the Claude watcher off, no tips or update prompts). It also puts the Mac private key and the phone public key in a CI keychain whose partition list names iTerm2's team. |
-| Seed AI | `seed-ai.sh` | Writes the root-owned `EnableAI` secure setting and the AI defaults (`UseRecommendedAIModel` off, one `AIManualModelConfigurations` entry for the fake model, `AiModel` naming it), and reads them back typed. |
+| Seed AI | `seed-ai.sh` | Writes the root-owned `EnableAI` secure setting and the AI defaults (`UseRecommendedAIModel` off, one `AIManualModelConfigurations` entry for the fake model, `AiModel` naming it), answers iTerm2's one-time AI prompts (model catalog updates, automatic terminal sharing, the safety-check migration), and reads them back typed. |
 | Start the relay | `start-relay.sh` | Fetches the relay at `b8aa2f9` the way `scripts/relay-it.sh` does and makes a throwaway CA and a `localhost` certificate. It trusts the CA system-wide and starts the relay on `127.0.0.1:8787` (open mode, `RELAY_ORIGIN=https://localhost:8443`). Then it starts `tls-proxy.mjs` on `localhost:8443`. |
 | Start the fake model | `start-fake-model.sh` | Starts `fake-model.mjs` on `127.0.0.1:8790` and waits for `/health`. |
 | Launch iTerm2 | `launch-iterm2.sh` | Runs `open -a iTerm`, then waits for the relay to log `hello role=mac` (iTerm2 parked) and takes a screenshot. |
-| Test | `./gradlew realIterm2Test` | Runs stages 1, 2 and 3. The phone connects to the relay directly at `ws://127.0.0.1:8787/` and signs for `https://localhost:8443`. |
+| Test | `./gradlew realIterm2Test --tests …` | Runs stages 1 and 2, then, in its own step that runs even when they fail, stage 3, so a main thread that Agent Chat leaves blocked cannot fail them. The phone connects to the relay directly at `ws://127.0.0.1:8787/` and signs for `https://localhost:8443`. |
 | Diagnostics | `collect-diagnostics.sh` | Always runs. It collects screenshots, the relay, proxy and fake model logs, the companion and AI defaults, both secure settings, which seeded keychain items were migrated, both plugin lookups, the fake model's counts and captured request shape, iTerm2's unified log and crash reports. They are uploaded with the test reports as `real-iterm2-<run>-<attempt>`. |
+
+`dump-iterm2-state.sh <label>` prints, as text in the job log, what a screenshot would show:
+iTerm2's on-screen windows (CGWindowList), each dialog's or sheet's texts and buttons (System
+Events), the top of iTerm2's main thread (`sample`) and its unified log filtered to AI, chat,
+network, plugin and companion lines. It runs after launch, in the diagnostics, and from
+`RealIterm2AgentChatTest` when it fails. The chat test also fails within 30 s of a send when the
+fake model gets no chat request, and prints the Mac's `macStatus` (main thread blocked, open
+alerts) as it changes.
 
 `common.sh` holds every pin, port and path. The three stage 3 setup steps continue on error, so a
 failure there fails `RealIterm2AgentChatTest` (AI off, or the fake unreachable) but not stages 1

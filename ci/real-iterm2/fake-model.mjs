@@ -56,6 +56,11 @@ const stats = {
   triggersWithoutSessionGuid: 0,
   badRequests: 0,
   replyLength: REPLY.length,
+  // Every request but the harness's own (/health, /fake/stats): method and path, the first few
+  // in order and a count per path, to show whether iTerm2 called somewhere other than
+  // /v1/chat/completions.
+  firstPaths: [],
+  pathCounts: {},
   firstToolsRequest: null,
   targetTool: { name: toolName, offered: null, sha256: null, pinnedSha256: pinnedSchemaSha256 || null, matchesPin: null },
   lastDecision: null,
@@ -294,10 +299,17 @@ function readBody(req) {
 async function handle(req, res) {
   const seq = ++stats.requests;
   const url = new URL(req.url, "http://127.0.0.1");
+  const ownPath = url.pathname === "/health" || url.pathname === "/fake/stats";
+  log(`#${seq} ${req.method} ${url.pathname} from ${req.socket.remoteAddress} ua(len=${String(req.headers["user-agent"] ?? "").length}) ` +
+    `content-type=${req.headers["content-type"] ?? "-"} length=${req.headers["content-length"] ?? "-"}${ownPath ? " (harness)" : ""}`);
+  if (!ownPath) {
+    const key = `${req.method} ${url.pathname}`;
+    stats.pathCounts[key] = (stats.pathCounts[key] ?? 0) + 1;
+    if (stats.firstPaths.length < 3) stats.firstPaths.push(key);
+  }
   if (req.method === "GET" && url.pathname === "/health") return sendJson(res, 200, { ok: true });
   if (req.method === "GET" && url.pathname === "/fake/stats") return sendJson(res, 200, stats);
   if (req.method === "GET" && url.pathname.endsWith("/models")) {
-    log(`#${seq} GET ${url.pathname}`);
     return sendJson(res, 200, { object: "list", data: [{ id: "buddy-ci-fake-model", object: "model", owned_by: "buddy-ci" }] });
   }
   if (req.method !== "POST" || !url.pathname.endsWith("/chat/completions")) {

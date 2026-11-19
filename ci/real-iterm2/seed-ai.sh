@@ -10,6 +10,17 @@
 #    (LLMMetadata.manualModel): Chat Completions (api 1) at FAKE_MODEL_URL, function calling and
 #    streaming on, credential "none" (AIModelCredential.none: iTerm2 sends its self-hosted
 #    placeholder, never a vendor key). AiModel names it, so LLMMetadata.model() picks it.
+# 3. The answers to iTerm2's one-time AI prompts (iTermWarning modals, which block the main
+#    thread until someone clicks), so none can come up on the runner:
+#    - AIModelUpdatesEnabled=NO (iTermPreferences.m:277, default NO at :820) and
+#      NoSyncAIModelCatalogUpdateConsent=2, denied (iTermUserDefaults.m:60, .h:152-156): the
+#      "Check for AI Model Updates?" consent (AIModelCatalogUpdater.swift:115-121, 163-210);
+#    - NoSyncAutoProvideConsent=2, denied (iTermUserDefaults.m:61, .h:168-172): "Share Terminal
+#      Contents Automatically?" (ChatAgent.swift:1129-1148), asked by a session-bound turn;
+#    - "AI Safety Check"=NO and NoSyncAISafetyCheckProviderMigrationDone=YES
+#      (iTermMigrationHelper.m:436-460, run by every AITermController, AITerm.swift:318), and
+#      NoSyncAISafetyCheckNagComplete=YES (RemoteCommand+Mac.swift:38): the safety-check
+#      provider migration and its nag.
 #
 # Reads back what it wrote, typed, and fails when a value did not stick.
 
@@ -51,13 +62,21 @@ defaults write "$domain" AIManualModelConfigurations "<array><dict>
     <key>maxResponseTokens</key><integer>4096</integer>
 </dict></array>"
 
+defaults write "$domain" AIModelUpdatesEnabled -bool false
+defaults write "$domain" NoSyncAIModelCatalogUpdateConsent -int 2
+defaults write "$domain" NoSyncAutoProvideConsent -int 2
+defaults write "$domain" "AI Safety Check" -bool false
+defaults write "$domain" NoSyncAISafetyCheckProviderMigrationDone -bool true
+defaults write "$domain" NoSyncAISafetyCheckNagComplete -bool true
+
 exported="$WORK_DIR/iterm2-defaults.plist"
 defaults export "$domain" "$exported"
 model_value() {
     plutil -extract "AIManualModelConfigurations.0.$1" raw -o - "$exported" 2>/dev/null
 }
 log "AI defaults for $domain:"
-for key in GenerativeAIAllowed UseRecommendedAIModel AiModel; do
+for key in GenerativeAIAllowed UseRecommendedAIModel AiModel AIModelUpdatesEnabled NoSyncAIModelCatalogUpdateConsent \
+    NoSyncAutoProvideConsent "AI Safety Check" NoSyncAISafetyCheckProviderMigrationDone NoSyncAISafetyCheckNagComplete; do
     printf '    %s = %s\n' "$key" "$(defaults read "$domain" "$key")"
 done
 for key in id name url api credential functionCalling streaming contextWindowTokens maxResponseTokens; do
