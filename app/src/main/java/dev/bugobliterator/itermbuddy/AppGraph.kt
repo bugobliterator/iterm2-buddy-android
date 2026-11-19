@@ -112,8 +112,8 @@ import kotlin.time.Duration.Companion.seconds
  * - [sessionPoller] fetches the tree again every [sessionPollInterval] (4 s) while the Sessions
  *   list is the destination shown, the app is in the foreground and [client] is connected: iTerm2
  *   pushes no tree when a subtitle (Claude Code's `\(status)`) changes; [claudeTip] is the list's
- *   one-line `\(status)` tip, shown once [client] has connected, gone for good once dismissed or
- *   once a tree shows a Claude Code state;
+ *   one-line `\(status)` tip, offered on the first tree that shows no Claude Code state, gone for
+ *   good once dismissed or once a tree shows one;
  * - on every unpair (local, Mac-sent, or a re-scan), [navigator] is reset (closing the stream,
  *   the conversations and the workgroup watches), [repository] and [chats] cleared (the chat
  *   repository clears its seen marks itself, on its consumer), the shared chat contents reset
@@ -139,7 +139,7 @@ class HomeGraph(
     private val sharingStopMillis: Long = LIST_SHARING_STOP_MILLIS,
     private val workgroupLog: (String) -> Unit = {},
     sessionPollInterval: Duration = SESSION_POLL_INTERVAL,
-    val claudeTip: ClaudeStateTip = ClaudeStateTip(InMemoryClaudeTipStore()),
+    val claudeTip: ClaudeStateTip,
 ) {
     private val foregroundFlow = MutableStateFlow(true)
 
@@ -472,6 +472,7 @@ private fun boundGuid(list: ChatListState, chatID: String): String? =
  *   after their last collector leaves (a rotation's gap).
  * @param sessionPollInterval how often the Sessions list fetches the tree again while shown.
  * @param claudeTipStore where the Sessions list's `\(status)` tip keeps its dismissal.
+ * @param tipContext where the tip reads and writes [claudeTipStore] (disk I/O, off the main thread).
  */
 fun wireHome(
     scope: CoroutineScope,
@@ -487,6 +488,7 @@ fun wireHome(
     listSharingStopMillis: Long = LIST_SHARING_STOP_MILLIS,
     sessionPollInterval: Duration = SESSION_POLL_INTERVAL,
     claudeTipStore: ClaudeTipStore = InMemoryClaudeTipStore(),
+    tipContext: CoroutineContext = Dispatchers.IO,
 ): HomeGraph {
     val sink = ForwardingStreamSink()
     val chatSink = ForwardingChatSink()
@@ -517,7 +519,7 @@ fun wireHome(
     val graph = HomeGraph(
         scope, client, controller, repository, chats, search, drafts, inputMemories, mentions, chatSearch, chatIcons,
         boundSessions, inlineImages, chatDrafts, listContext, listSharingStopMillis, chatLog,
-        sessionPollInterval, ClaudeStateTip(claudeTipStore),
+        sessionPollInterval, ClaudeStateTip(claudeTipStore, scope, tipContext),
     )
     val navigator = graph.navigator
     // The Sessions list polls while it is the destination shown, on a live link.
@@ -526,11 +528,17 @@ fun wireHome(
         navigator.state.map { it.destination == HomeDestination.SessionList }.distinctUntilChanged().collect(poller::setVisible)
     }
     scope.launch { client.state.map { it is ClientState.Connected }.distinctUntilChanged().collect(poller::setConnected) }
-    // The `\(status)` tip: offered once a link came up, gone for good once a Claude Code state shows.
+    // The `\(status)` tip: offered on a tree with no Claude Code state (not on the connect, so it
+    // never flashes for an owner whose first tree shows one), gone for good once one shows.
     val tip = graph.claudeTip
-    scope.launch { client.state.filter { it is ClientState.Connected }.collect { tip.connected() } }
     scope.launch {
-        repository.state.map { it is TreeState.Loaded && it.tree.showsClaudeState() }.distinctUntilChanged().filter { it }.collect { tip.statusSeen() }
+        repository.state.map { (it as? TreeState.Loaded)?.tree?.showsClaudeState() }.distinctUntilChanged().collect { shows ->
+            when (shows) {
+                true -> tip.statusSeen()
+                false -> tip.offer()
+                null -> Unit
+            }
+        }
     }
     // A binding that changes in the list (or first appears there) is probed once; the open
     // conversations' claimed workgroups are named once the list carries them.

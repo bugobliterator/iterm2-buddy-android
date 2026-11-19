@@ -18,6 +18,7 @@ class SessionRowClaudeStateTest {
     private val failed = SessionSummary("ptys_failed", "claude", "error", false)
     private val shell = SessionSummary("ptys_shell", "zsh", "~/src", false)
     private val browser = SessionSummary("ptys_browser", "Docs", "working", true)
+    private val waitingInWidget = SessionSummary("ptys_waiting_widget", "claude", "waiting ~/src/widget", false)
 
     @Test
     fun aTerminalRowWithAStatusShowsItsState() {
@@ -44,6 +45,18 @@ class SessionRowClaudeStateTest {
     }
 
     @Test
+    fun theRestOfAStatusSubtitleIsTheSubtitleLine() {
+        val withPath = SessionSummary("ptys_path", "claude", "working ~/src", false)
+        assertEquals(ClaudeSessionState.WORKING, rowClaudeState(withPath))
+        assertEquals("~/src", rowSubtitle(withPath))
+        val idleWithPath = SessionSummary("ptys_idle_path", "claude", "Idle  ~/src/widget ", false)
+        assertEquals(ClaudeSessionState.IDLE, rowClaudeState(idleWithPath))
+        assertEquals("idle shows no chip but keeps the rest", "~/src/widget", rowSubtitle(idleWithPath))
+        assertEquals("(rate limited)", rowSubtitle(SessionSummary("ptys_error", "claude", "error\t(rate limited)", false)))
+        assertNull("nothing but the status word", rowSubtitle(SessionSummary("ptys_done", "claude", " done ", false)))
+    }
+
+    @Test
     fun chipLabelsMatchTheChatList() {
         assertEquals("Working", claudeStateLabel(ClaudeSessionState.WORKING))
         assertEquals("Waiting for you", claudeStateLabel(ClaudeSessionState.WAITING))
@@ -67,6 +80,7 @@ class SessionRowClaudeStateTest {
                                 PaneEntry(idle, emptyList()),
                                 PaneEntry(shell, emptyList()),
                                 PaneEntry(browser, emptyList()),
+                                PaneEntry(waitingInWidget, emptyList()),
                             ),
                         ),
                     ),
@@ -75,9 +89,10 @@ class SessionRowClaudeStateTest {
         )
         val header = listOf(SessionRow.Window("Window"), SessionRow.Tab("Tab"))
         fun row(summary: SessionSummary) = SessionRow.Session(summary, summary.name, nested = false)
-        assertEquals("the chip's label", header + row(waiting), filterSessionRows(tree, "for you"))
+        assertEquals("the chip's label", header + row(waiting) + row(waitingInWidget), filterSessionRows(tree, "for you"))
+        assertEquals("the rest of a status subtitle", header + row(waitingInWidget), filterSessionRows(tree, "widget"))
         assertEquals("a chip, and a browser's subtitle", header + row(working) + row(browser), filterSessionRows(tree, "working"))
         assertEquals("a hidden idle status is not searched", emptyList<SessionRow>(), filterSessionRows(tree, "idle"))
-        assertEquals(header + row(shell), filterSessionRows(tree, "~/src"))
+        assertEquals(header + row(shell) + row(waitingInWidget), filterSessionRows(tree, "~/src"))
     }
 }

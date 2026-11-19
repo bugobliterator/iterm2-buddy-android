@@ -40,7 +40,8 @@ sealed interface TreeState {
  *
  * It fetches (`fetchSessionTree`, bounded by [fetchTimeout], 15 s as iOS `AM:1384`) on the first
  * [ClientState.Connected], again on each later one (a reconnect), on [refresh], and on [poll]
- * (the Sessions list's, silently and never beside a fetch already out); and it
+ * (the Sessions list's, silently and never beside a fetch already out; of a run of failed polls
+ * only the first is logged, until a poll succeeds); and it
  * replaces the tree with every unsolicited `sessionTree` from [events], with no refetch. A fetch
  * supersedes one still out. A failed fetch keeps a tree already shown. Only [refresh] shows
  * [TreeState.Loaded.refreshing]; the fetch on a reconnect is silent.
@@ -88,6 +89,12 @@ class SessionTreeRepository(
     /** Fetches numbered up to this were out when [clear] ran: their replies are discarded. */
     private var clearedFetches = 0L
 
+    /** Whether the last poll failed: further poll failures in a row are not logged. */
+    private var pollFailing = false
+
+    /** Test seam: runs after a fetch's reply is received and before it is applied. */
+    internal var beforeApplyingReply: suspend () -> Unit = {}
+
     init {
         scope.launch {
             events.collect { message -> if (message is MacMessage.SessionTreeMessage) apply(message, fetch = null) }
@@ -109,7 +116,7 @@ class SessionTreeRepository(
      */
     suspend fun poll() {
         val job = synchronized(lock) {
-            fetchJob?.takeIf { it.isActive } ?: startFetchLocked(userAsked = false, showLoading = false)
+            fetchJob?.takeIf { it.isActive } ?: startFetchLocked(userAsked = false, showLoading = false, polled = true)
         }
         job.join()
     }
@@ -142,8 +149,11 @@ class SessionTreeRepository(
         synchronized(lock) { startFetchLocked(userAsked, showLoading = true) }
     }
 
-    /** Supersedes any fetch out and starts one; [showLoading] shows Loading when no tree is up. */
-    private fun startFetchLocked(userAsked: Boolean, showLoading: Boolean): Job {
+    /**
+     * Supersedes any fetch out and starts one; [showLoading] shows Loading when no tree is up.
+     * [polled] for a [poll]'s, whose failures are logged only the first in a row.
+     */
+    private fun startFetchLocked(userAsked: Boolean, showLoading: Boolean, polled: Boolean = false): Job {
         fetchJob?.cancel()
         val id = ++fetchCount
         currentFetch = id
@@ -154,24 +164,38 @@ class SessionTreeRepository(
         } else if (showLoading) {
             stateFlow.value = TreeState.Loading
         }
-        return scope.launch { runFetch(id) }.also { fetchJob = it }
+        return scope.launch { runFetch(id, polled) }.also { fetchJob = it }
     }
 
-    private suspend fun runFetch(id: Long) {
+    private suspend fun runFetch(id: Long, polled: Boolean) {
+        var failure: String? = null
         val reply = try {
             client.request(PhoneMessage.FetchSessionTree, timeout = fetchTimeout)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            log("fetching the session tree failed: ${e.javaClass.simpleName}")
+            failure = "fetching the session tree failed: ${e.javaClass.simpleName}"
             null
         }
         if (reply is MacMessage.SessionTreeMessage) {
+            if (polled) pollSucceeded()
+            beforeApplyingReply()
             apply(reply, fetch = id)
             return
         }
-        if (reply != null) log("fetchSessionTree was answered with ${reply.javaClass.simpleName}")
+        if (reply != null) failure = "fetchSessionTree was answered with ${reply.javaClass.simpleName}"
+        failure?.let { if (!polled || firstPollFailure()) log(it) }
         failed(id)
+    }
+
+    /** A poll failed: whether it is the first in a row (and so logged). */
+    private fun firstPollFailure(): Boolean = synchronized(lock) { !pollFailing.also { pollFailing = true } }
+
+    private fun pollSucceeded() {
+        synchronized(lock) {
+            if (pollFailing) log("polling the session tree works again")
+            pollFailing = false
+        }
     }
 
     /** Applies [message] if it is newer than everything applied; [fetch] is the fetch it answers, if any. */

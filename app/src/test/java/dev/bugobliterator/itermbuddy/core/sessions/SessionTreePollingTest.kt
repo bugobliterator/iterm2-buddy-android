@@ -4,7 +4,11 @@ import dev.bugobliterator.itermbuddy.Fixtures
 import dev.bugobliterator.itermbuddy.core.sessions.SessionsRig.Companion.REPLY
 import dev.bugobliterator.itermbuddy.core.sessions.SessionsRig.Companion.treeOf
 import dev.bugobliterator.itermbuddy.ui.HomeTab
+import dev.bugobliterator.itermbuddy.core.sessions.SessionsRig.Companion.PUSH
+import dev.bugobliterator.itermbuddy.core.sessions.SessionsRig.Companion.payloadOf
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -13,11 +17,15 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -143,14 +151,19 @@ class SessionTreePollingTest {
     }
 
     @Test
-    fun theTipShowsAfterAConnectUntilDismissedOrAStatusIsSeen() = runTest {
+    fun theTipShowsOnATreeWithNoStatusUntilDismissedOrAStatusIsSeen() = runTest {
         val store = InMemoryClaudeTipStore()
         val rig = SessionsRig(this, claudeTipStore = store)
-        rig.answerFetches()
+        // The connect's fetch is held, so the link is up with no tree yet.
+        val held = Channel<Long>(Channel.UNLIMITED)
+        rig.mac.onRequest("fetchSessionTree") { held.trySend(it.getValue("requestID").jsonPrimitive.long); null }
         assertFalse("never connected", rig.graph.claudeTip.shown.value)
         rig.connect()
         runCurrent()
-        assertTrue(rig.graph.claudeTip.shown.value)
+        assertFalse("connected, but no tree yet", rig.graph.claudeTip.shown.value)
+        rig.mac.sendMessage(payloadOf(REPLY), held.receive())
+        runCurrent()
+        assertTrue("a tree with no status", rig.graph.claudeTip.shown.value)
 
         // A status in a polled tree: Claude Code's state is set up, the tip goes for good.
         rig.mac.onRequest("fetchSessionTree") { payloadWithPlannerSubtitle("idle") }
@@ -164,6 +177,67 @@ class SessionTreePollingTest {
         runCurrent()
         assertFalse(store.dismissed())
         assertFalse(rig.graph.claudeTip.shown.value)
+    }
+
+    @Test
+    fun theTipNeverFlashesWhenTheFirstTreeShowsAStatus() = runTest {
+        val rig = SessionsRig(this)
+        val shown = CopyOnWriteArrayList<Boolean>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { rig.graph.claudeTip.shown.collect { shown += it } }
+        rig.mac.onRequest("fetchSessionTree") { payloadWithPlannerSubtitle("working ~/src") }
+        rig.connect()
+        rig.navigator.selectTab(HomeTab.SESSIONS)
+        runCurrent()
+        advanceTimeBy(10.seconds)
+        assertEquals(listOf(false), shown.toList())
+    }
+
+    /**
+     * A poll's reply the Mac sent before a push, but applied after it (its path slowed here),
+     * is older than the push: the push's tree stays.
+     */
+    @Test
+    fun aPollReplyAppliedAfterANewerPushNeverOverridesIt() = runTest {
+        val rig = SessionsRig(this)
+        rig.answerFetches()
+        rig.connect()
+        runCurrent()
+        rig.repository.beforeApplyingReply = { delay(100.milliseconds) }
+        rig.mac.onRequestScripted("fetchSessionTree") { request ->
+            rig.mac.sendMessage(payloadOf(REPLY), request.getValue("requestID").jsonPrimitive.long)
+            rig.mac.sendSample(PUSH, null)
+        }
+        val before = rig.fetches()
+        rig.navigator.selectTab(HomeTab.SESSIONS)
+        runCurrent()
+        assertEquals(before + 1, rig.fetches())
+        assertEquals("the push is applied while the reply waits", TreeState.Loaded(treeOf(PUSH), refreshing = false), rig.repository.state.value)
+        advanceTimeBy(1.seconds)
+        assertEquals("the older reply is ignored", TreeState.Loaded(treeOf(PUSH), refreshing = false), rig.repository.state.value)
+        assertNotEquals(treeOf(REPLY), treeOf(PUSH))
+    }
+
+    @Test
+    fun onlyTheFirstFailedPollInARowIsLogged() = runTest {
+        val rig = SessionsRig(this)
+        rig.answerFetches()
+        rig.connect()
+        runCurrent()
+        fun failures() = rig.logs.count { it.startsWith("fetching the session tree failed") }
+        rig.mac.onRequest("fetchSessionTree") { null }
+        rig.navigator.selectTab(HomeTab.SESSIONS)
+        runCurrent()
+        // Each poll times out after 15 s and the next goes 4 s later: four polls fail in 80 s.
+        advanceTimeBy(80.seconds)
+        assertTrue(rig.fetches() >= 5)
+        assertEquals("only the first of the run", 1, failures())
+
+        // A poll succeeds: the next failure is logged again.
+        rig.answerFetches()
+        advanceTimeBy(20.seconds)
+        rig.mac.onRequest("fetchSessionTree") { null }
+        advanceTimeBy(40.seconds)
+        assertEquals(2, failures())
     }
 
     private fun payloadWithPlannerSubtitle(subtitle: String): JsonObject {
