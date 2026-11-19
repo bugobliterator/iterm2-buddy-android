@@ -39,7 +39,9 @@ import kotlinx.serialization.json.jsonObject
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.random.Random
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * The app's home graph as [wireHome] builds it for `CompanionApp`, on the in-process [FakeRelay],
@@ -49,12 +51,16 @@ import kotlin.time.Duration.Companion.minutes
  *
  * @param events where the repository reads pushes; null for the client's own `events`.
  * @param listSharingStopMillis how long the shared chat list keeps computing after its last reader.
+ * @param sessionPollInterval the Sessions list's poll of the tree.
+ * @param claudeTipStore where the `\(status)` tip's dismissal is kept.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal class SessionsRig(
     private val test: TestScope,
     events: ((CompanionClient) -> Flow<MacMessage>)? = null,
     listSharingStopMillis: Long = 5_000,
+    sessionPollInterval: Duration = 4.seconds,
+    claudeTipStore: ClaudeTipStore = InMemoryClaudeTipStore(),
 ) {
     private val macKeys = newStaticKeyPair()
     val code = PairingCode(macKeys.second, "sessions-rig-pid", ORIGIN)
@@ -104,6 +110,8 @@ internal class SessionsRig(
         // The chat list's and conversations' content in virtual time, on the test's dispatcher.
         listContext = EmptyCoroutineContext,
         listSharingStopMillis = listSharingStopMillis,
+        sessionPollInterval = sessionPollInterval,
+        claudeTipStore = claudeTipStore,
     )
     val client get() = graph.client
     val repository get() = graph.repository

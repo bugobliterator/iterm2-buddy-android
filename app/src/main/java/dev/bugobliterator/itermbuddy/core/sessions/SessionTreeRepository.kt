@@ -39,7 +39,8 @@ sealed interface TreeState {
  * `sessionTree` push handling, `AM:2409-2414`, `AM:4456-4466`).
  *
  * It fetches (`fetchSessionTree`, bounded by [fetchTimeout], 15 s as iOS `AM:1384`) on the first
- * [ClientState.Connected], again on each later one (a reconnect), and on [refresh]; and it
+ * [ClientState.Connected], again on each later one (a reconnect), on [refresh], and on [poll]
+ * (the Sessions list's, silently and never beside a fetch already out); and it
  * replaces the tree with every unsolicited `sessionTree` from [events], with no refetch. A fetch
  * supersedes one still out. A failed fetch keeps a tree already shown. Only [refresh] shows
  * [TreeState.Loaded.refreshing]; the fetch on a reconnect is silent.
@@ -98,6 +99,21 @@ class SessionTreeRepository(
         }
     }
 
+    /**
+     * A background fetch for the Sessions list's poll ([SessionTreePoller]); returns when it ends.
+     * When a fetch is already out (a connect's, a [refresh], an earlier poll) nothing is sent and
+     * this waits for that one, so a poll never puts a second request out. Silent: the state shown
+     * is untouched until a reply lands (no Loading, no spinner), and the reply flows through the
+     * same path as every other tree, so an unchanged tree changes nothing. Cancelling the caller
+     * does not cancel the fetch.
+     */
+    suspend fun poll() {
+        val job = synchronized(lock) {
+            fetchJob?.takeIf { it.isActive } ?: startFetchLocked(userAsked = false, showLoading = false)
+        }
+        job.join()
+    }
+
     /** Fetches the tree again (pull to refresh, Try again), keeping a tree already shown. */
     fun refresh() = fetch(userAsked = true)
 
@@ -123,17 +139,22 @@ class SessionTreeRepository(
     }
 
     private fun fetch(userAsked: Boolean) {
-        synchronized(lock) {
-            fetchJob?.cancel()
-            val id = ++fetchCount
-            currentFetch = id
-            currentFetchShown = userAsked
-            stateFlow.value = when (val now = stateFlow.value) {
-                is TreeState.Loaded -> now.copy(refreshing = userAsked)
-                else -> TreeState.Loading
-            }
-            fetchJob = scope.launch { runFetch(id) }
+        synchronized(lock) { startFetchLocked(userAsked, showLoading = true) }
+    }
+
+    /** Supersedes any fetch out and starts one; [showLoading] shows Loading when no tree is up. */
+    private fun startFetchLocked(userAsked: Boolean, showLoading: Boolean): Job {
+        fetchJob?.cancel()
+        val id = ++fetchCount
+        currentFetch = id
+        currentFetchShown = userAsked
+        val now = stateFlow.value
+        if (now is TreeState.Loaded) {
+            stateFlow.value = now.copy(refreshing = userAsked)
+        } else if (showLoading) {
+            stateFlow.value = TreeState.Loading
         }
+        return scope.launch { runFetch(id) }.also { fetchJob = it }
     }
 
     private suspend fun runFetch(id: Long) {

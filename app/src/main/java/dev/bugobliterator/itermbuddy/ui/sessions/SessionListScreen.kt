@@ -16,22 +16,32 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import dev.bugobliterator.itermbuddy.core.sessions.CLAUDE_STATE_TIP
+import dev.bugobliterator.itermbuddy.core.sessions.ClaudeSessionState
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTree
 import dev.bugobliterator.itermbuddy.core.sessions.TreeState
+import dev.bugobliterator.itermbuddy.ui.chats.DONE_COLOR
+import dev.bugobliterator.itermbuddy.ui.chats.ERROR_COLOR
+import dev.bugobliterator.itermbuddy.ui.chats.StatusChip
+import dev.bugobliterator.itermbuddy.ui.chats.WAITING_COLOR
+import dev.bugobliterator.itermbuddy.ui.chats.WORKING_COLOR
 import java.util.Locale
 
 internal const val EMPTY_TREE = "No sessions are open in iTerm2."
@@ -113,6 +123,7 @@ internal fun SessionRowLine(row: SessionRow, onOpen: (SessionSummary, String) ->
             icon = if (row.summary.isBrowser) "◍" else "▣",
             title = row.title,
             subtitle = rowSubtitle(row.summary),
+            state = rowClaudeState(row.summary),
             indent = if (row.nested) INDENT * 2 else INDENT,
             onClick = { onOpen(row.summary, row.title) },
         )
@@ -120,7 +131,7 @@ internal fun SessionRowLine(row: SessionRow, onOpen: (SessionSummary, String) ->
 }
 
 @Composable
-private fun Line(icon: String, title: String, subtitle: String?, indent: Dp, onClick: (() -> Unit)? = null) {
+private fun Line(icon: String, title: String, subtitle: String?, indent: Dp, state: ClaudeSessionState? = null, onClick: (() -> Unit)? = null) {
     val base = Modifier.fillMaxWidth()
     Row(
         modifier = (if (onClick != null) base.clickable(onClick = onClick) else base)
@@ -139,6 +150,36 @@ private fun Line(icon: String, title: String, subtitle: String?, indent: Dp, onC
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            state?.let { ClaudeStateChip(it) }
+        }
+    }
+}
+
+/** A row's Claude Code chip, as the Chat List's: green Working with a spinner, orange, blue, red; nothing for idle. */
+@Composable
+private fun ClaudeStateChip(state: ClaudeSessionState) {
+    val label = claudeStateLabel(state) ?: return
+    val color = when (state) {
+        ClaudeSessionState.WORKING -> WORKING_COLOR
+        ClaudeSessionState.WAITING -> WAITING_COLOR
+        ClaudeSessionState.ERROR -> ERROR_COLOR
+        ClaudeSessionState.DONE, ClaudeSessionState.IDLE -> DONE_COLOR
+    }
+    StatusChip(label, color, spinner = state == ClaudeSessionState.WORKING)
+}
+
+/** The Sessions list's one-line tip about `\(status)` ([CLAUDE_STATE_TIP]), with ✕ to dismiss it for good. */
+@Composable
+internal fun ClaudeStateTipRow(onDismiss: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant, modifier = modifier.fillMaxWidth()) {
+        Row(modifier = Modifier.padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                CLAUDE_STATE_TIP,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f).padding(vertical = 8.dp),
+            )
+            IconButton(onClick = onDismiss, modifier = Modifier.semantics { contentDescription = "Dismiss tip" }) { Text("✕") }
         }
     }
 }

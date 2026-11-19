@@ -91,6 +91,8 @@ class MainActivity : ComponentActivity() {
 
         override fun refresh() = app.home.repository.refresh()
 
+        override fun dismissClaudeTip() = app.home.claudeTip.dismiss()
+
         override fun reconnect() {
             app.clearNotices()
             app.client.start()
@@ -133,13 +135,14 @@ class MainActivity : ComponentActivity() {
             val videoStatsShown by app.videoStatsShown.collectAsStateWithLifecycle()
             val query by sessions.search.query.collectAsStateWithLifecycle()
             val macStatus by app.client.macStatus.collectAsStateWithLifecycle()
+            val claudeTip by sessions.claudeTip.shown.collectAsStateWithLifecycle()
             AppTheme {
                 AppRoot(
                     paired = paired,
                     home = HomeModel(
                         state, nav.destination, tree, live, unpairing, unpairFailed, version, relayOrigin,
                         activeStream, video, debugBuild, videoStatsShown, query, macStatus, nav.tab, chatsAttention,
-                        nav.key, nav.stackKeys,
+                        nav.key, nav.stackKeys, claudeTip,
                     ),
                     homeActions = homeActions,
                     chats = sessions.chatsHome,

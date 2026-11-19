@@ -120,9 +120,11 @@ data class ChatRowModel(
             "state=$state, unread=$unread, actions=$actions, icon=$icon)"
 }
 
-private val WORKING_COLOR = Color(0xFF34C759)
-private val WAITING_COLOR = Color(0xFFFF9F0A)
-private val DONE_COLOR = Color(0xFF0A84FF)
+/** The state chips' colours, shared with the Sessions list's Claude Code chip. */
+internal val WORKING_COLOR = Color(0xFF34C759)
+internal val WAITING_COLOR = Color(0xFFFF9F0A)
+internal val DONE_COLOR = Color(0xFF0A84FF)
+internal val ERROR_COLOR = Color(0xFFFF3B30)
 private val ICON_SIZE = 44.dp
 
 /**
@@ -250,8 +252,14 @@ private fun StateChip(state: AgentState, label: String) {
         AgentState.WAITING -> WAITING_COLOR
         else -> DONE_COLOR
     }
+    StatusChip(label, color, spinner = state == AgentState.WORKING)
+}
+
+/** A rounded state chip in [color] with [label], and a small spinner before it when [spinner]. */
+@Composable
+internal fun StatusChip(label: String, color: Color, spinner: Boolean, modifier: Modifier = Modifier) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .padding(top = 2.dp)
             .clip(RoundedCornerShape(50))
             .background(color.copy(alpha = 0.18f))
@@ -259,7 +267,7 @@ private fun StateChip(state: AgentState, label: String) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        if (state == AgentState.WORKING) CircularProgressIndicator(modifier = Modifier.size(10.dp), color = color, strokeWidth = 1.5.dp)
+        if (spinner) CircularProgressIndicator(modifier = Modifier.size(10.dp), color = color, strokeWidth = 1.5.dp)
         Text(label, style = MaterialTheme.typography.labelMedium, color = color)
     }
 }

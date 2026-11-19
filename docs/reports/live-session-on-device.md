@@ -53,6 +53,29 @@ without pulling. Pull to refresh works.
 
 **Result:**
 
+### Claude Code state on Sessions
+
+1. Before setting anything up, with the phone connected: the Sessions list shows the one-line
+   tip "To see Claude Code's state here, add \(status) to your iTerm2 profile's Subtitle
+   (Settings › Profiles › General)". Tap ✕: it goes, and stays gone after force-stopping and
+   reopening the app.
+2. On the Mac, set the profile's Subtitle (Settings › Profiles › General) to `\(status)`.
+3. Run `claude` in a tab of that profile. With the Sessions list on screen, the row shows no
+   chip and no subtitle while Claude Code is idle.
+4. Send a prompt: the row shows a green **Working** chip with a spinner.
+5. Ask for something that needs a permission prompt: the chip turns orange, **Waiting for you**.
+6. Answer the prompt and let the turn finish: the chip turns blue, **Done**.
+7. Each change reaches the row within about 5 s, with no spinner, flash or reordering of the
+   list. A browser session's row never shows a chip. A session whose subtitle is not a status
+   (for example a path) shows that subtitle as before.
+8. Go to Chats, or lock the phone, for a minute; come back: the chip catches up at once. (While
+   away the phone asks nothing; this needs the Mac's side or a log of `fetchSessionTree`
+   requests to confirm.)
+9. Unpair and pair again: the tip shows again after the first connect, until a status is seen
+   or it is dismissed.
+
+**Result:**
+
 ### Live picture
 
 Open a session running `top`. The live view fills the screen on a dark background. The picture updates about once a second. Record the time from
