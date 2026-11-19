@@ -29,14 +29,35 @@ COMPANION_PLUGIN_ZIP_SHA256="2a6cea5e99a75d53ae673476ea5042ced6e4b2cad3ccbdbf5e5
 COMPANION_PLUGIN_SIGNING_KEY="GHS0N02DR3kF7u3gqB5GF52dmre/oUkJuarQzEv8crw="
 COMPANION_PLUGIN_BUNDLE_ID="com.googlecode.iterm2.iTermCompanion"
 
+# The AI plugin iTerm2 3.7.7 installs itself (CompanionPluginInstaller.swift:52-55); without it
+# iTerm2 reports AI off to the phone (CompanionPairingController.aiAvailable).
+AI_PLUGIN_ZIP_URL="https://iterm2.com/downloads/ai-plugin/iTermAI-1.1.zip"
+# Empty until the first run that installs it prints its sha256; pin that value here, and from
+# then on a different zip fails the job. Either way its JavaScript is checked against its
+# Ed25519 signature with the key iTerm2 3.7.7 embeds for the AI plugin (AIPluginClient.swift:115).
+AI_PLUGIN_ZIP_SHA256=""
+AI_PLUGIN_SIGNING_KEY="fYLUx58QwucuPJRYxBjp7M//uVM0vTfgUo7d6u4TQR8="
+AI_PLUGIN_BUNDLE_ID="com.googlecode.iterm2.iTermAI"
+
 # The relay scripts/relay-it.sh tests against, fetched the same way.
 RELAY_REPO="https://github.com/gnachman/iterm2-companion-relay.git"
 RELAY_COMMIT="b8aa2f90d2bc8b617d1b9c97043aa0b171885310"
+
+# The fake model (fake-model.mjs). The tool it calls on the approval trigger, and the sha256 of
+# that tool's schema as iTerm2 sends it (canonical JSON, keys sorted). Empty until the first
+# run that reaches it prints the value; pin it here and RealIterm2AgentChatTest then fails when
+# iTerm2 sends a different schema.
+FAKE_MODEL_TOOL="session_execute_command"
+FAKE_MODEL_TOOL_SCHEMA_SHA256=""
 
 # --- Topology -----------------------------------------------------------------------------
 
 RELAY_PORT="8787"
 TLS_PROXY_PORT="8443"
+FAKE_MODEL_PORT="8790"
+# iTerm2's manual model points here, with no credential (AIModelCredential.none).
+FAKE_MODEL_URL="http://127.0.0.1:${FAKE_MODEL_PORT}/v1/chat/completions"
+FAKE_MODEL_NAME="buddy-ci-fake-model"
 # iTerm2 only accepts an https origin and has no trust override, so it goes through the TLS
 # proxy. The relay signs joins against this exact string (RELAY_ORIGIN).
 RELAY_ORIGIN="https://localhost:${TLS_PROXY_PORT}"
@@ -55,6 +76,7 @@ RELAY_DIR="$WORK_DIR/relay"
 RELAY_LOG="$DIAGNOSTICS_DIR/relay.log"
 TLS_PROXY_LOG="$DIAGNOSTICS_DIR/tls-proxy.log"
 TLS_DIR="$WORK_DIR/tls"
+FAKE_MODEL_LOG="$DIAGNOSTICS_DIR/fake-model.log"
 
 mkdir -p "$WORK_DIR" "$DOWNLOADS_DIR" "$DIAGNOSTICS_DIR"
 
@@ -109,6 +131,30 @@ pairing_value() {
     value="$(awk -F= -v key="$key" '$1 == key { print substr($0, length(key) + 2) }' "$PAIRING_FILE")"
     [[ -n "$value" ]] || die "$PAIRING_FILE has no $key"
     printf '%s' "$value"
+}
+
+# Writes iTerm2's secure setting $1 with the value "$2" as iTerm2's own privileged write does: a
+# root-owned file in Application Support holding hex(path) " " hex(sha256(key)) "\n" hex(value),
+# with no newline after the value (SecureUserDefaults.swift:279-305, 594-641, 679-688). iTerm2
+# ignores the file unless root owns it.
+install_secure_setting() {
+    local key="$1" value="$2"
+    local file="$ITERM2_APP_SUPPORT/$key.secureSetting"
+    local staged="$WORK_DIR/$key.secureSetting"
+    mkdir -p "$ITERM2_APP_SUPPORT"
+    printf '%s %s\n%s' "$(hex_of "$file")" "$(printf '%s' "$key" | shasum -a 256 | awk '{ print $1 }')" "$(hex_of "$value")" > "$staged"
+    sudo install -o root -g wheel -m 0644 "$staged" "$file" || die "could not install $file as root"
+    rm -f "$staged"
+    local owner
+    owner="$(stat -f '%u' "$file")"
+    [[ "$owner" == 0 ]] || die "$file is owned by uid $owner, not root; iTerm2 would ignore it"
+    log "wrote $file (root-owned, $(wc -c < "$file" | tr -d ' ') bytes):"
+    indent < "$file"
+    echo
+}
+
+hex_of() {
+    printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'
 }
 
 # Waits up to $1 seconds for the command in the remaining arguments to succeed.
