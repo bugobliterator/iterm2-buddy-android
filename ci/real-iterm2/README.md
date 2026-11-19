@@ -135,23 +135,28 @@ approved). The test types `bash key-probe.sh <probe.env> …` into the first ter
 mode:
 
 - `key-capture.mjs` (raw tty, every chunk logged as hex, the modes restored on exit) with no mode,
-  bracketed paste (`CSI ? 2004 h`), modifyOtherKeys 2 (`CSI > 4 ; 2 m`) and kitty flags 1, 3 and
-  31 (`CSI > N u`). It also logs the terminal's answer to `CSI ? u`.
+  bracketed paste (`CSI ? 2004 h`), modifyOtherKeys 2 (`CSI > 4 ; 2 m`), kitty flags 1, 3 and 31
+  (`CSI > N u`), and Claude Code's own pair, kitty flags 5 with modifyOtherKeys 2. It also logs the
+  terminal's answer to `CSI ? u`.
 - Claude Code under `script -q -t 0 -r` (input and output with timestamps; `script -p` plays
   `key-bytes-claude.rec` back), with a dummy key, `ANTHROPIC_BASE_URL` at a closed local port and
   no nonessential traffic.
 
-It sends `a / * . 1 ? A ~ |` one at a time through the app's `InputSender` (`sendKey` text, the
-phone's path), then `pasteText` of `/*`, and `/` and `*` as real key presses from System Events, as
-`keystroke` and as US key codes (44, and 28 with Shift), once iTerm2 is frontmost (osascript; the
-frontmost app and osascript's stderr are reported). In Claude Code it first sends `/` alone on the
-empty prompt (slash-command menu?) by `sendKey`, `pasteText` and osascript, and `*` by `pasteText`,
-erasing each with Backspace, and ends with Return and Ctrl-C twice. The report, `key-bytes:` lines
-in the job log and `key-bytes-report.txt` in the diagnostics, gives per mode and character the bytes
-as hex and escapes, `sendKey` beside osascript, and for Claude Code every keyboard-mode sequence it
-wrote (in order) and whether each character appeared in what it drew next (or the screen text, when
-it never reached its prompt). This probe prints terminal content: only the probe characters and
-Claude Code's UI in a throwaway CI terminal.
+It sends characters one at a time through the app's `InputSender` (`sendKey` text, the phone's
+path): `a / * - + = .` in most capture modes, every printable ASCII character and space under kitty
+flags 5, where each CSI u is decoded and marked WRONG when its key number is not the character's US
+ANSI base key (`*` → `8`, `A` → `a`) or an unshifted character carries Shift, and `a / * . 1 ? A ~ |
+- + =` in Claude Code. Then it sends `pasteText` of `/*`. In Claude Code it first sends `/` alone on
+the empty prompt (slash-command menu?) by `sendKey` and `pasteText`, and `*` by `pasteText`, erasing
+each with Backspace, and ends with Return and Ctrl-C twice. A System Events key press baseline was
+tried and removed: on the runner it delivered nothing, with iTerm2 frontmost.
+
+The report, `key-bytes:` lines in the job log and `key-bytes-report.txt` in the diagnostics, gives
+the Mac's keyboard input source, then per mode and character the bytes as hex and escapes, the
+WRONG set under kitty flags 5, and for Claude Code every keyboard-mode sequence it wrote (in order)
+and whether each character appeared in what it drew next (or the screen text, when it never reached
+its prompt). This probe prints terminal content: only the probe characters and Claude Code's UI in a
+throwaway CI terminal.
 
 ## Stage 3: Agent Chat on a fake model
 
