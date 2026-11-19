@@ -27,6 +27,10 @@ import org.junit.Test
  * The repository on real threads, as the app runs it: the consumer and the request coroutines on
  * [Dispatchers.Default], replies accepted from another thread (the receive loop's), and calls
  * posted from a third (the UI's). Every other repository test runs on one test thread.
+ *
+ * Real time, unlike every other chat test: virtual time runs everything on the test's one
+ * thread, which is exactly the interleaving this test exists to avoid. It waits with a bound but
+ * asserts no times.
  */
 class ChatRepositoryThreadingTest {
     /**

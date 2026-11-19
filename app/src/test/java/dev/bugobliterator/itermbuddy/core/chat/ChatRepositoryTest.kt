@@ -14,6 +14,8 @@ import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.core.wire.decodeEnvelope
 import dev.bugobliterator.itermbuddy.fakemac.FakeChatMac
+import dev.bugobliterator.itermbuddy.ui.conversation.ChatDrafts
+import dev.bugobliterator.itermbuddy.ui.conversation.DraftSend
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
@@ -100,7 +102,7 @@ class ChatRepositoryTest {
 
     @Test
     fun aiOffShowsUnavailableAndSendsNoChatRequest() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME)
         rig.mac.helloAiAvailable = false
         rig.connect()
@@ -115,7 +117,7 @@ class ChatRepositoryTest {
 
     @Test
     fun aiBackOnResubscribesWantedChats() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
         rig.connect()
         rig.repository.open(A)
@@ -233,7 +235,7 @@ class ChatRepositoryTest {
 
     @Test
     fun lateHistoryAfterTimeoutIsApplied() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME)
         rig.holdNext[A] = 20.seconds
         rig.connect()
@@ -283,7 +285,7 @@ class ChatRepositoryTest {
 
     @Test
     fun resubscribeOnReconnectReplacesTranscript() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME)
         rig.connect()
         rig.repository.open(A)
@@ -309,7 +311,7 @@ class ChatRepositoryTest {
 
     @Test
     fun deltaBeforeHistoryOnNewLinkIsNotApplied() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME)
         rig.connect()
         rig.repository.open(A)
@@ -329,7 +331,7 @@ class ChatRepositoryTest {
 
     @Test
     fun secondHistoryReplacesWithoutDoubleAppend() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME)
         rig.connect()
         rig.repository.open(A)
@@ -349,7 +351,7 @@ class ChatRepositoryTest {
 
     @Test
     fun ownEchoIsUpsertedNotDuplicated() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME)
         rig.connect()
         rig.repository.open(A)
@@ -364,7 +366,7 @@ class ChatRepositoryTest {
 
     @Test
     fun deliveryForUncachedChatIsDropped() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
         rig.connect()
         settle()
@@ -379,7 +381,7 @@ class ChatRepositoryTest {
 
     @Test
     fun corruptPayloadFailsOnlyItsChat() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
         val nested = "[".repeat(600) + "\"SENTINEL-chat-text\"" + "]".repeat(600)
         rig.historyFrames[A] = { id ->
@@ -403,7 +405,7 @@ class ChatRepositoryTest {
 
     @Test
     fun emptyHistoryIsNotDeletion() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME)
         rig.historyFrames[A] = { id -> envelope(FakeChatMac.retarget(FakeChatMac.samplePayload("history-empty.json"), A), id) }
         rig.connect()
@@ -417,7 +419,7 @@ class ChatRepositoryTest {
 
     @Test
     fun chatMissingFromListIsDeleted() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
         rig.connect()
         rig.repository.open(A)
@@ -442,7 +444,7 @@ class ChatRepositoryTest {
 
     @Test
     fun chatBackInListClearsDeleted() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
         rig.connect()
         rig.repository.open(A)
@@ -584,7 +586,7 @@ class ChatRepositoryTest {
 
     @Test
     fun historyOverCapShowsTooLargeAndKeepsLiveStates() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
         rig.historyFrames[A] = { id -> envelope(padded(FakeChatMac.history(A), "history", RAW_CAP + 1), id) }
         rig.connect()
@@ -611,7 +613,7 @@ class ChatRepositoryTest {
 
     @Test
     fun tooLargeHistoryIsNotResubscribedInALoop() = runTest {
-        val rig = ChatRig(this, concurrency = 1)
+        val rig = ChatRig(this, snapshotUncollected = true, concurrency = 1)
         rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1, C to MAC_TIME - 2)
         rig.historyFrames[A] = { id -> envelope(padded(FakeChatMac.history(A), "history", NOISE_CAP + 1024), id) }
         rig.connect()
@@ -628,7 +630,7 @@ class ChatRepositoryTest {
 
     @Test
     fun oversizeWithConcurrentSubscribesIsolatesTheCulprit() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1, C to MAC_TIME - 2)
         rig.historyFrames[A] = { id -> envelope(padded(FakeChatMac.history(A), "history", NOISE_CAP + 1024), id) }
         rig.connect()
@@ -659,7 +661,7 @@ class ChatRepositoryTest {
 
     @Test
     fun lostAppendResubscribesOnce() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME)
         rig.connect()
         rig.repository.open(A)
@@ -702,7 +704,7 @@ class ChatRepositoryTest {
 
     @Test
     fun closedTranscriptsAreEvictedBeyondThree() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         val ids = (1..5).map(::chatId)
         rig.chats = ids.map { it to MAC_TIME }
         rig.connect()
@@ -785,7 +787,7 @@ class ChatRepositoryTest {
 
     @Test
     fun aiOffEmptyListKeepsMarksAndTranscripts() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
         rig.connect()
         rig.repository.open(A)
@@ -810,7 +812,7 @@ class ChatRepositoryTest {
 
     @Test
     fun quickCloseAndReopenIsNotStuck() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME)
         rig.connect()
         settle()
@@ -885,7 +887,7 @@ class ChatRepositoryTest {
 
     @Test
     fun historyInFlightWhenAiGoesOffIsSubscribedAgainWhenBack() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME)
         rig.holdNext[A] = 5.seconds
         rig.connect()
@@ -926,7 +928,7 @@ class ChatRepositoryTest {
 
     @Test
     fun undecodableRawDeliveryIsALostAppend() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
         rig.connect()
         rig.repository.open(A)
@@ -979,7 +981,7 @@ class ChatRepositoryTest {
 
     @Test
     fun messagesRemovedTruncatesTheTranscript() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME)
         rig.connect()
         rig.repository.open(A)
@@ -1052,7 +1054,7 @@ class ChatRepositoryTest {
 
     @Test
     fun oversizedListWithAnOpenChatSuspectsTheListFirst() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME)
         rig.listFrame = { id -> envelope(padded(rig.listPayload("chatsAndSessions"), "chatsAndSessions", NOISE_CAP + 1024), id) }
         rig.repository.open(A)
@@ -1189,7 +1191,7 @@ class ChatRepositoryTest {
      */
     @Test
     fun emptyListRacingAiOffKeepsMarksLatchesAndTranscripts() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1, C to MAC_TIME - 2)
         rig.connect()
         rig.repository.open(C)
@@ -1305,7 +1307,7 @@ class ChatRepositoryTest {
 
     @Test
     fun reconnectShowsConnectingNotFailedForAChatWithoutTranscript() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME)
         rig.neverAnswer += A
         rig.connect()
@@ -1393,7 +1395,7 @@ class ChatRepositoryTest {
 
     @Test
     fun rowsAreNotRebuiltByDeltasThatChangeNoState() = runTest {
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
         rig.connect()
         rig.repository.open(A)
@@ -1439,6 +1441,10 @@ class ChatRepositoryTest {
         rig.chatMac.streamReply(A, appends = 3)
         settle()
         assertEquals("not snapshotted while nobody collects", before, (flow.value as ConversationState.Shown).version)
+        val again = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { flow.collect { } }
+        runCurrent()
+        assertTrue("a new collector brings it up to date", (flow.value as ConversationState.Shown).version > before)
+        again.cancel()
     }
 
     @Test
@@ -1464,6 +1470,102 @@ class ChatRepositoryTest {
         rig.pushList()
         settle()
         assertEquals("dropped transcripts give their bytes back", 0L, rig.repository.heldImageBytes)
+    }
+
+    /** A 30 MiB chat cached after its close gives way to the chat on screen. */
+    @Test
+    fun openChatsImagesComeBeforeACachedChats() = runTest {
+        val image = 3 * 1024
+        val budgets = ChatBudgets(attachments = AttachmentBudgets(maxImageBytes = image, maxTranscriptImageBytes = 4L * image), sharedImageBytes = 3L * image)
+        val rig = ChatRig(this, snapshotUncollected = true, budgets = budgets)
+        rig.chats = listOf(A to MAC_TIME, B to MAC_TIME - 1)
+        rig.historyFrames[A] = { id -> envelope(historyWithImages(A, 3, image), id) }
+        rig.historyFrames[B] = { id -> envelope(historyWithImages(B, 2, image), id) }
+        rig.connect()
+        rig.repository.open(A)
+        settle()
+        assertEquals("A fills the allowance", 3L * image, rig.repository.heldImageBytes)
+        rig.repository.close(A)
+        rig.repository.open(B)
+        settle()
+        val kept = rig.shown(B).messages.flatMap { (it.body as MessageBody.Multipart).parts }
+            .count { ((it as Subpart.AttachmentPart).attachment.kind as AttachmentKind.File).keptByteCount > 0 }
+        assertEquals("B's images are kept", 2, kept)
+        assertEquals(2L * image, rig.repository.heldImageBytes)
+        assertEquals("A's cache gave way", 1, rig.repository.heldTranscripts)
+    }
+
+    @Test
+    fun anErrorWhileSendingNeverLeavesTheDraftSending() = runTest {
+        val rig = ChatRig(this, newUuid = { throw OutOfMemoryError("while sending") })
+        rig.chats = listOf(A to MAC_TIME)
+        rig.connect()
+        rig.repository.open(A)
+        settle()
+        val drafts = ChatDrafts()
+        drafts.set(A, MentionDraft.EMPTY.applyEdit(0, 0, "Deploy now"))
+        assertTrue(drafts.sendInBackground(backgroundScope, A) { rig.repository.send(A, it) })
+        settle()
+        assertEquals(DraftSend(sending = false, finished = 1, outcome = SendOutcome.NotSendable(NotSendableReason.SEND_FAILED)), drafts.sendState(A).value)
+        assertEquals("kept", "Deploy now", drafts.get(A).serialised())
+    }
+
+    @Test
+    fun historyThatThrowsWhileDecodingFailsItsSubscribe() = runTest {
+        val rig = ChatRig(this, snapshotUncollected = true)
+        rig.chats = listOf(A to MAC_TIME)
+        rig.repository.decodePayload = { input, budgets -> if (input.case == "history") throw OutOfMemoryError("decoding") else input.decode(budgets) }
+        rig.connect()
+        rig.repository.open(A)
+        settle()
+        assertEquals(ConversationState.Failed(retryable = true), rig.repository.conversation(A).value)
+    }
+
+    @Test
+    fun marksOfChatsNeverListedSinceAColdStartAreForgotten() = runTest {
+        val store = InMemoryChatSeenStore()
+        store.markSeen(B, MAC_TIME)
+        val rig = ChatRig(this, seen = store)
+        rig.chats = listOf(A to MAC_TIME)
+        rig.connect()
+        settle()
+        assertNotNull("one list without it", store.seen(B))
+        rig.pushList()
+        settle()
+        assertNull("two lists without it", store.seen(B))
+        assertNotNull(store.seen(A))
+    }
+
+    @Test
+    fun heldEmptyListIsAppliedWhenItCannotBeConfirmed() = runTest {
+        val rig = ChatRig(this, timeouts = ChatTimeouts(list = 2.seconds))
+        rig.chats = listOf(A to MAC_TIME)
+        rig.connect()
+        settle()
+        rig.chats = emptyList()
+        rig.withholdLists = true
+        rig.pushList()
+        advanceTimeBy(ChatTimeouts().emptyListConfirm + 3.seconds)
+        runCurrent()
+        assertEquals("tried once, then once more", listOf(A), rig.listedIDs())
+        advanceTimeBy(ChatTimeouts().emptyListConfirm + 3.seconds)
+        runCurrent()
+        assertEquals(3, rig.listRequests.get())
+        assertEquals(emptyList<String>(), rig.listedIDs())
+    }
+
+    @Test
+    fun lostDeliveryForgetsWhoSpokeLast() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME)
+        rig.connect()
+        settle()
+        rig.sendSample("delivery-user-echo.json", A)
+        rig.mac.sendRaw(envelope(padded(rig.chatMac.append(A, 0), "delivery", RAW_CAP + 1), null))
+        rig.chats = listOf(A to MAC_TIME + 100)
+        rig.pushList()
+        settle()
+        assertTrue("the lost delivery may have been the agent's", rig.row(A).unread)
     }
 
     @Test
@@ -1505,6 +1607,8 @@ class ChatRepositoryTest {
         }
 
         override fun forget(chatID: String) = inner.forget(chatID)
+
+        override fun chatIDs(): Set<String> = inner.chatIDs()
 
         override fun clear() = inner.clear()
     }

@@ -73,7 +73,8 @@ class ChatManagementTest {
 
     /** A rig connected with [chats] listed (each at [MAC_TIME]), at the Mac's hello [revision]. */
     private suspend fun TestScope.connected(vararg chats: String, revision: Int? = null): ChatRig {
-        val rig = ChatRig(this)
+        // These tests read conversations without collecting them.
+        val rig = ChatRig(this, snapshotUncollected = true)
         revision?.let { rig.mac.revision = it }
         rig.chats = chats.mapIndexed { index, id -> id to MAC_TIME - index }
         rig.connect()

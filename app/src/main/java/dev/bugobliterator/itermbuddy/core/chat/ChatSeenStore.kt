@@ -54,6 +54,9 @@ interface ChatSeenStore {
     /** Drops [chatID]'s mark (the chat was deleted). */
     fun forget(chatID: String)
 
+    /** The chats with a mark: the repository forgets those the Mac no longer lists, after a cold start too. */
+    fun chatIDs(): Set<String>
+
     /** Drops every mark (unpair). */
     fun clear()
 }
@@ -79,6 +82,9 @@ class InMemoryChatSeenStore : ChatSeenStore {
     override fun forget(chatID: String) {
         marks.remove(chatID)
     }
+
+    @Synchronized
+    override fun chatIDs(): Set<String> = HashSet(marks.keys)
 
     @Synchronized
     override fun clear() = marks.clear()
@@ -157,6 +163,9 @@ class FileChatSeenStore(
         if (queue) writer.execute(::write)
     }
 
+    @Synchronized
+    override fun chatIDs(): Set<String> = HashSet(marks().keys)
+
     override fun clear() = synchronized(fileLock) {
         synchronized(this) {
             loaded = HashMap()
@@ -178,14 +187,22 @@ class FileChatSeenStore(
         return true
     }
 
-    /** On [writer]: writes the marks as they are now, unless [clear] came first. */
+    /**
+     * On [writer]: writes the marks as they are now, unless [clear] came first. Nothing it throws
+     * reaches the writer's thread (an IO dispatcher's uncaught handler would end the process):
+     * logged by class, the marks stay in memory.
+     */
     private fun write() = synchronized(fileLock) {
-        val snapshot = synchronized(this) {
-            if (!writeQueued) return@synchronized null
-            writeQueued = false
-            HashMap(marks())
-        } ?: return@synchronized
-        save(snapshot)
+        try {
+            val snapshot = synchronized(this) {
+                if (!writeQueued) return@synchronized null
+                writeQueued = false
+                HashMap(marks())
+            } ?: return@synchronized
+            save(snapshot)
+        } catch (e: Exception) {
+            log("chat seen marks not saved: ${e.javaClass.simpleName}")
+        }
     }
 
     private fun load(): HashMap<String, Double> {

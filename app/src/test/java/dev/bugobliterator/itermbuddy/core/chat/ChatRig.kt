@@ -67,8 +67,8 @@ internal class ChatRig(
     newUuid: () -> UUID = Random(SEED).let { random -> { UUID(random.nextLong(), random.nextLong()) } },
     /** The phone's wall clock, for a sent message's `sentDate`. */
     wallClockMillis: () -> Long = { MAC_TIME.toLong() + test.testScheduler.currentTime },
-    /** Whether conversations nobody collects are still snapshotted: tests read `conversation(id).value` directly. */
-    snapshotUncollected: Boolean = true,
+    /** Whether conversations nobody collects are still snapshotted: the app's false, unless a test reads `conversation(id).value` without collecting. */
+    snapshotUncollected: Boolean = false,
 ) {
     private val macKeys = newStaticKeyPair()
     private val code = PairingCode(macKeys.second, "chat-repository-test-pid", ORIGIN)
@@ -180,6 +180,9 @@ internal class ChatRig(
     /** Replaces the reply to `listChatsAndSessions`: the whole envelope, given the request ID. */
     @Volatile var listFrame: ((Long?) -> ByteArray)? = null
 
+    /** When set, `listChatsAndSessions` is never answered. */
+    @Volatile var withholdLists = false
+
     /** Each `listChatsAndSessions` reply is sent this much later (its own coroutine). */
     @Volatile var listHold: Duration? = null
 
@@ -214,6 +217,7 @@ internal class ChatRig(
         }
         mac.onRequestScripted("listChatsAndSessions") { envelope ->
             listRequests.incrementAndGet()
+            if (withholdLists) return@onRequestScripted
             val id = requestIDOf(envelope)
             // Built when it is sent, as the Mac's main actor does: AI turned off meanwhile lists no chats.
             val frame = { listFrame?.invoke(id) ?: envelope(listPayload("chatsAndSessions"), id) }

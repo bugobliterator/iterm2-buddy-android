@@ -54,12 +54,18 @@ class Transcript(
         private set
 
     init {
-        for (message in history) {
-            if (message.hidden) continue
-            val admitted = admitImages(message, keptImageBytes)
-            keptImageBytes += admitted.keptImageBytes()
-            indexByID.putIfAbsent(admitted.uniqueID, entries.size)
-            entries.add(admitted)
+        try {
+            for (message in history) {
+                if (message.hidden) continue
+                val admitted = admitImages(message, keptImageBytes)
+                keptImageBytes += admitted.keptImageBytes()
+                indexByID.putIfAbsent(admitted.uniqueID, entries.size)
+                entries.add(admitted)
+            }
+        } catch (e: Throwable) {
+            // Never built, never released by its owner: give back what it drew so far.
+            release()
+            throw e
         }
     }
 
@@ -238,17 +244,15 @@ class Transcript(
      */
     private fun admitImages(message: ChatMessage, alreadyKept: Long): ChatMessage {
         val body = message.body as? MessageBody.Multipart ?: return message
-        var remaining = budgets.maxTranscriptImageBytes - alreadyKept
-        // What every other transcript holds counts too; this one's own, beside [alreadyKept], is being replaced.
-        shared?.let { remaining = minOf(remaining, it.limitBytes - (it.heldBytes - keptImageBytes) - alreadyKept) }
+        var used = 0L
         var stripped = false
         val parts = body.parts.map { part ->
             val attachment = (part as? Subpart.AttachmentPart)?.attachment
             val file = attachment?.kind as? AttachmentKind.File
             if (attachment == null || file == null || file.keptByteCount == 0) return@map part
             val kept = file.keptByteCount
-            if (kept <= budgets.maxImageBytes && kept <= remaining) {
-                remaining -= kept
+            if (kept <= budgets.maxImageBytes && kept <= budgets.maxTranscriptImageBytes - alreadyKept - used && fitsShared(kept.toLong(), alreadyKept + used)) {
+                used += kept
                 part
             } else {
                 stripped = true
@@ -256,6 +260,20 @@ class Transcript(
             }
         }
         return if (stripped) message.copy(body = MessageBody.Multipart(parts)) else message
+    }
+
+    /**
+     * Whether [bytes] more fit the shared allowance beside [alreadyKept] of this transcript's
+     * (what every other transcript holds counts too; this one's own, beside [alreadyKept], is
+     * being replaced). When they do not, its owner is asked to make room first
+     * ([SharedImageAllowance.reclaim]).
+     */
+    private fun fitsShared(bytes: Long, alreadyKept: Long): Boolean {
+        val pool = shared ?: return true
+        fun free() = pool.limitBytes - (pool.heldBytes - keptImageBytes) - alreadyKept
+        if (bytes <= free()) return true
+        pool.reclaim(this, bytes - free())
+        return bytes <= free()
     }
 }
 
@@ -403,6 +421,13 @@ class SharedImageAllowance(val limitBytes: Long) {
     /** Bytes the transcripts drawing on this keep now. */
     var heldBytes: Long = 0
         internal set
+
+    /**
+     * Asked when a transcript ([requester]) needs [bytes] more than are free: its owner may
+     * release other transcripts to make room (the repository drops closed ones for an open one,
+     * least recently closed first). It must not touch [requester].
+     */
+    var reclaim: (requester: Transcript, bytes: Long) -> Unit = { _, _ -> }
 
     override fun toString(): String = "SharedImageAllowance(limitBytes=$limitBytes, heldBytes=$heldBytes)"
 }
