@@ -121,6 +121,36 @@ status stored?) and `it2 set-status --session <guid> --status probe` (does the s
 a status set without the hook?) in the session, and puts both answers and it2's stderr in the
 failure message.
 
+## The key-bytes probe
+
+On the owner's phone, `/` and `*` typed into Claude Code show nothing, while letters, digits,
+`.` and `,` do, and `echo /tmp/*` works in plain zsh. `RealIterm2KeyBytesTest` measures what
+reaches the program. It is a probe: it reports and does not assert on the bytes; it fails only
+when the rig broke (no connection, no `probe.env`, or the plain capture never started).
+
+`install-claude-code.sh` writes `$WORK_DIR/key-bytes/probe.env` (node, the repository), installs
+Claude Code (pinned in the script) globally with pnpm, letting its postinstall put the native
+binary in place, and seeds `~/.claude.json` (onboarding done, the probe's project trusted, the
+dummy key approved). The test types `bash key-probe.sh <probe.env> …` into the first terminal
+session for each mode:
+
+- `key-capture.mjs` (raw tty, every chunk logged as hex, the modes restored on exit) with no mode,
+  bracketed paste (`CSI ? 2004 h`), modifyOtherKeys 2 (`CSI > 4 ; 2 m`) and kitty flags 1, 3 and
+  31 (`CSI > N u`). It also logs the terminal's answer to `CSI ? u`.
+- Claude Code under `script -q -t 0 -r` (input and output with timestamps; `script -p` plays
+  `key-bytes-claude.rec` back), with a dummy key, `ANTHROPIC_BASE_URL` at a closed local port and
+  no nonessential traffic.
+
+It sends `a / * . 1 ? A ~ |` one at a time through the app's `InputSender` (`sendKey` text, the
+phone's path), then `pasteText` of `/*`, and `/` and `*` as real key presses from System Events
+(osascript; its error is reported if the runner does not allow it). In Claude Code it first sends
+`/` on the empty prompt (slash-command menu?) and erases it, by both paths, and ends with Return
+and Ctrl-C twice. The report, `key-bytes:` lines in the job log and `key-bytes-report.txt` in the
+diagnostics, gives per mode and character the bytes as hex and escapes, `sendKey` beside
+osascript, and for Claude Code the mode sequences it wrote and whether each character appeared in
+what it drew next (or the screen text, when it never reached its prompt). This probe prints
+terminal content: only the probe characters and Claude Code's UI in a throwaway CI terminal.
+
 ## Stage 3: Agent Chat on a fake model
 
 iTerm2's AI runs on `fake-model.mjs`, a local OpenAI Chat Completions server (Node built-ins only)
@@ -185,10 +215,11 @@ what was typed.
 | Seed iTerm2 | `seed-pairing.sh` | Writes the root-owned `EnableCompanionPairing` secure setting with sudo and sets the defaults (relay origin, an empty resolver for direct mode, the paired ID, the Claude watcher off, no tips or update prompts). It also puts the Mac private key and the phone public key in a CI keychain whose partition list names iTerm2's team. |
 | Seed AI | `seed-ai.sh` | Writes the root-owned `EnableAI` secure setting and the AI defaults (`UseRecommendedAIModel` off, one `AIManualModelConfigurations` entry for the fake model, `AiModel` naming it, the token budget `AiMaxTokens`/`AiResponseMaxTokens`), answers iTerm2's one-time AI prompts (model catalog updates, automatic terminal sharing, the safety-check migration), and reads them back typed. |
 | Seed the status profile | `seed-claude-status.sh` | Installs the `buddy-ci-status` Dynamic Profile (Subtitle `\(status)`) and makes it the default, turns on `EnableAPIServer` and `SetCookie`, writes the root-owned `disable-automation-auth` file, and checks the bundled it2. It continues on error: a failure here fails only `RealIterm2ClaudeStatusTest`. |
+| Install Claude Code | `install-claude-code.sh` | Writes the key-bytes probe's `probe.env`, installs the pinned Claude Code with pnpm and seeds `~/.claude.json`. It runs after the status probe and continues on error: without Claude Code the probe still runs its capture modes. |
 | Start the relay | `start-relay.sh` | Fetches the relay at `b8aa2f9` the way `scripts/relay-it.sh` does and makes a throwaway CA and a `localhost` certificate. It trusts the CA system-wide and starts the relay on `127.0.0.1:8787` (open mode, `RELAY_ORIGIN=https://localhost:8443`). Then it starts `tls-proxy.mjs` on `localhost:8443`. |
 | Start the fake model | `start-fake-model.sh` | Starts `fake-model.mjs` on `127.0.0.1:8790` and waits for `/health`. |
 | Launch iTerm2 | `launch-iterm2.sh` | Runs `open -a iTerm`, then waits for the relay to log `hello role=mac` (iTerm2 parked) and takes a screenshot. |
-| Test | `./gradlew realIterm2Test --tests …` | Runs stages 1 and 2, then, each in its own step that runs even when the ones before fail, the Claude Code status probe and stage 3, so a main thread that Agent Chat leaves blocked cannot fail the others. The phone connects to the relay directly at `ws://127.0.0.1:8787/` and signs for `https://localhost:8443`. |
+| Test | `./gradlew realIterm2Test --tests …` | Runs stages 1 and 2, then, each in its own step that runs even when the ones before fail, the Claude Code status probe, the key-bytes probe (which continues on error) and stage 3, so a main thread that Agent Chat leaves blocked cannot fail the others. The phone connects to the relay directly at `ws://127.0.0.1:8787/` and signs for `https://localhost:8443`. |
 | Diagnostics | `collect-diagnostics.sh` | Always runs. It collects screenshots, the relay, proxy and fake model logs, the companion and AI defaults, both secure settings, the status probe's defaults and files (the profile, `disable-automation-auth`, the API socket, it2), which seeded keychain items were migrated, both plugin lookups, the fake model's counts and captured request shape, iTerm2's unified log and crash reports. They are uploaded with the test reports as `real-iterm2-<run>-<attempt>`. |
 
 `dump-iterm2-state.sh <label>` prints, as text in the job log, what a screenshot would show:
