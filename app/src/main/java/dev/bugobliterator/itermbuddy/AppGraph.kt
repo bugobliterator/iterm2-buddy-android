@@ -10,6 +10,7 @@ import dev.bugobliterator.itermbuddy.core.chat.ChatMessage
 import dev.bugobliterator.itermbuddy.core.chat.ChatRepository
 import dev.bugobliterator.itermbuddy.core.chat.ChatSink
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolver
+import dev.bugobliterator.itermbuddy.core.chat.WorkgroupWatch
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
 import dev.bugobliterator.itermbuddy.core.sessions.TreeState
 import dev.bugobliterator.itermbuddy.core.sessions.clearOnUnpair
@@ -35,8 +36,10 @@ import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
@@ -44,6 +47,8 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * The app-scoped home objects (sessions and chats), as [wireHome] connects them:
@@ -66,6 +71,8 @@ import kotlinx.coroutines.launch
  *   session with [boundSessions], which probes it again on each chat link up and when the chat's
  *   binding changes in the list; [inlineImages] holds decoded inline images (48 MiB);
  * - [search], [chatSearch], [drafts], [chatDrafts] and [inputMemories] hold what the owner typed in the UI, app-scoped;
+ * - [watchWorkgroup] makes a workgroup view's [WorkgroupWatch], fed [foreground] (set by the
+ *   process lifecycle through [setForeground]) and whether [client] is connected;
  * - on every unpair (local, Mac-sent, or a re-scan), [navigator] is reset (closing the stream),
  *   [repository] and [chats] cleared (the chat repository clears its seen marks itself, on its
  *   consumer), the mentions, bound-session verdicts, icons and images forgotten, and the searches,
@@ -88,7 +95,33 @@ class HomeGraph(
     val inlineImages: ChatIconCache<ImageBitmap>,
     val chatDrafts: ChatDrafts,
     private val contentContext: CoroutineContext,
+    private val workgroupLog: (String) -> Unit = {},
 ) {
+    private val foregroundFlow = MutableStateFlow(true)
+
+    /** Whether the app is in the foreground (the process lifecycle's `ON_START`/`ON_STOP`). */
+    val foreground: StateFlow<Boolean> = foregroundFlow.asStateFlow()
+
+    /** The app came to the foreground, or left it: tells the chats and every workgroup watch. */
+    fun setForeground(foreground: Boolean) {
+        foregroundFlow.value = foreground
+        chats.setForeground(foreground)
+    }
+
+    /**
+     * A [WorkgroupWatch] for [workgroupID]'s view, polling every [pollInterval]. Its foreground and
+     * connection gates follow [foreground] and [client]'s state for as long as [scope] (the view's)
+     * lives; each change to connected is a new link, asked at once. The caller starts and stops it.
+     */
+    fun watchWorkgroup(scope: CoroutineScope, workgroupID: String, pollInterval: Duration = 5.seconds): WorkgroupWatch {
+        val watch = WorkgroupWatch(client, scope, workgroupID, pollInterval = pollInterval, log = workgroupLog)
+        watch.setForeground(foreground.value)
+        watch.setConnected(client.state.value is ClientState.Connected)
+        scope.launch { foreground.collect(watch::setForeground) }
+        scope.launch { client.state.map { it is ClientState.Connected }.distinctUntilChanged().collect(watch::setConnected) }
+        return watch
+    }
+
     /** Opens [chatID]'s conversation (a navigator push): subscribed, gate reopened, bound session probed. */
     fun openConversation(chatID: String) {
         chats.open(chatID)
@@ -139,7 +172,8 @@ private fun boundGuid(list: ChatListState, chatID: String): String? =
  * @param iconDecoder decodes chat icons (the app passes `BitmapImageDecoder`; tests decode nothing).
  * @param imageDecoder decodes inline images in conversations (likewise).
  * @param log for a failed unpair cleanup.
- * @param chatLog the mention resolver's diagnostics (counts and failure kinds only).
+ * @param chatLog the mention resolver's, bound-session probe's and workgroup watches' diagnostics
+ *   (IDs, counts and failure kinds only).
  * @param listContext where [HomeGraph.chatList] and conversations' content are computed.
  */
 fun wireHome(
@@ -203,7 +237,7 @@ fun wireHome(
     )
     return HomeGraph(
         client, controller, repository, chats, navigator, search, drafts, inputMemories, mentions, chatSearch, chatIcons, chatList,
-        boundSessions, inlineImages, chatDrafts, listContext,
+        boundSessions, inlineImages, chatDrafts, listContext, chatLog,
     )
 }
 

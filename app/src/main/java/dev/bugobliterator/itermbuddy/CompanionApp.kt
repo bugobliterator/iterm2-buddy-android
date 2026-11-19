@@ -57,7 +57,8 @@ import kotlin.time.Duration.Companion.seconds
  * client's chat sink, with its seen marks in [FileChatSeenStore]), and the
  * [SessionNavigator][dev.bugobliterator.itermbuddy.ui.SessionNavigator] that alone opens and
  * closes streams. Every unpair resets the navigator (stopping the stream) and clears the tree and
- * the chats. [ProcessLifecycleOwner] drives the controller and the chats: `ON_STOP` (the last
+ * the chats. [ProcessLifecycleOwner] drives the controller, the chats and the workgroup watches
+ * ([HomeGraph.setForeground]): `ON_STOP` (the last
  * activity stopped: lock, home, app switch) pauses the controller and makes no conversation
  * visible, and `ON_START` resumes both and kicks a reconnect ([CompanionClient.reconnectNow]); it
  * is debounced over configuration changes, so rotation neither pauses nor resumes.
@@ -231,13 +232,13 @@ class CompanionApp : Application() {
                     // Back in the app: do not wait out a grown backoff (up to 30 s) to reconnect.
                     home.client.reconnectNow()
                     home.controller.resume()
-                    home.chats.setForeground(true)
+                    home.setForeground(true)
                 }
 
                 override fun onStop(owner: LifecycleOwner) {
                     home.controller.pause()
                     // Locked or backgrounded: no conversation is visible, so a turn ending now is Done.
-                    home.chats.setForeground(false)
+                    home.setForeground(false)
                 }
             },
         )
