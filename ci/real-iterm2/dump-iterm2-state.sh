@@ -13,8 +13,10 @@
 #    window's text areas are not read. Accessibility is served by the app's main thread: "windows:
 #    0" while CGWindowList lists windows means the main thread is not running its run loop (a
 #    hang, not a modal: NSApplication.runModal keeps serving it).
-# 3. The main thread's stack (function names only): `sudo sample` for 2 s (iTerm2's hardened
-#    runtime refuses an unprivileged sample), else `sudo spindump`.
+# 3. The main thread's stack (function names only): `sudo sample` for 2 s, raw call graph (again
+#    with -mayDie when the first gives none), and `sudo spindump -onlyTarget`'s first thread.
+#    Also every other app's on-screen window and whether SecurityAgent runs: a keychain unlock
+#    prompt belongs to SecurityAgent, not to iTerm2, and blocks iTerm2's main thread silently.
 # 4. The last 10 minutes of iTerm2's unified log, filtered to AI, LLM, chat, URLSession, ATS,
 #    plugin and companion lines, with long quoted strings redacted and lines cut at 300 chars.
 #
@@ -74,15 +76,29 @@ printf '%s\n' "$windows" | while IFS='|' read -r id _ layer name _; do
     fi
 done
 
-say "--- AI defaults as iTerm2 sees them now (JSON)"
-exported="$WORK_DIR/iterm2-defaults-$safe_label.plist"
-if defaults export "$ITERM2_BUNDLE_ID" "$exported" 2>/dev/null; then
-    for key in UseRecommendedAIModel AiModel AIVendor AIEconomyModelName AIManualModelConfigurations AICustomHeadersEnabled; do
-        say "    $key = $(plutil -extract "$key" json -o - "$exported" 2>&1 | cut -c1-600)"
-    done
-    say "    NoSyncOllamaDiscoveredModels present: $(plutil -extract NoSyncOllamaDiscoveredModels json -o /dev/null "$exported" 2>/dev/null && echo yes || echo no)"
-    rm -f "$exported"
-fi
+say "--- other apps' on-screen windows above the desktop (a SecurityAgent keychain prompt shows here)"
+bounded 20 osascript -l JavaScript -e '
+ObjC.import("CoreGraphics");
+const list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, $.kCGNullWindowID)));
+const lines = [];
+for (const w of list || []) {
+  if (w.kCGWindowOwnerName === "iTerm2" || w.kCGWindowLayer < 0) continue;
+  const b = w.kCGWindowBounds || {};
+  lines.push(`${w.kCGWindowNumber} | ${w.kCGWindowOwnerName} pid ${w.kCGWindowOwnerPID} | layer ${w.kCGWindowLayer} | ${w.kCGWindowName === undefined ? "(no name)" : JSON.stringify(w.kCGWindowName)} | ${b.X},${b.Y} ${b.Width}x${b.Height}`);
+}
+lines.length ? lines.join("\n") : "none";
+' 2>&1 | sed 's/^/    /' | tee -a "$out"
+for agent in SecurityAgent coreautha UserNotificationCenter; do
+    agent_pid="$(pgrep -x "$agent" | head -n 1)"
+    say "    $agent: ${agent_pid:+running, pid $agent_pid}${agent_pid:-not running}"
+done
+say "    user keychain search list: $(security list-keychains -d user 2>&1 | tr -s ' \n' ' ')"
+
+say "--- AI defaults as iTerm2 holds them now (defaults read)"
+for key in UseRecommendedAIModel AiModel AIVendor AIEconomyModelName AICustomHeadersEnabled AIManualModelConfigurations; do
+    say "    $key = $(defaults read "$ITERM2_BUNDLE_ID" "$key" 2>&1 | tr -s ' \n' ' ' | cut -c1-700)"
+done
+say "    NoSyncOllamaDiscoveredModels present: $(defaults read "$ITERM2_BUNDLE_ID" NoSyncOllamaDiscoveredModels >/dev/null 2>&1 && echo yes || echo no)"
 
 say "--- windows, sheets and alerts (System Events): role | title, then texts and buttons of dialogs"
 bounded 40 osascript <<'APPLESCRIPT' 2>&1 | sed 's/^/    /' | tee -a "$out"
@@ -157,26 +173,36 @@ end timeout
 APPLESCRIPT
 
 say "--- main thread (function names only)"
+# The main thread is the call graph's first thread. While it is hung it is not draining the main
+# dispatch queue, so its header need not say com.apple.main-thread: print the call graph raw.
+call_graph() {
+    awk '/^Call graph:/ { graph = 1 } graph { print; if (++n >= 150) exit }' "$1" | cut -c1-220 | sed 's/^/    /' | tee -a "$out"
+}
 sample_file="$DIAGNOSTICS_DIR/iterm2-sample-$safe_label.txt"
-rm -f "$sample_file"
-if bounded 40 sudo -n /usr/bin/sample "$pid" 2 -file "$sample_file" > "$sample_file.err" 2>&1 && [[ -s "$sample_file" ]]; then
-    say "    (sudo sample, 2 s)"
-    awk '/^Call graph:/ { graph = 1; next }
-         graph && /^ *[0-9]+ Thread_/ { if (main) exit; if ($0 ~ /main-thread|DispatchQueue_1:/) main = 1 }
-         main { print; if (++n >= 90) exit }' "$sample_file" |
-        cut -c1-220 | sed 's/^/    /' | tee -a "$out"
-else
-    say "    sudo sample failed: $(tr '\n' ' ' < "$sample_file.err" | cut -c1-300)"
-    spin_file="$DIAGNOSTICS_DIR/iterm2-spindump-$safe_label.txt"
-    if bounded 150 sudo -n /usr/sbin/spindump "$pid" 2 -file "$spin_file" > "$spin_file.err" 2>&1 && [[ -s "$spin_file" ]]; then
-        sudo -n chmod a+r "$spin_file" 2>/dev/null
-        say "    (sudo spindump, 2 s)"
-        awk '/^ *Thread 0x/ { if (main) exit; if ($0 ~ /main-thread/) main = 1 }
-             main { print; if (++n >= 90) exit }' "$spin_file" |
-            cut -c1-220 | sed 's/^/    /' | tee -a "$out"
-    else
-        say "    sudo spindump failed: $(tr '\n' ' ' < "$spin_file.err" | cut -c1-300)"
+for options in "" "-mayDie"; do
+    rm -f "$sample_file"
+    # shellcheck disable=SC2086
+    bounded 45 sudo -n /usr/bin/sample "$pid" 2 $options -file "$sample_file" > "$sample_file.err" 2>&1
+    status=$?
+    say "    sudo sample $pid 2 ${options}: exit $status, $(wc -c < "$sample_file" 2>/dev/null | tr -d ' ' || echo 0) bytes; stderr: $(tr '\n' ' ' < "$sample_file.err" | cut -c1-300)"
+    if [[ -s "$sample_file" ]]; then
+        sudo -n chmod a+r "$sample_file" 2>/dev/null
+        call_graph "$sample_file"
+        grep -q '^Call graph:' "$sample_file" && break
+        say "    (no call graph; the file's first lines:)"
+        head -n 30 "$sample_file" | cut -c1-200 | sed 's/^/    /' | tee -a "$out"
     fi
+done
+spin_file="$DIAGNOSTICS_DIR/iterm2-spindump-$safe_label.txt"
+rm -f "$spin_file"
+bounded 180 sudo -n /usr/sbin/spindump "$pid" 3 -onlyTarget -file "$spin_file" > "$spin_file.err" 2>&1
+status=$?
+say "    sudo spindump $pid 3 -onlyTarget: exit $status; stderr: $(tr '\n' ' ' < "$spin_file.err" | cut -c1-300)"
+if [[ -s "$spin_file" ]]; then
+    sudo -n chmod a+r "$spin_file" 2>/dev/null
+    # The first thread listed is the main thread.
+    awk '/^ *Thread 0x/ { threads++ } threads == 1 { print; if (++n >= 120) exit }' "$spin_file" |
+        cut -c1-220 | sed 's/^/    /' | tee -a "$out"
 fi
 
 say "--- iTerm2 unified log, last 10 min, AI/chat/network/plugin/companion lines (last 250)"
