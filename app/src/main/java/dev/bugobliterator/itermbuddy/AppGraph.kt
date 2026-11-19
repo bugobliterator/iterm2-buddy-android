@@ -13,14 +13,20 @@ import dev.bugobliterator.itermbuddy.core.chat.DeleteFromOutcome
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolver
 import dev.bugobliterator.itermbuddy.core.chat.NewChatMode
 import dev.bugobliterator.itermbuddy.core.chat.WorkgroupWatch
+import dev.bugobliterator.itermbuddy.core.sessions.ClaudeStateTip
+import dev.bugobliterator.itermbuddy.core.sessions.ClaudeTipStore
+import dev.bugobliterator.itermbuddy.core.sessions.InMemoryClaudeTipStore
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTree
+import dev.bugobliterator.itermbuddy.core.sessions.SessionTreePoller
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
+import dev.bugobliterator.itermbuddy.core.sessions.showsClaudeState
 import dev.bugobliterator.itermbuddy.core.sessions.TreeState
 import dev.bugobliterator.itermbuddy.core.sessions.clearOnUnpair
 import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.core.stream.StreamInput
 import dev.bugobliterator.itermbuddy.core.stream.StreamLink
 import dev.bugobliterator.itermbuddy.core.stream.StreamSink
+import dev.bugobliterator.itermbuddy.ui.HomeDestination
 import dev.bugobliterator.itermbuddy.ui.HomeNavigator
 import dev.bugobliterator.itermbuddy.ui.LinkFloor
 import dev.bugobliterator.itermbuddy.ui.chats.ChatIconCache
@@ -103,11 +109,16 @@ import kotlin.time.Duration.Companion.seconds
  * - [watchWorkgroup] makes a [WorkgroupWatch], fed [foreground] (set by the process lifecycle
  *   through [setForeground]) and whether [client] is connected; the navigator keeps one per
  *   workgroup on its stacks ([workgroupWatch]), so a member's live view and Back do not reload it;
+ * - [sessionPoller] fetches the tree again every [sessionPollInterval] (4 s) while the Sessions
+ *   list is the destination shown, the app is in the foreground and [client] is connected: iTerm2
+ *   pushes no tree when a subtitle (Claude Code's `\(status)`) changes; [claudeTip] is the list's
+ *   one-line `\(status)` tip, shown once [client] has connected, gone for good once dismissed or
+ *   once a tree shows a Claude Code state;
  * - on every unpair (local, Mac-sent, or a re-scan), [navigator] is reset (closing the stream,
  *   the conversations and the workgroup watches), [repository] and [chats] cleared (the chat
  *   repository clears its seen marks itself, on its consumer), the shared chat contents reset
  *   ([clearShared]), the mentions, bound-session verdicts, icons and images forgotten, and the
- *   searches, drafts and input memories emptied.
+ *   searches, drafts and input memories emptied, and [claudeTip]'s dismissal forgotten.
  */
 class HomeGraph(
     private val scope: CoroutineScope,
@@ -127,11 +138,19 @@ class HomeGraph(
     private val contentContext: CoroutineContext,
     private val sharingStopMillis: Long = LIST_SHARING_STOP_MILLIS,
     private val workgroupLog: (String) -> Unit = {},
+    sessionPollInterval: Duration = SESSION_POLL_INTERVAL,
+    val claudeTip: ClaudeStateTip = ClaudeStateTip(InMemoryClaudeTipStore()),
 ) {
     private val foregroundFlow = MutableStateFlow(true)
 
     /** Whether the app is in the foreground (the process lifecycle's `ON_START`/`ON_STOP`). */
     val foreground: StateFlow<Boolean> = foregroundFlow.asStateFlow()
+
+    /**
+     * The Sessions list's poll of the tree, through [SessionTreeRepository.poll]. [wireHome] feeds
+     * its list and connection gates; [setForeground] its foreground gate.
+     */
+    val sessionPoller = SessionTreePoller(scope, repository::poll, sessionPollInterval)
 
     /** The workgroup watches of the workgroup views on the navigator's stacks, by workgroup ID. */
     private val workgroups = ConcurrentHashMap<String, StackedWorkgroup>()
@@ -256,6 +275,7 @@ class HomeGraph(
     fun setForeground(foreground: Boolean) {
         foregroundFlow.value = foreground
         chats.setForeground(foreground)
+        sessionPoller.setForeground(foreground)
     }
 
     /**
@@ -450,6 +470,8 @@ private fun boundGuid(list: ChatListState, chatID: String): String? =
  * @param listContext where [HomeGraph.chatList] and conversations' content are computed.
  * @param listSharingStopMillis how long the chat list and a conversation's content keep computing
  *   after their last collector leaves (a rotation's gap).
+ * @param sessionPollInterval how often the Sessions list fetches the tree again while shown.
+ * @param claudeTipStore where the Sessions list's `\(status)` tip keeps its dismissal.
  */
 fun wireHome(
     scope: CoroutineScope,
@@ -463,6 +485,8 @@ fun wireHome(
     chatLog: (String) -> Unit = {},
     listContext: CoroutineContext = Dispatchers.Default,
     listSharingStopMillis: Long = LIST_SHARING_STOP_MILLIS,
+    sessionPollInterval: Duration = SESSION_POLL_INTERVAL,
+    claudeTipStore: ClaudeTipStore = InMemoryClaudeTipStore(),
 ): HomeGraph {
     val sink = ForwardingStreamSink()
     val chatSink = ForwardingChatSink()
@@ -493,8 +517,21 @@ fun wireHome(
     val graph = HomeGraph(
         scope, client, controller, repository, chats, search, drafts, inputMemories, mentions, chatSearch, chatIcons,
         boundSessions, inlineImages, chatDrafts, listContext, listSharingStopMillis, chatLog,
+        sessionPollInterval, ClaudeStateTip(claudeTipStore),
     )
     val navigator = graph.navigator
+    // The Sessions list polls while it is the destination shown, on a live link.
+    val poller = graph.sessionPoller
+    scope.launch {
+        navigator.state.map { it.destination == HomeDestination.SessionList }.distinctUntilChanged().collect(poller::setVisible)
+    }
+    scope.launch { client.state.map { it is ClientState.Connected }.distinctUntilChanged().collect(poller::setConnected) }
+    // The `\(status)` tip: offered once a link came up, gone for good once a Claude Code state shows.
+    val tip = graph.claudeTip
+    scope.launch { client.state.filter { it is ClientState.Connected }.collect { tip.connected() } }
+    scope.launch {
+        repository.state.map { it is TreeState.Loaded && it.tree.showsClaudeState() }.distinctUntilChanged().filter { it }.collect { tip.statusSeen() }
+    }
     // A binding that changes in the list (or first appears there) is probed once; the open
     // conversations' claimed workgroups are named once the list carries them.
     scope.launch {
@@ -516,7 +553,7 @@ fun wireHome(
             // The navigator's reset also clears the graph's shared chat contents, under its lock.
             navigator::reset, graph.newChat::clear, repository::clear, chats::clear, mentions::clear, boundSessions::clear,
             chatIcons::clear, inlineImages::clear, search::clear, chatSearch::clear, drafts::clear, chatDrafts::clear,
-            inputMemories::clear,
+            inputMemories::clear, tip::clear,
         ),
         log,
     )
@@ -525,6 +562,9 @@ fun wireHome(
 
 /** The decoded inline images' shared bitmap budget (*Global Constraints*). */
 private const val INLINE_IMAGE_BUDGET_BYTES = 48 * 1024 * 1024
+
+/** How often the Sessions list fetches the tree again while shown (owner decision: about 4 s). */
+val SESSION_POLL_INTERVAL: Duration = 4.seconds
 
 /** How long [HomeGraph.chatList] keeps computing after its last collector (rotation) leaves. */
 const val LIST_SHARING_STOP_MILLIS = 5_000L

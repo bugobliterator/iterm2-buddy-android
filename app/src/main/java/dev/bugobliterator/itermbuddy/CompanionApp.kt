@@ -16,6 +16,7 @@ import dev.bugobliterator.itermbuddy.core.input.isInputTarget
 import dev.bugobliterator.itermbuddy.core.stream.BrowserDriver
 import dev.bugobliterator.itermbuddy.core.stream.SelectionDriver
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
+import dev.bugobliterator.itermbuddy.core.sessions.SharedPrefsClaudeTipStore
 import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.core.stream.fitToPhone
 import dev.bugobliterator.itermbuddy.store.KeystorePairingStore
@@ -203,6 +204,7 @@ class CompanionApp : Application() {
             imageDecoder = BitmapImageDecoder(resources.displayMetrics.widthPixels),
             log = { Log.w(TAG, it) },
             chatLog = { Log.i(CHAT_TAG, it) },
+            claudeTipStore = SharedPrefsClaudeTipStore(this),
         )
         input = InputSender(
             link = home.client,

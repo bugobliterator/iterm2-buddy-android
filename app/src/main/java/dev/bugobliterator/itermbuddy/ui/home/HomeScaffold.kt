@@ -77,6 +77,7 @@ import dev.bugobliterator.itermbuddy.ui.live.LiveSessionActions
 import dev.bugobliterator.itermbuddy.ui.live.LiveSessionScreen
 import dev.bugobliterator.itermbuddy.ui.live.LiveVideoSource
 import dev.bugobliterator.itermbuddy.ui.live.NoPersonalizedLearning
+import dev.bugobliterator.itermbuddy.ui.sessions.ClaudeStateTipRow
 import dev.bugobliterator.itermbuddy.ui.sessions.SessionListScreen
 import dev.bugobliterator.itermbuddy.ui.settings.SettingsScreen
 import dev.bugobliterator.itermbuddy.ui.settings.decoderRowText
@@ -106,6 +107,9 @@ interface HomeActions : LiveSessionActions {
 
     /** The session list's search; app-scoped, so opening a session and coming back keeps it. */
     fun setSearchQuery(query: String)
+
+    /** The owner dismissed the Sessions list's `\(status)` tip ([HomeModel.claudeTip]). */
+    fun dismissClaudeTip() {}
 }
 
 /**
@@ -114,7 +118,8 @@ interface HomeActions : LiveSessionActions {
  * the controller's adopted stream (its config stays for Fit while a window is too large).
  * [destination], [tab], [navKey] and [stackKeys] come from one
  * [NavState][dev.bugobliterator.itermbuddy.ui.NavState], so they always agree; [chatsAttention]
- * is the Chats item's dot. The chat destinations collect their own flows from [ChatsHome].
+ * is the Chats item's dot; [claudeTip] shows the Sessions list's `\(status)` tip. The chat
+ * destinations collect their own flows from [ChatsHome].
  */
 data class HomeModel(
     val state: ClientState,
@@ -135,6 +140,7 @@ data class HomeModel(
     val chatsAttention: Boolean = false,
     val navKey: String = "",
     val stackKeys: Set<String> = emptySet(),
+    val claudeTip: Boolean = false,
 )
 
 /**
@@ -462,6 +468,7 @@ private fun SessionsHome(model: HomeModel, actions: HomeActions, modifier: Modif
         // The IME padding keeps the list's last rows above the keyboard while searching.
         Column(modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
             HomeBanners(model, actions)
+            if (model.claudeTip) ClaudeStateTipRow(onDismiss = actions::dismissClaudeTip)
             SessionSearchField(
                 query = query,
                 onQueryChange = actions::setSearchQuery,
