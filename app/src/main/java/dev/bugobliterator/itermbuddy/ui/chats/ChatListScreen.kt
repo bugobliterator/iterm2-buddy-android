@@ -193,7 +193,8 @@ class ChatListPresenter(private val iconRef: (ByteBuffer?) -> ChatIconRef? = ::c
 /**
  * The Chats root's content from the repository's [snapshot] and [macRevision], the search
  * [query] and the mention [resolutions], computed on [context] (Default: never the main thread)
- * by one [ChatListPresenter], and only when it changes.
+ * by one [ChatListPresenter], and only when it changes. Pass [presenter] to keep the row models
+ * across collections (one collection at a time); else each collection makes its own.
  */
 fun chatListContents(
     snapshot: Flow<ChatListSnapshot>,
@@ -202,8 +203,9 @@ fun chatListContents(
     resolutions: Flow<Map<String, MentionResolution>>,
     context: CoroutineContext = Dispatchers.Default,
     iconRef: (ByteBuffer?) -> ChatIconRef? = ::chatIconRef,
+    presenter: ChatListPresenter? = null,
 ): Flow<ChatListContent> = flow {
-    val presenter = ChatListPresenter(iconRef)
+    val presenter = presenter ?: ChatListPresenter(iconRef)
     emitAll(
         combine(snapshot, macRevision, query, resolutions) { shot, revision, text, names ->
             presenter.present(shot.list, shot.rows, shot.aiAvailable, revision, text, names)

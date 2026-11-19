@@ -13,6 +13,7 @@ import dev.bugobliterator.itermbuddy.ui.chats.NewChatStatus
 import dev.bugobliterator.itermbuddy.ui.conversation.ChatDrafts
 import dev.bugobliterator.itermbuddy.ui.conversation.ConversationActions
 import dev.bugobliterator.itermbuddy.ui.conversation.ConversationContent
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
@@ -23,7 +24,10 @@ import kotlinx.coroutines.flow.StateFlow
  */
 interface ChatsHome {
     /** The Chats root's content. */
-    val chatList: StateFlow<ChatListContent>
+    val chatList: Flow<ChatListContent>
+
+    /** [chatList]'s value now: the last one computed (Loading after an unpair), for the first frame. */
+    fun chatListNow(): ChatListContent
 
     /** The chat search, app-scoped. */
     val chatQuery: StateFlow<String>

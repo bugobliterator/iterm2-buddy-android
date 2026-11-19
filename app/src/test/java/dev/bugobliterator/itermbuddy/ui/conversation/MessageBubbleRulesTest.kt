@@ -256,7 +256,7 @@ class MessageBubbleRulesTest {
         val navigator = HomeNavigator(openStream = { opened += it }, closeStream = {}, openChat = {}, closeChat = {}, setVisibleChat = {}, macRevision = { 15 })
         navigator.openSession(target.session, target.title)
         assertEquals(listOf(rawGuid), opened.map { it.guid })
-        val destination = navigator.destination.value as HomeDestination.LiveSession
+        val destination = navigator.state.value.destination as HomeDestination.LiveSession
         assertEquals(rawGuid, destination.session.guid)
         assertEquals("Fix flaky widget test", destination.title)
     }

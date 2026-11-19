@@ -201,8 +201,12 @@ enum class DeleteFromOutcome {
 /** A chat-list row: the Mac's entry, the agent's state and whether it moved since the owner looked. */
 data class ChatRow(val entry: ChatListEntry, val state: AgentState, val unread: Boolean)
 
-/** A chat link up as the home sees it: its [generation] ([ChatRepository.linkGeneration]) and the hello's [aiAvailable]. */
-data class ChatLinkUp(val generation: Long, val aiAvailable: Boolean)
+/**
+ * The chat link and AI as the home's navigation sees them ([ChatRepository.availability]): the
+ * link's [generation] ([ChatRepository.linkGeneration]), whether AI is on now, and how many
+ * times it has turned off on a link ([aiOffs], growing for the process's life).
+ */
+data class ChatAvailability(val generation: Long, val aiAvailable: Boolean, val aiOffs: Long)
 
 /**
  * The chat list, its rows and AI availability as one value, published together, so a reader
@@ -367,15 +371,21 @@ class ChatRepository(
      */
     val linkGeneration: StateFlow<Long> = linkGenerationFlow.asStateFlow()
 
-    private val lastLinkUpFlow = MutableStateFlow<ChatLinkUp?>(null)
+    private val availabilityFlow = MutableStateFlow<ChatAvailability?>(null)
 
     /**
-     * The latest chat link up the repository accepted, with the hello's `aiAvailable`: set as
-     * [linkGeneration] is bumped (after it), so a reader woken by a link up reads that link's AI
-     * flag, which [aiAvailable] and [listSnapshot] carry only from the next publish. The home
-     * chooses its default tab from the first one. Null before the first link.
+     * What the home's navigation follows, as one ordered value: the current chat link's
+     * generation, whether AI is on now (the hello's flag at a link up, then each
+     * `aiAvailabilityChanged`), and how many times AI has turned off on a link so far. It changes
+     * on each link up (once [linkGeneration] holds the new generation) and on each AI flip, in the
+     * consumer's order, so a reader that misses values in between still sees every link up (the
+     * generation grows) and every AI-off (the count grows). Null before the first link and after
+     * [clear]; the count and the generation never go back.
      */
-    val lastLinkUp: StateFlow<ChatLinkUp?> = lastLinkUpFlow.asStateFlow()
+    val availability: StateFlow<ChatAvailability?> = availabilityFlow.asStateFlow()
+
+    /** How many times AI turned off on a link (`aiAvailabilityChanged(false)`), for [availability]. */
+    private var aiOffs = 0L
 
     private val aiFlow = MutableStateFlow(true)
 
@@ -1070,7 +1080,7 @@ class ChatRepository(
         cost = LinkCost(up.linkId, nowMillis())
         log("chat link up ${up.linkId}: revision ${up.macRevision}, ai ${up.aiAvailable}")
         linkGenerationFlow.value += 1
-        lastLinkUpFlow.value = ChatLinkUp(linkGenerationFlow.value, ai)
+        availabilityFlow.value = ChatAvailability(linkGenerationFlow.value, ai, aiOffs)
         if (ai) requestList()
         planNeeded = true
     }
@@ -1520,6 +1530,8 @@ class ChatRepository(
         if (!ai) return
         log("chat AI is off on the Mac")
         ai = false
+        aiOffs++
+        availabilityFlow.value = ChatAvailability(linkGenerationFlow.value, aiAvailable = false, aiOffs)
         for (chatID in subscriptions.subscribedChats) tracker.onUnsubscribed(chatID)
         subscriptions.aiDropped()
         failedThisLink.clear()
@@ -1530,6 +1542,7 @@ class ChatRepository(
         if (ai) return
         log("chat AI is on on the Mac")
         ai = true
+        availabilityFlow.value = ChatAvailability(linkGenerationFlow.value, aiAvailable = true, aiOffs)
         // AM:4470-4486: the list was empty and every subscription was dropped; neither comes back by itself.
         requestList()
         planNeeded = true
@@ -1637,6 +1650,7 @@ class ChatRepository(
         lastWanted = emptyList()
         ai = true
         aiFlow.value = true
+        availabilityFlow.value = null
         revisionFlow.value = null
         timer?.cancel()
         timer = null

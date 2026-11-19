@@ -33,9 +33,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -78,6 +80,7 @@ import dev.bugobliterator.itermbuddy.ui.sessions.SessionListScreen
 import dev.bugobliterator.itermbuddy.ui.settings.SettingsScreen
 import dev.bugobliterator.itermbuddy.ui.settings.decoderRowText
 import dev.bugobliterator.itermbuddy.ui.showsBottomBar
+import dev.bugobliterator.itermbuddy.ui.workgroup.WorkgroupFallback
 import dev.bugobliterator.itermbuddy.ui.workgroup.WorkgroupRoute
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -107,9 +110,10 @@ interface HomeActions : LiveSessionActions {
 /**
  * Everything the home shows, collected by the activity from app-scoped flows. [video] is read by
  * the live view and Settings themselves (its stats change with every frame); [activeStream] is
- * the controller's adopted stream (its config stays for Fit while a window is too large). [tab]
- * is the selected tab and [chatsAttention] the Chats item's dot. The chat destinations collect
- * their own flows from [ChatsHome].
+ * the controller's adopted stream (its config stays for Fit while a window is too large).
+ * [destination], [tab], [navKey] and [stackKeys] come from one
+ * [NavState][dev.bugobliterator.itermbuddy.ui.NavState], so they always agree; [chatsAttention]
+ * is the Chats item's dot. The chat destinations collect their own flows from [ChatsHome].
  */
 data class HomeModel(
     val state: ClientState,
@@ -128,6 +132,8 @@ data class HomeModel(
     val macStatus: MacStatus? = null,
     val tab: HomeTab = HomeTab.SESSIONS,
     val chatsAttention: Boolean = false,
+    val navKey: String = "",
+    val stackKeys: Set<String> = emptySet(),
 )
 
 /**
@@ -166,14 +172,30 @@ fun HomeScaffold(model: HomeModel, actions: HomeActions, chats: ChatsHome, modif
         view.keepScreenOn = keepOn
         onDispose { view.keepScreenOn = false }
     }
+    // Each stacked destination keeps its saved UI state (scroll positions) while it is covered or
+    // its tab is not shown, and loses it once popped.
+    val saved = rememberSaveableStateHolder()
+    val provided = remember { HashSet<String>() }
+    LaunchedEffect(model.stackKeys) {
+        val gone = provided - model.stackKeys
+        for (key in gone) saved.removeState(key)
+        provided -= gone
+    }
+    val key = model.navKey
     if (!root) {
-        HomeDestinationView(destination, model, actions, chats, modifier)
+        saved.SaveableStateProvider(key) {
+            provided += key
+            HomeDestinationView(destination, model, actions, chats, modifier)
+        }
         return
     }
     Column(modifier = modifier.fillMaxSize()) {
         // The bar below takes the navigation bar's inset; the root's own scaffold must not too.
         Box(modifier = Modifier.weight(1f).fillMaxWidth().consumeWindowInsets(WindowInsets.navigationBars)) {
-            HomeDestinationView(destination, model, actions, chats, Modifier)
+            saved.SaveableStateProvider(key) {
+                provided += key
+                HomeDestinationView(destination, model, actions, chats, Modifier)
+            }
         }
         if (!WindowInsets.isImeVisible) HomeBottomBar(model.tab, model.chatsAttention, actions::selectTab)
     }
@@ -205,15 +227,20 @@ private fun HomeDestinationView(destination: HomeDestination, model: HomeModel, 
         }
         HomeDestination.NewChat -> NewChat(model, actions, chats, modifier)
         is HomeDestination.Conversation -> Conversation(destination.chatID, model, chats, modifier)
-        is HomeDestination.Workgroup -> chats.workgroupWatch(destination.workgroupID)?.let { watch ->
-            WorkgroupRoute(
-                watch = watch,
-                fallbackTitle = destination.title,
-                tree = chats::currentTree,
-                onBack = actions::back,
-                onOpenSession = actions::openSession,
-                modifier = modifier,
-            )
+        is HomeDestination.Workgroup -> {
+            val watch = chats.workgroupWatch(destination.workgroupID)
+            if (watch == null) {
+                WorkgroupFallback(destination.title, actions::back, modifier)
+            } else {
+                WorkgroupRoute(
+                    watch = watch,
+                    fallbackTitle = destination.title,
+                    tree = chats::currentTree,
+                    onBack = actions::back,
+                    onOpenSession = actions::openSession,
+                    modifier = modifier,
+                )
+            }
         }
         is HomeDestination.LiveSession -> LiveSession(destination.session, destination.title, model, actions, modifier)
         is HomeDestination.BrowserSession -> BrowserSession(destination.session, destination.title, model, actions, modifier)
@@ -247,7 +274,8 @@ private fun HomeBottomBar(tab: HomeTab, chatsAttention: Boolean, onSelect: (Home
 /** The Chats tab's root: [ChatListScreen] with the home's status, menu and banners. */
 @Composable
 private fun ChatsRoot(model: HomeModel, actions: HomeActions, chats: ChatsHome, modifier: Modifier) {
-    val content by chats.chatList.collectAsStateWithLifecycle()
+    // The first frame shows the list as last computed (a visit away keeps it), never a blank Loading.
+    val content by chats.chatList.collectAsStateWithLifecycle(initialValue = chats.chatListNow())
     val query by chats.chatQuery.collectAsStateWithLifecycle()
     ChatListScreen(
         content = content,

@@ -55,7 +55,7 @@ class UnpairCleanupTest {
         rig.navigator.selectTab(HomeTab.SESSIONS)
         rig.navigator.openSession(session, session.name)
         runCurrent()
-        assertEquals(HomeDestination.LiveSession(session, session.name), rig.navigator.destination.value)
+        assertEquals(HomeDestination.LiveSession(session, session.name), rig.navigator.state.value.destination)
         assertEquals(SessionsRig.ORIGIN, rig.client.relayOrigin.value)
         assertTrue(rig.controller.state.value is LiveViewState.Live)
         assertNotNull(rig.controller.activeStream.value)
@@ -80,8 +80,8 @@ class UnpairCleanupTest {
         assertNull("nothing stored, so no relay to show", rig.client.relayOrigin.value)
         assertEquals(TreeState.Loading, rig.repository.state.value)
         // The home starts again on the Chats root, in its connecting state.
-        assertEquals(HomeTab.CHATS, rig.navigator.tab.value)
-        assertEquals(HomeDestination.ChatList, rig.navigator.destination.value)
+        assertEquals(HomeTab.CHATS, rig.navigator.state.value.tab)
+        assertEquals(HomeDestination.ChatList, rig.navigator.state.value.destination)
         assertEquals(LiveViewState.Closed, rig.controller.state.value)
         assertNull(rig.controller.activeStream.value)
         assertEquals(emptyMap<Long, TileState>(), rig.controller.historyTiles.tiles.value)
@@ -161,7 +161,7 @@ class UnpairCleanupTest {
         runCurrent()
         rig.navigator.back()
         runCurrent()
-        assertEquals(HomeDestination.SessionList, rig.navigator.destination.value)
+        assertEquals(HomeDestination.SessionList, rig.navigator.state.value.destination)
         assertEquals("vim", rig.graph.search.query.value)
         assertFalse("the holder never shows the query", "vim" in rig.graph.search.toString())
     }
