@@ -8,6 +8,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -45,14 +47,15 @@ sealed interface WorkgroupState {
  * 59-61, 135-145`); the Mac has no workgroup push. Android adds polling (owner decision): while
  * [start]ed, in the foreground ([setForeground]) and connected ([setConnected]), it asks with
  * `fetchWorkgroupInfo` (`HB:2164-2200`; not AI-gated, `HB:2312`) every [pollInterval], counted from
- * the end of the previous request. Backgrounded or disconnected, polling pauses; it resumes with one
- * request at once. A link coming back ([setConnected] true after false) asks at once as well; if a
- * request from the old link is still out, it asks again as soon as that one ends, so the answer shown
- * is the new link's. [start] and [refresh] ask whatever the gates say (a refresh while disconnected
- * fails fast and shows as such).
+ * the end of the previous request. Backgrounded, polling pauses and resumes with one request at
+ * once. [setConnected] is only a gate: down, polling pauses; up again, the poll timer restarts. The
+ * new link itself is [linkUp] (the chat link's generation), which asks at once: if the gates are shut
+ * it asks as soon as they open, and if a request from the old link is still out it asks again as
+ * soon as that one ends, so the answer shown is the new link's. [start] and [refresh] ask whatever
+ * the gates say (a refresh while disconnected fails fast and shows as such).
  *
  * At most one request is out at a time; anything that wants one while it is out waits for it (only a
- * link up asks again afterwards). A failure keeps the last [WorkgroupState.Shown] marked `stale`, or
+ * link up asks again afterwards; a refresh still shows the list refreshing). A failure keeps the last [WorkgroupState.Shown] marked `stale`, or
  * shows [WorkgroupFailure.UNREACHABLE] when nothing was ever read; polling goes on. The Mac's
  * `unknownSession` error ("That workgroup no longer exists.") shows [WorkgroupFailure.GONE] and ends
  * every request until the next [start] (a new appearance of the view).
@@ -85,8 +88,11 @@ class WorkgroupWatch(
     /** The wait for the next poll, if any. */
     private var pollWait: Job? = null
 
-    /** A link came up while [inFlight] was out on the old one: ask again when it ends. */
-    private var askAgain = false
+    /** A link came up that no request has been sent on yet: ask when the gates and [inFlight] allow. */
+    private var linkUpPending = false
+
+    /** Test seam: runs in the poll timer after its wait, before it takes the lock. */
+    internal var beforeTimerLock: () -> Unit = {}
 
     /** Bumped by [stop], so an answer from before it is dropped. */
     private var generation = 0L
@@ -97,7 +103,6 @@ class WorkgroupWatch(
             if (started) return
             started = true
             gone = false
-            if (stateFlow.value is WorkgroupState.Failed) stateFlow.value = WorkgroupState.Loading
             askLocked()
         }
     }
@@ -108,7 +113,7 @@ class WorkgroupWatch(
             if (!started) return
             started = false
             generation++
-            askAgain = false
+            linkUpPending = false
             pollWait?.cancel()
             pollWait = null
             inFlight?.cancel()
@@ -118,11 +123,19 @@ class WorkgroupWatch(
         }
     }
 
-    /** Pull to refresh, or Try again: asks now unless a request is already out. */
+    /**
+     * Pull to refresh, or Try again: asks now. With a request already out, no second one is sent,
+     * but a shown list is marked refreshing until that answer lands.
+     */
     fun refresh() {
         synchronized(lock) {
-            if (!started || gone || inFlight != null) return
-            stateFlow.value = when (val now = stateFlow.value) {
+            if (!started || gone) return
+            val now = stateFlow.value
+            if (inFlight != null) {
+                if (now is WorkgroupState.Shown) stateFlow.value = now.copy(refreshing = true)
+                return
+            }
+            stateFlow.value = when (now) {
                 is WorkgroupState.Shown -> now.copy(refreshing = true)
                 else -> WorkgroupState.Loading
             }
@@ -140,18 +153,31 @@ class WorkgroupWatch(
     }
 
     /**
-     * Whether the link to the Mac is up. Polling pauses while it is down; a change to up is a new
-     * link, asked at once (or right after a request still out on the old one).
+     * Whether the client is connected: a gate only. Polling pauses while it is down; when it is up
+     * again, a [linkUp] that came meanwhile asks at once, else the poll timer restarts.
      */
     fun setConnected(connected: Boolean) {
         synchronized(lock) {
-            val linkUp = connected && !this.connected
+            val reopened = connected && !this.connected
             this.connected = connected
-            if (!connected) {
-                cancelPollLocked()
-            } else if (linkUp && pollingLocked()) {
-                if (inFlight != null) askAgain = true else askLocked()
+            when {
+                !connected -> cancelPollLocked()
+                !reopened || !pollingLocked() || inFlight != null -> Unit
+                linkUpPending -> askLocked()
+                else -> schedulePollLocked()
             }
+        }
+    }
+
+    /**
+     * A new link is up: asks at once, or as soon as the gates open, or right after a request still
+     * out on the old link ends.
+     */
+    fun linkUp() {
+        synchronized(lock) {
+            if (!started || gone) return
+            linkUpPending = true
+            if (pollingLocked() && inFlight == null) askLocked()
         }
     }
 
@@ -165,10 +191,15 @@ class WorkgroupWatch(
     private fun askLocked() {
         if (!started || gone || inFlight != null) return
         cancelPollLocked()
+        linkUpPending = false
+        // A failure on screen gives way to Loading while it is asked again.
+        if (stateFlow.value is WorkgroupState.Failed) stateFlow.value = WorkgroupState.Loading
         val sentIn = generation
         // Started lazily so it is registered before it can finish.
         val job = scope.launch(start = CoroutineStart.LAZY) { ask(sentIn) }
         inFlight = job
+        // A job that never runs (the scope is already cancelled) or is cancelled must not stay "in flight".
+        job.invokeOnCompletion { synchronized(lock) { if (inFlight === job) inFlight = null } }
         job.start()
     }
 
@@ -176,14 +207,20 @@ class WorkgroupWatch(
         cancelPollLocked()
         if (!pollingLocked()) return
         val sentIn = generation
-        pollWait = scope.launch {
+        // Started lazily so it is registered before it can run.
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             delay(pollInterval)
+            beforeTimerLock()
             synchronized(lock) {
-                if (generation != sentIn) return@launch
+                // Cancelled or replaced while it waited for the lock (backgrounded, disconnected, stopped,
+                // or another timer started): it must neither ask nor start a second loop.
+                if (!isActive || pollWait !== coroutineContext.job || generation != sentIn || !pollingLocked()) return@launch
                 pollWait = null
                 askLocked()
             }
         }
+        pollWait = job
+        job.start()
     }
 
     private suspend fun ask(sentIn: Long) {
@@ -209,7 +246,7 @@ class WorkgroupWatch(
                 Outcome.Gone -> {
                     log("Workgroup $workgroupID is gone")
                     gone = true
-                    askAgain = false
+                    linkUpPending = false
                     cancelPollLocked()
                     stateFlow.value = WorkgroupState.Failed(WorkgroupFailure.GONE, retryable = false)
                     return
@@ -222,12 +259,9 @@ class WorkgroupWatch(
                     }
                 }
             }
-            if (askAgain) {
-                askAgain = false
-                if (pollingLocked()) {
-                    askLocked()
-                    return
-                }
+            if (linkUpPending && pollingLocked()) {
+                askLocked()
+                return
             }
             schedulePollLocked()
         }

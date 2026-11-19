@@ -109,9 +109,10 @@ class HomeGraph(
     }
 
     /**
-     * A [WorkgroupWatch] for [workgroupID]'s view, polling every [pollInterval]. Its foreground and
-     * connection gates follow [foreground] and [client]'s state for as long as [scope] (the view's)
-     * lives; each change to connected is a new link, asked at once. The caller starts and stops it.
+     * A [WorkgroupWatch] for [workgroupID]'s view, polling every [pollInterval]. For as long as
+     * [scope] (the view's) lives, its foreground gate follows [foreground], its connection gate
+     * whether [client] is connected, and each chat link up ([ChatRepository.linkGeneration]) is a
+     * [WorkgroupWatch.linkUp]. The caller starts and stops it.
      */
     fun watchWorkgroup(scope: CoroutineScope, workgroupID: String, pollInterval: Duration = 5.seconds): WorkgroupWatch {
         val watch = WorkgroupWatch(client, scope, workgroupID, pollInterval = pollInterval, log = workgroupLog)
@@ -119,6 +120,9 @@ class HomeGraph(
         watch.setConnected(client.state.value is ClientState.Connected)
         scope.launch { foreground.collect(watch::setForeground) }
         scope.launch { client.state.map { it is ClientState.Connected }.distinctUntilChanged().collect(watch::setConnected) }
+        // The generation only grows, so a reconnect too fast to see as a state change is still a link up.
+        val generationAtStart = chats.linkGeneration.value
+        scope.launch { chats.linkGeneration.filter { it > generationAtStart }.collect { watch.linkUp() } }
         return watch
     }
 
