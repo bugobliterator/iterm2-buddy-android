@@ -62,6 +62,23 @@ sealed interface TranscriptItem {
 fun offersDeleteFromHere(item: TranscriptItem): Boolean =
     item is TranscriptItem.Bubble && item.fromUser && (item.echo == null || item.echo == EchoState.DELIVERED)
 
+/**
+ * The keys of [items] that offer "Delete From Here": [offersDeleteFromHere], and no send of this
+ * phone's at or after it still [EchoState.SENDING] (the Mac appends a publish after it returns, so
+ * one in flight could land after the truncate and come back;
+ * [dev.bugobliterator.itermbuddy.core.chat.ChatRepository.deleteFrom] refuses it too).
+ */
+fun deleteFromHereOffers(items: List<TranscriptItem>): Set<String> {
+    val offered = HashSet<String>()
+    var sendingAfter = false
+    for (index in items.indices.reversed()) {
+        val item = items[index]
+        if (item is TranscriptItem.Bubble && item.echo == EchoState.SENDING) sendingAfter = true
+        if (!sendingAfter && offersDeleteFromHere(item)) offered += item.key
+    }
+    return offered
+}
+
 /** The typing indicator shows while the agent is working (not while it waits on the owner). */
 fun showsTyping(state: AgentState?): Boolean = state == AgentState.WORKING
 

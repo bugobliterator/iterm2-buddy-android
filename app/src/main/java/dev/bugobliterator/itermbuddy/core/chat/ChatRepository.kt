@@ -168,6 +168,36 @@ sealed interface CreateOutcome {
     data class Failed(val retryable: Boolean) : CreateOutcome
 }
 
+/** What [ChatRepository.deleteFrom] did. */
+enum class DeleteFromOutcome {
+    /** Truncated here and `deleteMessages` sent. */
+    DELETED,
+
+    /** The Mac's revision is below 12: it would ignore the request (`AM:2678-2680`). */
+    MAC_TOO_OLD,
+
+    /** No link to the Mac. */
+    NOT_CONNECTED,
+
+    /** AI is off on the Mac, which drops `deleteMessages` (`HB:2289-2293`, `HB:2325`). */
+    AI_UNAVAILABLE,
+
+    /** The chat is not listed (deleted) or has no history on this link. */
+    NOT_LOADED,
+
+    /** No message with that ID in the transcript. */
+    NOT_FOUND,
+
+    /** Not one of the owner's own messages. */
+    NOT_OWN_MESSAGE,
+
+    /**
+     * A message of this phone's in the suffix is still [EchoState.SENDING]: the Mac appends a
+     * publish asynchronously, so it could land after the truncate and come back.
+     */
+    SEND_IN_FLIGHT,
+}
+
 /** A chat-list row: the Mac's entry, the agent's state and whether it moved since the owner looked. */
 data class ChatRow(val entry: ChatListEntry, val state: AgentState, val unread: Boolean)
 
@@ -280,9 +310,12 @@ data class ChatTimeouts(
  * is fetched (an Android addition), and an unsolicited `error` while a delete is pending (a
  * refused delete, `HB:458-470`) fetches it at once; its text is never shown or logged. [setMuted]
  * flips the entry at once and sends `setChatMuted`; the Mac persists it without a push
- * (`CompanionChatMuteRegistry.swift:28-38`), so the flag stands until the next list. [deleteFrom]
- * truncates an open transcript from one of the owner's own messages at once and sends
- * `deleteMessages` (Mac revision 12 and later); the `messagesRemoved` echo removes nothing more.
+ * (`CompanionChatMuteRegistry.swift:28-38`), so the flip is held over every list until one carries
+ * it (a list in flight before the flip would undo it), or until the link ends or [clear]. A list
+ * that still holds a chat deleted moments ago (sent before the Mac deleted it) does not end the
+ * delete's wait. [deleteFrom] truncates an open transcript from one of the owner's own messages at
+ * once and sends `deleteMessages` (Mac revision 12 and later), never while a send of this phone's
+ * in the suffix is still out; the `messagesRemoved` echo removes nothing more.
  *
  * [clear] (unpair) drops everything, ignores every input from links up to then, and clears the
  * [OversizedChats] and [seen] on the consumer, so no mark lands after the wipe.
@@ -477,6 +510,9 @@ class ChatRepository(
 
     /** Chats deleted on this link with no list since: a list fetch is due if none comes. */
     private val pendingDeletes = HashSet<String>()
+
+    /** Mute flips sent on this link and not yet carried by a list: held over every list until then. */
+    private val pendingMutes = HashMap<String, Boolean>()
     private var deleteWait: Job? = null
 
     /** Names the scheduled delete wait; a superseded one's post does nothing. */
@@ -664,8 +700,8 @@ class ChatRepository(
 
     /**
      * Mutes or unmutes [chatID] (`AM:2748-2765`): its entry flips at once and `setChatMuted` is
-     * sent (not AI-gated on the Mac, `HB:481-486`). Nothing changes while there is no link, since
-     * nothing would reach the Mac.
+     * sent (not AI-gated on the Mac, `HB:481-486`); the flip is held over lists that do not carry
+     * it yet. Nothing changes while there is no link, since nothing would reach the Mac.
      */
     fun setMuted(chatID: String, muted: Boolean) = post { setMutedNow(chatID, muted) }
 
@@ -673,11 +709,14 @@ class ChatRepository(
      * Delete From Here (`AM:2637-2669`): removes [messageID]'s message and every one after it from
      * [chatID]'s transcript at once and sends their IDs in `deleteMessages`. Only for the owner's
      * own message ([Participant.USER]), only when the Mac's revision is 12 or later (an older Mac
-     * ignores it, `AM:2678-2680`) and the chat is sendable (a history on this link, AI on, listed).
-     * Returns whether it truncated and sent.
+     * ignores it, `AM:2678-2680`), when the chat is sendable (a history on this link, AI on,
+     * listed), and when no send of this phone's in the suffix is still [EchoState.SENDING]. Says
+     * what it did.
      */
-    suspend fun deleteFrom(chatID: String, messageID: String): Boolean =
-        onConsumer(false, false) { result -> result.complete(deleteFromNow(chatID, messageID)) }
+    suspend fun deleteFrom(chatID: String, messageID: String): DeleteFromOutcome =
+        onConsumer(DeleteFromOutcome.NOT_CONNECTED, DeleteFromOutcome.NOT_CONNECTED) { result ->
+            result.complete(deleteFromNow(chatID, messageID))
+        }
 
     /**
      * Runs [block] on the consumer and returns what it completes; a dead consumer does nothing and
@@ -734,9 +773,7 @@ class ChatRepository(
         val reply = (outcome as? Outcome.Replied)?.reply
         return when {
             reply is MacMessage.ChatCreated -> {
-                // Its reply went through the sink first and was inserted there; again here
-                // (idempotent) in case that link has gone since.
-                if (currentLink == linkId) chatCreated(reply.entry)
+                // The reply reached the sink ahead of this outcome and was inserted there (chatCreated).
                 log("chat ${reply.entry.chat.id} created")
                 CreateOutcome.Created(reply.entry.chat.id)
             }
@@ -808,35 +845,46 @@ class ChatRepository(
         if (listed != null && entryByID[chatID]?.muted != muted && chatID in entryByID) {
             setEntries(listed.map { if (it.chat.id == chatID) it.copy(muted = muted) else it })
         }
+        pendingMutes[chatID] = muted
         log("chat $chatID: muted $muted")
         launchSend(PhoneMessage.SetChatMuted(chatID, muted), linkId)
     }
 
-    private fun deleteFromNow(chatID: String, messageID: String): Boolean {
+    private fun deleteFromNow(chatID: String, messageID: String): DeleteFromOutcome {
         val revision = revisionFlow.value ?: 0
         if (revision < MESSAGE_DELETION_REVISION) {
             log("chat $chatID: Delete From Here needs Mac revision $MESSAGE_DELETION_REVISION, not $revision")
-            return false
+            return DeleteFromOutcome.MAC_TOO_OLD
         }
         val refused = whyNotSendable(chatID)
         if (refused != null) {
             log("chat $chatID: Delete From Here refused: $refused")
-            return false
+            return when (refused) {
+                NotSendableReason.NOT_CONNECTED -> DeleteFromOutcome.NOT_CONNECTED
+                NotSendableReason.AI_UNAVAILABLE -> DeleteFromOutcome.AI_UNAVAILABLE
+                else -> DeleteFromOutcome.NOT_LOADED
+            }
         }
         val linkId = checkNotNull(currentLink)
         val conversation = checkNotNull(conversations[chatID])
         val transcript = checkNotNull(conversation.transcript)
         val index = transcript.indexOf(messageID)
-        if (index < 0) return false
+        if (index < 0) return DeleteFromOutcome.NOT_FOUND
         val message = transcript[index]
         if (message.author != Participant.USER || message.hidden) {
             log("chat $chatID: Delete From Here is only for the owner's own messages")
-            return false
+            return DeleteFromOutcome.NOT_OWN_MESSAGE
         }
         // A suffix, in the transcript's order: the Mac truncates from the earliest it holds (CLM:253-281).
         val ids = transcript.suffixFrom(messageID)
-        transcript.removeAll(ids.toSet())
         val sent = echoes[chatID]
+        // The Mac appends a publish after it returns (HB:1812-1823): one still out could land after
+        // the truncate and come back, so wait for it.
+        if (sent != null && ids.any { sent[it]?.state == EchoState.SENDING }) {
+            log("chat $chatID: Delete From Here waits for a send in flight")
+            return DeleteFromOutcome.SEND_IN_FLIGHT
+        }
+        transcript.removeAll(ids.toSet())
         if (sent != null) {
             // Sends of this phone's in the suffix go with it: none is put back by a later history.
             for (id in ids) if (sent.remove(id) != null) forgetOwnSend(chatID, id)
@@ -846,7 +894,7 @@ class ChatRepository(
         conversation.snapshotAtMillis = null
         log("chat $chatID: deleting ${ids.size} messages from ${message.uniqueID}")
         launchSend(PhoneMessage.DeleteMessages(chatID, ids), linkId)
-        return true
+        return DeleteFromOutcome.DELETED
     }
 
     // Sending
@@ -1049,8 +1097,9 @@ class ChatRepository(
         }
         subscriptions = ChatSubscriptions(oversized)
         tracker.onLinkDown()
-        // The next link fetches the list anyway.
+        // The next link fetches the list anyway, and its list is the Mac's word on mutes.
         endDeleteWait()
+        pendingMutes.clear()
         currentLink = null
         listInFlight = false
         log("chat link $linkId down: ${cost.subscribes} subscribes, ${cost.histories} histories, ${cost.bytes} bytes")
@@ -1213,9 +1262,14 @@ class ChatRepository(
             return
         }
         val previous = entries
-        setEntries(newEntries)
-        // Any list now says what the Mac holds: a pending delete needs no fetch of its own.
-        if (pendingDeletes.isNotEmpty()) endDeleteWait()
+        setEntries(withPendingMutes(newEntries))
+        if (pendingDeletes.isNotEmpty()) {
+            // A list without the deleted chats says the Mac deleted them: no fetch of its own. One
+            // that still holds them may predate the delete: the wait goes on (a refusal comes as
+            // an error and fetches at once).
+            pendingDeletes.retainAll(entryByID.keys)
+            if (pendingDeletes.isEmpty()) endDeleteWait()
+        }
         listOnThisLink = true
         listFailed = false
         listGeneration++
@@ -1257,7 +1311,27 @@ class ChatRepository(
     }
 
     /** A chat that is gone: its cached transcript, activity, marks and too-large mark go (`AM:2242-2254`). */
+    /**
+     * [newEntries] with this link's pending mute flips held over them; a flip the list carries is
+     * no longer pending (the Mac persisted it).
+     */
+    private fun withPendingMutes(newEntries: List<ChatListEntry>): List<ChatListEntry> {
+        if (pendingMutes.isEmpty()) return newEntries
+        return newEntries.map { entry ->
+            val wanted = pendingMutes[entry.chat.id]
+            when {
+                wanted == null -> entry
+                entry.muted == wanted -> {
+                    pendingMutes -= entry.chat.id
+                    entry
+                }
+                else -> entry.copy(muted = wanted)
+            }
+        }
+    }
+
     private fun forgetChat(chatID: String) {
+        pendingMutes -= chatID
         leftWhileOpen -= chatID
         tracker.forget(chatID)
         seen.forget(chatID)
@@ -1545,6 +1619,7 @@ class ChatRepository(
         previousModified.clear()
         echoes.clear()
         endDeleteWait()
+        pendingMutes.clear()
         lastWanted = emptyList()
         ai = true
         aiFlow.value = true

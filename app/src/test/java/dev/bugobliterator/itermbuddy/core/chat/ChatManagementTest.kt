@@ -11,18 +11,26 @@ import dev.bugobliterator.itermbuddy.ui.chats.NewChatStatus
 import dev.bugobliterator.itermbuddy.ui.conversation.ConversationContent
 import dev.bugobliterator.itermbuddy.ui.conversation.ConversationPresenter
 import dev.bugobliterator.itermbuddy.ui.conversation.TranscriptItem
+import dev.bugobliterator.itermbuddy.ui.conversation.WAIT_FOR_SEND_TEXT
+import dev.bugobliterator.itermbuddy.ui.conversation.deleteFromHereOffers
+import dev.bugobliterator.itermbuddy.ui.conversation.deleteFromRefusalText
 import dev.bugobliterator.itermbuddy.ui.conversation.offersDeleteFromHere
 import dev.bugobliterator.itermbuddy.ui.conversation.transcriptItems
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
+import dev.bugobliterator.itermbuddy.core.chat.ChatRig.Companion.envelope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -243,12 +251,12 @@ class ChatManagementTest {
         rig.repository.open(SAMPLE)
         settle()
         val before = rig.shown(SAMPLE).messages.map { it.uniqueID }
-        assertTrue(rig.repository.deleteFrom(SAMPLE, OWN_COMMAND.lowercase()))
+        assertEquals(DeleteFromOutcome.DELETED, rig.repository.deleteFrom(SAMPLE, OWN_COMMAND.lowercase()))
         runCurrent()
         assertEquals(sample("delete-messages"), rig.received("deleteMessages").single())
         assertEquals("truncated at once", before.takeWhile { it != OWN_COMMAND }, rig.shown(SAMPLE).messages.map { it.uniqueID })
         // A message no longer there truncates nothing more.
-        assertFalse(rig.repository.deleteFrom(SAMPLE, OWN_COMMAND))
+        assertEquals(DeleteFromOutcome.NOT_FOUND, rig.repository.deleteFrom(SAMPLE, OWN_COMMAND))
         runCurrent()
         assertEquals(1, rig.received("deleteMessages").size)
     }
@@ -260,7 +268,7 @@ class ChatManagementTest {
         settle()
         val before = rig.shown(SAMPLE).messages.size
         assertFalse(content(rig, 11).deletesFromHere)
-        assertFalse(rig.repository.deleteFrom(SAMPLE, OWN_COMMAND))
+        assertEquals(DeleteFromOutcome.MAC_TOO_OLD, rig.repository.deleteFrom(SAMPLE, OWN_COMMAND))
         settle()
         assertTrue(rig.received("deleteMessages").isEmpty())
         assertEquals(before, rig.shown(SAMPLE).messages.size)
@@ -273,7 +281,7 @@ class ChatManagementTest {
         rig.repository.open(SAMPLE)
         settle()
         val shown = rig.shown(SAMPLE)
-        assertFalse("the agent's reply", rig.repository.deleteFrom(SAMPLE, AGENT_REPLY))
+        assertEquals("the agent's reply", DeleteFromOutcome.NOT_OWN_MESSAGE, rig.repository.deleteFrom(SAMPLE, AGENT_REPLY))
         settle()
         assertTrue(rig.received("deleteMessages").isEmpty())
         assertEquals(shown.messages.size, rig.shown(SAMPLE).messages.size)
@@ -281,6 +289,7 @@ class ChatManagementTest {
         // Offered on the owner's own bubbles only: not the agent's, notices or request cards.
         val items = transcriptItems(shown.messages, typing = false)
         val offered = items.filter(::offersDeleteFromHere).map { it.key }
+        assertEquals(offered.toSet(), deleteFromHereOffers(items))
         val own = items.filter { it is TranscriptItem.Bubble && it.fromUser }.map { it.key }
         assertTrue(offered.isNotEmpty())
         assertEquals(own, offered)
@@ -299,7 +308,7 @@ class ChatManagementTest {
         val rig = connected(SAMPLE)
         rig.repository.open(SAMPLE)
         settle()
-        assertTrue(rig.repository.deleteFrom(SAMPLE, OWN_COMMAND))
+        assertEquals(DeleteFromOutcome.DELETED, rig.repository.deleteFrom(SAMPLE, OWN_COMMAND))
         settle()
         val truncated = rig.shown(SAMPLE).messages.map { it.uniqueID }
         // The echo names the suffix plus a hidden row the phone never held, twice.
@@ -311,6 +320,195 @@ class ChatManagementTest {
         rig.reconnect()
         settle()
         assertTrue(rig.shown(SAMPLE).messages.any { it.uniqueID == OWN_COMMAND })
+    }
+
+    // Follow-up edges
+
+    private fun draft(text: String): MentionDraft = MentionDraft.EMPTY.applyEdit(0, 0, text)
+
+    /** Pushes `chatListChanged` with [chats] and every entry's `muted` set to [muted]. */
+    private suspend fun ChatRig.pushListMuted(muted: Boolean) {
+        val payload = listPayload("chatListChanged")
+        val body = payload.getValue("chatListChanged").jsonObject
+        val entries = body.getValue("chats").jsonArray.map { JsonObject(it.jsonObject + ("muted" to JsonPrimitive(muted))) }
+        mac.sendRaw(envelope(JsonObject(mapOf("chatListChanged" to JsonObject(body + ("chats" to JsonArray(entries))))), null))
+    }
+
+    @Test
+    fun createTimesOut() = runTest {
+        val rig = connected(A)
+        rig.mac.onRequestScripted("createChat") { }
+        val outcome = async { rig.repository.create(NewChatMode.Orchestrator) }
+        advanceTimeBy(15.seconds - 1.milliseconds)
+        runCurrent()
+        assertFalse("still waiting", outcome.isCompleted)
+        advanceTimeBy(2.milliseconds)
+        runCurrent()
+        assertEquals(CreateOutcome.Failed(retryable = true), outcome.await())
+        assertEquals(listOf(A), rig.listedIDs())
+    }
+
+    @Test
+    fun typedAiUnavailableReplyToCreateTurnsAiOff() = runTest {
+        val rig = connected(A)
+        rig.mac.onRequestScripted("createChat") { envelope ->
+            rig.mac.sendMessage(FakeChatMac.samplePayload("error-ai-unavailable.json"), requestIDOf(envelope))
+        }
+        assertEquals(CreateOutcome.Failed(retryable = false), rig.repository.create(NewChatMode.Orchestrator))
+        settle()
+        assertFalse(rig.repository.aiAvailable.value)
+        assertEquals(ChatListState.AiUnavailable, rig.repository.list.value)
+    }
+
+    @Test
+    fun deleteWaitEndsOnLinkDownAndUnpairWithoutRefetch() = runTest {
+        val rig = connected(SESSION_CHAT, B)
+        rig.repository.delete(SESSION_CHAT)
+        runCurrent()
+        val lists = rig.listRequests.get()
+        rig.reconnect()
+        settle()
+        assertEquals("only the new link's own fetch", lists + 1, rig.listRequests.get())
+        advanceTimeBy(10.seconds)
+        runCurrent()
+        assertEquals(lists + 1, rig.listRequests.get())
+
+        rig.repository.delete(B)
+        runCurrent()
+        rig.repository.clear()
+        advanceTimeBy(10.seconds)
+        runCurrent()
+        assertEquals(lists + 1, rig.listRequests.get())
+        assertFalse(rig.logs.toString(), rig.logs.any { "fetching the chat list after" in it })
+    }
+
+    @Test
+    fun staleListDuringPendingDeleteKeepsTheWait() = runTest {
+        val rig = connected(SESSION_CHAT, B)
+        val lists = rig.listRequests.get()
+        rig.repository.delete(SESSION_CHAT)
+        runCurrent()
+        // A list sent before the Mac deleted it still holds it: it shows, as the Mac said.
+        rig.pushList()
+        advanceTimeBy(1.seconds)
+        runCurrent()
+        assertEquals(listOf(SESSION_CHAT, B), rig.listedIDs())
+        assertEquals(lists, rig.listRequests.get())
+        // The Mac has deleted it but pushes nothing: the wait still fetches the list.
+        rig.chats = listOf(B to MAC_TIME)
+        advanceTimeBy(2.seconds + 1.milliseconds)
+        runCurrent()
+        assertEquals(lists + 1, rig.listRequests.get())
+        settle()
+        assertEquals(listOf(B), rig.listedIDs())
+    }
+
+    @Test
+    fun deleteFromWaitsForASendInFlight() = runTest {
+        val rig = connected(SAMPLE)
+        rig.repository.open(SAMPLE)
+        settle()
+        assertEquals(SendOutcome.Sent, rig.repository.send(SAMPLE, draft("after the command")))
+        runCurrent()
+        val shown = rig.shown(SAMPLE)
+        val before = shown.messages.map { it.uniqueID }
+        // The echo is still out: no ⋯ at or before it, and a confirmed delete is refused.
+        val items = transcriptItems(shown.messages, typing = false, echoes = shown.echoes)
+        assertTrue(deleteFromHereOffers(items).isEmpty())
+        val refused = rig.repository.deleteFrom(SAMPLE, OWN_COMMAND)
+        assertEquals(DeleteFromOutcome.SEND_IN_FLIGHT, refused)
+        assertEquals(WAIT_FOR_SEND_TEXT, deleteFromRefusalText(refused))
+        assertNull(deleteFromRefusalText(DeleteFromOutcome.DELETED))
+        settle()
+        assertTrue(rig.received("deleteMessages").isEmpty())
+        assertEquals(before, rig.shown(SAMPLE).messages.map { it.uniqueID })
+
+        // Its echo came back: the suffix, the echo included, goes.
+        rig.echo(rig.publishes().single())
+        settle()
+        val echoed = rig.shown(SAMPLE)
+        assertTrue(OWN_COMMAND in deleteFromHereOffers(transcriptItems(echoed.messages, typing = false, echoes = echoed.echoes)))
+        assertEquals(DeleteFromOutcome.DELETED, rig.repository.deleteFrom(SAMPLE, OWN_COMMAND))
+        runCurrent()
+        val ids = rig.received("deleteMessages").single().getValue("payload").jsonObject.getValue("deleteMessages")
+            .jsonObject.getValue("messageIDs").jsonArray.map { (it as JsonPrimitive).content }
+        assertEquals(before.dropWhile { it != OWN_COMMAND }, ids)
+    }
+
+    @Test
+    fun suffixEchoesAreDroppedAndNotPutBackByAHistory() = runTest {
+        val rig = connected(SAMPLE)
+        rig.repository.open(SAMPLE)
+        settle()
+        assertEquals(SendOutcome.Sent, rig.repository.send(SAMPLE, draft("never echoed")))
+        // No echo within the timeout: not delivered, so no longer in flight.
+        advanceTimeBy(11.seconds)
+        runCurrent()
+        assertEquals(EchoState.NOT_DELIVERED, rig.shown(SAMPLE).echoes.values.single())
+        assertEquals(DeleteFromOutcome.DELETED, rig.repository.deleteFrom(SAMPLE, OWN_COMMAND))
+        settle()
+        assertTrue(rig.shown(SAMPLE).echoes.isEmpty())
+        // The next history (on a new link) lacks it: nothing comes back as "Not delivered".
+        rig.reconnect()
+        settle()
+        val after = rig.shown(SAMPLE)
+        assertTrue(after.echoes.isEmpty())
+        assertTrue(after.messages.none { (it.body as? MessageBody.PlainText)?.text == "never echoed" })
+    }
+
+    @Test
+    fun deleteFromIsRefusedWithAiOffAndOffline() = runTest {
+        val rig = connected(SAMPLE)
+        rig.repository.open(SAMPLE)
+        settle()
+        val before = rig.shown(SAMPLE).messages.size
+        rig.chatMac.flipAi(false)
+        settle()
+        assertEquals(DeleteFromOutcome.AI_UNAVAILABLE, rig.repository.deleteFrom(SAMPLE, OWN_COMMAND))
+        rig.mac.stop()
+        settle()
+        assertEquals(DeleteFromOutcome.NOT_CONNECTED, rig.repository.deleteFrom(SAMPLE, OWN_COMMAND))
+        settle()
+        assertTrue(rig.received("deleteMessages").isEmpty())
+        assertEquals(before, rig.shown(SAMPLE).messages.size)
+    }
+
+    @Test
+    fun muteOfflineDoesNothing() = runTest {
+        val rig = connected(SESSION_CHAT)
+        rig.mac.stop()
+        settle()
+        rig.repository.setMuted(SESSION_CHAT, false)
+        settle()
+        assertEquals(true, rig.entry(SESSION_CHAT).muted)
+        assertTrue(rig.received("setChatMuted").isEmpty())
+    }
+
+    @Test
+    fun staleListDoesNotUndoAMuteFlip() = runTest {
+        val rig = connected(SESSION_CHAT, B)
+        rig.repository.setMuted(SESSION_CHAT, false)
+        runCurrent()
+        // A list from before the Mac persisted it still says muted: the flip stands.
+        rig.pushListMuted(true)
+        settle()
+        assertEquals(false, rig.entry(SESSION_CHAT).muted)
+        assertEquals("the others are the Mac's", true, rig.entry(B).muted)
+        // A list carrying the flip ends the override; the Mac's later word is applied.
+        rig.pushListMuted(false)
+        settle()
+        assertEquals(false, rig.entry(SESSION_CHAT).muted)
+        rig.pushListMuted(true)
+        settle()
+        assertEquals(true, rig.entry(SESSION_CHAT).muted)
+
+        // A link down drops the override too: the new link's list is the Mac's word.
+        rig.repository.setMuted(SESSION_CHAT, false)
+        runCurrent()
+        assertEquals(false, rig.entry(SESSION_CHAT).muted)
+        rig.reconnect()
+        settle()
+        assertEquals(true, rig.entry(SESSION_CHAT).muted)
     }
 
     @Test
