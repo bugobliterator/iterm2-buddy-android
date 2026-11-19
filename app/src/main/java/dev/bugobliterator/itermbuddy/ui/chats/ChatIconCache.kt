@@ -64,7 +64,8 @@ fun chatIconRef(bytes: ByteBuffer?): ChatIconRef? {
  * by [ChatIconRef.key], so the same icon in the next list value, or on another chat, is not
  * decoded again. [load] decodes on [decodeContext] (Default; never the caller's thread, so never
  * the main thread). Decoded images are kept least recently used first out under [maxBytes] of
- * decoded size (2 MiB by default, *Global Constraints*: about 32 icons decoded at 128 px). An
+ * decoded size (2 MiB by default, *Global Constraints*: at least 32 icons, each decoded at most
+ * [MAX_ICON_SIDE_PX] on its longer side, [iconDecodeSidePx]). An
  * icon the decoder cannot read, or one larger than the whole budget, is remembered as such and
  * shows the default glyph: never an exception, never a second decode.
  *
@@ -199,8 +200,8 @@ class ChatIconCache<T : Any>(
 
 /**
  * The app's decoder: `BitmapFactory`, sampled and then scaled so the longer side is at most
- * [targetSidePx] (the row's 44 dp in pixels; about 128): a huge PNG never becomes a huge bitmap,
- * and a 128 px ARGB icon is 64 KiB. Not unit-tested (Android only).
+ * [targetSidePx] (the row's 44 dp in pixels, capped at [MAX_ICON_SIDE_PX]: [iconDecodeSidePx]): a
+ * huge PNG never becomes a huge bitmap, and a 128 px ARGB icon is 64 KiB. Not unit-tested (Android only).
  */
 class BitmapImageDecoder(private val targetSidePx: Int = 128) : ImageBytesDecoder<ImageBitmap> {
     override fun decode(bytes: ByteBuffer): DecodedImage<ImageBitmap>? {
@@ -229,3 +230,15 @@ class BitmapImageDecoder(private val targetSidePx: Int = 128) : ImageBytesDecode
         return DecodedImage(bitmap.asImageBitmap(), bitmap.allocationByteCount)
     }
 }
+
+/** The longest side a chat icon is decoded to: 128 px ARGB is 64 KiB, so the 2 MiB cache holds 32. */
+const val MAX_ICON_SIDE_PX = 128
+
+/**
+ * The side a chat icon is decoded to for a screen of [density]: the row's 44 dp in pixels, never
+ * more than [MAX_ICON_SIDE_PX] (a denser screen upscales a little rather than blow the budget).
+ */
+fun iconDecodeSidePx(density: Float): Int = minOf((ICON_SIDE_DP * density).roundToInt(), MAX_ICON_SIDE_PX)
+
+/** The chat row's icon size ([ChatRowView]). */
+private const val ICON_SIDE_DP = 44

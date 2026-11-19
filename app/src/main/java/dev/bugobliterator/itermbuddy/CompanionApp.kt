@@ -20,6 +20,7 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.core.stream.fitToPhone
 import dev.bugobliterator.itermbuddy.store.KeystorePairingStore
 import dev.bugobliterator.itermbuddy.ui.chats.BitmapImageDecoder
+import dev.bugobliterator.itermbuddy.ui.chats.iconDecodeSidePx
 import dev.bugobliterator.itermbuddy.ui.live.ComposerDrafts
 import dev.bugobliterator.itermbuddy.ui.live.LiveInputMemories
 import dev.bugobliterator.itermbuddy.video.HevcVideoOutput
@@ -43,7 +44,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -195,8 +195,8 @@ class CompanionApp : Application() {
                     log = { Log.i(CHAT_TAG, it) },
                 )
             },
-            // The row shows icons at 44 dp: decode them to that size in pixels.
-            iconDecoder = BitmapImageDecoder((44 * resources.displayMetrics.density).roundToInt()),
+            // The row shows icons at 44 dp: decode them to that size in pixels, at most 128.
+            iconDecoder = BitmapImageDecoder(iconDecodeSidePx(resources.displayMetrics.density)),
             // Inline images show at most the screen's width: decode them no larger.
             imageDecoder = BitmapImageDecoder(resources.displayMetrics.widthPixels),
             log = { Log.w(TAG, it) },

@@ -129,7 +129,8 @@ class ChatListPresenter(private val iconRef: (ByteBuffer?) -> ChatIconRef? = ::c
 
     /**
      * AI off comes first, whatever list is kept (iOS checks it first,
-     * `IOS/Screens/HomeView.swift:16-19`); then the list's state. Empty is decided from the
+     * `IOS/Screens/HomeView.swift:16-19`); then the list's state. AI off, Loading (an unpair
+     * included) and Failed forget the kept row models. Empty is decided from the
      * list's entries; while [rows] do not cover them (never, from one snapshot) it shows Loading.
      * Then the rows [filterChatRows] keeps, in the Mac's order.
      */
@@ -141,6 +142,10 @@ class ChatListPresenter(private val iconRef: (ByteBuffer?) -> ChatIconRef? = ::c
         query: String,
         resolutions: Map<String, MentionResolution>,
     ): ChatListContent {
+        if (!aiAvailable || list !is ChatListState.Loaded) {
+            // No rows to keep: what was shown (titles, snippets, icons) is not held past it.
+            previous = emptyMap()
+        }
         if (!aiAvailable) return ChatListContent.AiOff
         return when (list) {
             ChatListState.Loading -> ChatListContent.Loading

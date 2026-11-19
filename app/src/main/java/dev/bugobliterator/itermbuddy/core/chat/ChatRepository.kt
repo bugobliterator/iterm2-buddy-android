@@ -201,6 +201,9 @@ enum class DeleteFromOutcome {
 /** A chat-list row: the Mac's entry, the agent's state and whether it moved since the owner looked. */
 data class ChatRow(val entry: ChatListEntry, val state: AgentState, val unread: Boolean)
 
+/** A chat link up as the home sees it: its [generation] ([ChatRepository.linkGeneration]) and the hello's [aiAvailable]. */
+data class ChatLinkUp(val generation: Long, val aiAvailable: Boolean)
+
 /**
  * The chat list, its rows and AI availability as one value, published together, so a reader
  * never sees a new list with the previous rows. [toString] shows counts only.
@@ -363,6 +366,16 @@ class ChatRepository(
      * change even when it missed the link's states in between, so it never misses a reconnect.
      */
     val linkGeneration: StateFlow<Long> = linkGenerationFlow.asStateFlow()
+
+    private val lastLinkUpFlow = MutableStateFlow<ChatLinkUp?>(null)
+
+    /**
+     * The latest chat link up the repository accepted, with the hello's `aiAvailable`: set as
+     * [linkGeneration] is bumped (after it), so a reader woken by a link up reads that link's AI
+     * flag, which [aiAvailable] and [listSnapshot] carry only from the next publish. The home
+     * chooses its default tab from the first one. Null before the first link.
+     */
+    val lastLinkUp: StateFlow<ChatLinkUp?> = lastLinkUpFlow.asStateFlow()
 
     private val aiFlow = MutableStateFlow(true)
 
@@ -1057,6 +1070,7 @@ class ChatRepository(
         cost = LinkCost(up.linkId, nowMillis())
         log("chat link up ${up.linkId}: revision ${up.macRevision}, ai ${up.aiAvailable}")
         linkGenerationFlow.value += 1
+        lastLinkUpFlow.value = ChatLinkUp(linkGenerationFlow.value, ai)
         if (ai) requestList()
         planNeeded = true
     }
