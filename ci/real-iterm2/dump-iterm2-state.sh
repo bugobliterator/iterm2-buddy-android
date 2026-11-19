@@ -95,7 +95,7 @@ done
 say "    user keychain search list: $(security list-keychains -d user 2>&1 | tr -s ' \n' ' ')"
 
 say "--- AI defaults as iTerm2 holds them now (defaults read)"
-for key in UseRecommendedAIModel AiModel AIVendor AIEconomyModelName AICustomHeadersEnabled AIManualModelConfigurations; do
+for key in UseRecommendedAIModel AiModel AiMaxTokens AiResponseMaxTokens AIVendor AIEconomyModelName AICustomHeadersEnabled AIManualModelConfigurations; do
     say "    $key = $(defaults read "$ITERM2_BUNDLE_ID" "$key" 2>&1 | tr -s ' \n' ' ' | cut -c1-700)"
 done
 say "    NoSyncOllamaDiscoveredModels present: $(defaults read "$ITERM2_BUNDLE_ID" NoSyncOllamaDiscoveredModels >/dev/null 2>&1 && echo yes || echo no)"
