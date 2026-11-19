@@ -58,6 +58,9 @@ FAKE_MODEL_PORT="8790"
 # iTerm2's manual model points here, with no credential (AIModelCredential.none).
 FAKE_MODEL_URL="http://127.0.0.1:${FAKE_MODEL_PORT}/v1/chat/completions"
 FAKE_MODEL_NAME="buddy-ci-fake-model"
+# iTerm2 probes the built-in Ollama endpoint, localhost:11434, whenever it reads its model list
+# (LLMMetadata.swift:543-564, 627); fake-model.mjs answers that probe with no models.
+FAKE_MODEL_OLLAMA_PORT="11434"
 # iTerm2 only accepts an https origin and has no trust override, so it goes through the TLS
 # proxy. The relay signs joins against this exact string (RELAY_ORIGIN).
 RELAY_ORIGIN="https://localhost:${TLS_PROXY_PORT}"
