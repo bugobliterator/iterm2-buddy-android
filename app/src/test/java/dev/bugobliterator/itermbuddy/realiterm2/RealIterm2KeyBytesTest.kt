@@ -41,22 +41,26 @@ import org.junit.Test
  * (node, the repository, Claude Code). For each mode the test types
  * `bash ci/real-iterm2/key-probe.sh <probe.env> …` into the first terminal session and waits for
  * the program to be ready:
- * - **capture modes**: `key-capture.mjs` with no mode, bracketed paste, modifyOtherKeys 2 and
- *   kitty flags 1, 3 and 31; it logs every chunk its raw tty reads;
+ * - **capture modes**: `key-capture.mjs` with no mode, bracketed paste, modifyOtherKeys 2,
+ *   kitty flags 1, 3 and 31, and Claude Code's own pair, kitty flags 5 with modifyOtherKeys 2;
+ *   it logs every chunk its raw tty reads;
  * - **Claude Code** under `script -r`, which records the tty's input and output; ready once its
  *   prompt footer shows.
  *
- * Then it sends each of [PROBE_CHARS] alone through the app's own [InputSender] (`sendKey`
- * text, no modifiers: the phone's path), waiting after each for the bytes to arrive, then
- * `pasteText` of [PASTE] (slash, star), and, for a baseline from a real key press, `/` and `*` pressed by System
- * Events, once as `keystroke` and once as a US key code, after waiting for iTerm2 to be frontmost
- * (osascript; the frontmost app and osascript's stderr go in the report). For Claude Code, `/`
- * is first sent alone on the empty prompt (to see the slash-command menu) by `sendKey`,
- * `pasteText` and both osascript forms, and `*` by `pasteText`, each erased with Backspace; the
- * run ends with Return, then Ctrl-C twice.
+ * Then it sends characters one at a time through the app's own [InputSender] (`sendKey` text,
+ * no modifiers: the phone's path), waiting after each for the bytes to arrive: [SHORT_CHARS] in
+ * most capture modes, every printable ASCII character and space ([ALL_ASCII]) under kitty flags
+ * 5, and [CLAUDE_CHARS] in Claude Code; then `pasteText` of [PASTE] (slash, star). For Claude
+ * Code, `/` is first sent alone on the empty prompt (to see the slash-command menu) by `sendKey`
+ * and `pasteText`, and `*` by `pasteText`, each erased with Backspace; the run ends with Return,
+ * then Ctrl-C twice. (A System Events key press baseline was tried and removed: on the runner it
+ * delivered nothing, with iTerm2 frontmost.)
  *
  * The report (stdout and `diagnostics/key-bytes-report.txt`) gives, per mode and character, the
- * bytes as hex and as a readable escape form, `sendKey` beside osascript; for Claude Code also
+ * bytes as hex and as a readable escape form, and the Mac's keyboard input source. Under kitty
+ * flags 5 each CSI u is decoded (key number, shifted and base keys, modifiers) and marked WRONG
+ * when the key number is not the character's US ANSI base key or an unshifted character carries
+ * Shift, with a summary of the WRONG set. For Claude Code it also gives
  * every keyboard-mode sequence it wrote, in order, the terminal's answers, and whether each character appeared in
  * what Claude drew next. Unlike the other real-iTerm2 tests this one prints terminal content: the
  * probe characters and Claude Code's UI text in a throwaway CI terminal.
@@ -65,7 +69,6 @@ class RealIterm2KeyBytesTest {
     private val rig = RealIterm2Rig()
     private val lines = mutableListOf<String>()
     private val senderLog = CopyOnWriteArrayList<String>()
-    private var osascriptBroken: String? = null
 
     @Before
     fun requireRealIterm2() = RealIterm2Rig.requireRealIterm2()
@@ -96,6 +99,7 @@ class RealIterm2KeyBytesTest {
         val probe = Probe(sender, target, "bash ${quoted(probeScript.path)} ${quoted(envFile.path)}")
 
         line("Claude Code ${env["KEY_BYTES_CLAUDE_VERSION"] ?: "not installed"}; iTerm2 session ${session.guid}")
+        reportInputSource()
         var plainStarted = false
         for (mode in CAPTURE_MODES) {
             val started = captureMode(probe, keyBytesDir.resolve(mode.label), mode)
@@ -111,8 +115,17 @@ class RealIterm2KeyBytesTest {
         if (!plainStarted) failWith("the plain key capture never started; see the report above")
     }
 
-    /** One capture mode: [CaptureMode.label] and the key-capture.mjs modes it enables. */
-    private class CaptureMode(val label: String, val modes: List<String>, val enables: String)
+    /**
+     * One capture mode: [label], the key-capture.mjs modes it enables, the [chars] it sends, and
+     * whether each arrival is decoded as kitty CSI u ([decodeKitty]).
+     */
+    private class CaptureMode(
+        val label: String,
+        val modes: List<String>,
+        val enables: String,
+        val chars: List<String> = SHORT_CHARS,
+        val decodeKitty: Boolean = false,
+    )
 
     /** Types probe commands into the session and sends the probe keys, through the app's own sender. */
     private class Probe(val sender: InputSender, val target: InputTarget, val command: String) {
@@ -140,30 +153,37 @@ class RealIterm2KeyBytesTest {
         val query = chunks(capture).filter { it.first == "query" }.map { it.second }
         line("  terminal's answer to CSI ? u: ${if (query.isEmpty()) "none" else describe(concat(query))}")
 
-        for (char in PROBE_CHARS) {
-            val sent = captureArrival(capture) { probe.key(char); SENT }
-            line("  ${char.padEnd(LABEL_WIDTH)} sendKey   ${sent}")
-        }
-        line("  ${"/*".padEnd(LABEL_WIDTH)} pasteText ${captureArrival(capture) { probe.paste(PASTE); SENT }}")
-        for (form in OsaForm.entries) {
-            for (char in OSASCRIPT_CHARS) {
-                line("  ${char.padEnd(LABEL_WIDTH)} ${form.label} ${captureArrival(capture) { osascriptKey(char, form) }}")
+        val wrong = mutableListOf<String>()
+        for (char in mode.chars) {
+            val arrival = captureArrival(capture) { probe.key(char) }
+            val shown = if (char == " ") "SP" else char
+            if (!mode.decodeKitty || arrival.bytes == null) {
+                line("  ${shown.padEnd(LABEL_WIDTH)} sendKey   ${arrival.text}")
+                continue
             }
+            val verdict = kittyVerdict(char, arrival.bytes)
+            if (verdict.wrong) wrong += shown
+            line("  ${shown.padEnd(LABEL_WIDTH)} sendKey   ${arrival.text} | ${verdict.text}")
         }
+        if (mode.decodeKitty) line("  WRONG (${wrong.size} of ${mode.chars.size}): ${wrong.joinToString(" ").ifEmpty { "none" }}")
+        line("  ${"/*".padEnd(LABEL_WIDTH)} pasteText ${captureArrival(capture) { probe.paste(PASTE) }.text}")
         stopCapture(dir)
         return true
     }
 
-    /** Runs [send] and returns what reached the capture after it, with [Sent.note] when it has one. */
-    private suspend fun captureArrival(capture: File, send: suspend () -> Sent): String {
+    /** What reached the capture after a send: its [bytes] (null when nothing did) and a [text] for the report. */
+    private class Arrival(val bytes: ByteArray?, val text: String)
+
+    /** Runs [send] and returns what reached the capture after it. */
+    private suspend fun captureArrival(capture: File, send: suspend () -> Unit): Arrival {
         val before = chunks(capture).size
-        val sent = send()
-        if (sent.error != null) return "failed: ${sent.error}"
-        val note = sent.note?.let { " [$it]" } ?: ""
-        rig.poll(ARRIVAL_TIMEOUT) { chunks(capture).takeIf { it.size > before } } ?: return "nothing arrived within $ARRIVAL_TIMEOUT$note"
+        send()
+        rig.poll(ARRIVAL_TIMEOUT) { chunks(capture).takeIf { it.size > before } }
+            ?: return Arrival(null, "nothing arrived within $ARRIVAL_TIMEOUT")
         delay(SETTLE)
         val arrived = chunks(capture).drop(before).map { it.second }
-        return describe(concat(arrived)) + (if (arrived.size > 1) " (${arrived.size} reads)" else "") + note
+        val bytes = concat(arrived)
+        return Arrival(bytes, describe(bytes) + if (arrived.size > 1) " (${arrived.size} reads)" else "")
     }
 
     private suspend fun stopCapture(dir: File) {
@@ -221,27 +241,18 @@ class RealIterm2KeyBytesTest {
 
         if (prompt != "exited") {
             line("  -- / (and * pasted) alone on the empty prompt, each erased with Backspace")
-            line("  ${"/".padEnd(LABEL_WIDTH)} sendKey   ${claudeArrival(recording, "/", menu = true) { probe.key("/"); SENT }}")
-            claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE); SENT }
-            line("  ${"/".padEnd(LABEL_WIDTH)} pasteText ${claudeArrival(recording, "/", menu = true) { probe.paste("/"); SENT }}")
-            claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE); SENT }
-            line("  ${"*".padEnd(LABEL_WIDTH)} pasteText ${claudeArrival(recording, "*") { probe.paste("*"); SENT }}")
-            claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE); SENT }
-            for (form in OsaForm.entries) {
-                line("  ${"/".padEnd(LABEL_WIDTH)} ${form.label} ${claudeArrival(recording, "/", menu = true) { osascriptKey("/", form) }}")
-                claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE); SENT }
-            }
+            line("  ${"/".padEnd(LABEL_WIDTH)} sendKey   ${claudeArrival(recording, "/", menu = true) { probe.key("/") }}")
+            claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE) }
+            line("  ${"/".padEnd(LABEL_WIDTH)} pasteText ${claudeArrival(recording, "/", menu = true) { probe.paste("/") }}")
+            claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE) }
+            line("  ${"*".padEnd(LABEL_WIDTH)} pasteText ${claudeArrival(recording, "*") { probe.paste("*") }}")
+            claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE) }
             line("  -- one at a time into the prompt")
-            for (char in PROBE_CHARS) {
-                line("  ${char.padEnd(LABEL_WIDTH)} sendKey   ${claudeArrival(recording, char) { probe.key(char); SENT }}")
+            for (char in CLAUDE_CHARS) {
+                line("  ${char.padEnd(LABEL_WIDTH)} sendKey   ${claudeArrival(recording, char) { probe.key(char) }}")
             }
-            for (form in OsaForm.entries) {
-                for (char in OSASCRIPT_CHARS) {
-                    line("  ${char.padEnd(LABEL_WIDTH)} ${form.label} ${claudeArrival(recording, char) { osascriptKey(char, form) }}")
-                }
-            }
-            line("  ${"/*".padEnd(LABEL_WIDTH)} pasteText ${claudeArrival(recording, PASTE) { probe.paste(PASTE); SENT }}")
-            line("  ${"Return".padEnd(LABEL_WIDTH)} sendKey   ${claudeArrival(recording, null, settle = CLAUDE_RETURN_SETTLE) { probe.key("\n"); SENT }}")
+            line("  ${"/*".padEnd(LABEL_WIDTH)} pasteText ${claudeArrival(recording, PASTE) { probe.paste(PASTE) }}")
+            line("  ${"Return".padEnd(LABEL_WIDTH)} sendKey   ${claudeArrival(recording, null, settle = CLAUDE_RETURN_SETTLE) { probe.key("\n") }}")
             val output = records(recording).output()
             line("  private-mode CSIs Claude wrote in all: ${modeRequests(output)}")
             line("  keyboard-mode sequences Claude wrote, in order: ${keyboardModes(output)}")
@@ -259,11 +270,10 @@ class RealIterm2KeyBytesTest {
         glyph: String?,
         menu: Boolean = false,
         settle: Duration = CLAUDE_KEY_SETTLE,
-        send: suspend () -> Sent,
+        send: suspend () -> Unit,
     ): String {
         val before = records(recording).size
-        val sent = send()
-        if (sent.error != null) return "failed: ${sent.error}"
+        send()
         val arrived = rig.poll(ARRIVAL_TIMEOUT) { records(recording).drop(before).takeIf { new -> new.any { it.direction == 'i' } } }
         delay(settle)
         val after = records(recording).drop(before)
@@ -280,7 +290,7 @@ class RealIterm2KeyBytesTest {
         } else {
             ""
         }
-        return "$input | $shown$slashMenu" + (sent.note?.let { " [$it]" } ?: "")
+        return "$input | $shown$slashMenu"
     }
 
     private suspend fun stopClaude(probe: Probe, dir: File) {
@@ -341,49 +351,55 @@ class RealIterm2KeyBytesTest {
 
     // --- Helpers ------------------------------------------------------------------------
 
-    /** What a send reported: an [error] (nothing was sent), or a [note] for the report. */
-    private class Sent(val error: String? = null, val note: String? = null)
-
-    /** How System Events presses a key: by character, or by the US key code (with Shift for `*`). */
-    private enum class OsaForm(val label: String) {
-        KEYSTROKE("osa-keystroke"),
-        KEY_CODE("osa-keycode"),
-    }
+    /** A decoded arrival under kitty flags: [wrong] by the rules in [kittyVerdict], and its [text]. */
+    private class Verdict(val wrong: Boolean, val text: String)
 
     /**
-     * System Events presses [char] in iTerm2: it activates iTerm2 and waits up to 3 s for it to be
-     * the frontmost process, then presses the key in [form]. The note says which app was frontmost
-     * when the key went (and after), how long it waited, and anything osascript wrote to stderr.
+     * Decodes what [char]'s `sendKey` delivered under kitty flags: a CSI u (key number, shifted and
+     * base-layout keys, modifiers), an xterm modifyOtherKeys `CSI 27 ; m ; c ~`, or plain text.
+     * WRONG when the key number is not [char]'s US ANSI base key (its own code point when it needs
+     * no Shift, else the unshifted key's: `*` → `8`, `A` → `a`), when a character that needs no
+     * Shift carries Shift, or when the bytes are neither an encoding nor the character itself.
      */
-    private suspend fun osascriptKey(char: String, form: OsaForm): Sent {
-        osascriptBroken?.let { return Sent(error = "skipped (earlier: $it)") }
-        val press = when (form) {
-            OsaForm.KEYSTROKE -> "keystroke \"$char\""
-            OsaForm.KEY_CODE -> KEY_CODES[char] ?: return Sent(error = "no key code for $char")
+    private fun kittyVerdict(char: String, bytes: ByteArray): Verdict {
+        val c = char.single()
+        val needsShift = c in US_SHIFTED || c.isUpperCase()
+        val expected = US_SHIFTED[c] ?: c.lowercaseChar()
+        val text = String(bytes, Charsets.ISO_8859_1)
+        CSI_U.matchEntire(text)?.let { match ->
+            val (key, shifted, base, mods) = match.destructured
+            val modifiers = mods.ifEmpty { "1" }.toInt()
+            val shift = (modifiers - 1) and 1 != 0
+            val problems = buildList {
+                if (key.toInt() != expected.code) add("key ${key.toInt()} is not ${expected.code} ${glyph(expected.code)}")
+                if (shift && !needsShift) add("Shift on a key that needs none")
+            }
+            val decoded = "CSI u: key $key ${glyph(key.toInt())}" +
+                (if (shifted.isNotEmpty()) ", shifted $shifted ${glyph(shifted.toInt())}" else "") +
+                (if (base.isNotEmpty()) ", base $base ${glyph(base.toInt())}" else "") +
+                ", mods ${modifierNames(modifiers)}"
+            return Verdict(problems.isNotEmpty(), decoded + if (problems.isEmpty()) "" else " WRONG (${problems.joinToString("; ")})")
         }
-        val script = listOf(
-            "tell application id \"$ITERM2_BUNDLE_ID\" to activate",
-            "set waited to 0",
-            "repeat",
-            "tell application \"System Events\" to set frontId to bundle identifier of first process whose frontmost is true",
-            "if frontId is \"$ITERM2_BUNDLE_ID\" or waited > 29 then exit repeat",
-            "delay 0.1",
-            "set waited to waited + 1",
-            "end repeat",
-            "tell application \"System Events\" to set frontName to name of first process whose frontmost is true",
-            "tell application \"System Events\" to $press",
-            "delay 0.1",
-            "tell application \"System Events\" to set afterName to name of first process whose frontmost is true",
-            "return \"frontmost \" & frontName & \" (\" & frontId & \") after \" & (waited / 10) & \" s; after the key \" & afterName",
-        )
-        val result = runOnMac("osascript", *script.flatMap { listOf("-e", it) }.toTypedArray())
-        val stderr = result.stderr.takeIf { it.isNotBlank() }?.let { "; stderr: ${it.lines().take(2).joinToString(" ")}" } ?: ""
-        if (!result.ok) {
-            val error = "${result.summary}$stderr"
-            osascriptBroken = error
-            return Sent(error = error)
+        MODIFY_OTHER_KEYS.matchEntire(text)?.let { match ->
+            val (mods, code) = match.destructured
+            val shift = (mods.toInt() - 1) and 1 != 0
+            val wrong = shift && !needsShift
+            return Verdict(wrong, "modifyOtherKeys: code $code ${glyph(code.toInt())}, mods ${modifierNames(mods.toInt())}" + if (wrong) " WRONG (Shift on a key that needs none)" else "")
         }
-        return Sent(note = "osascript: ${result.stdout.ifBlank { "no answer" }}$stderr")
+        return if (text == char) {
+            Verdict(false, "plain text")
+        } else {
+            Verdict(true, "WRONG (neither an encoding nor the character)")
+        }
+    }
+
+    /** Prints the Mac's keyboard input source, as HIToolbox's defaults hold it. */
+    private suspend fun reportInputSource() {
+        for (key in listOf("AppleCurrentKeyboardLayoutInputSourceID", "AppleSelectedInputSources")) {
+            val result = runOnMac("defaults", "read", "com.apple.HIToolbox", key)
+            val value = if (result.ok) result.stdout.replace(Regex("\\s+"), " ") else "${result.summary}: ${result.stderr.lines().firstOrNull().orEmpty()}"
+            line("keyboard input source, $key: $value")
+        }
     }
 
     /** A command's outcome: [ok] when it exited 0, its [stdout] and [stderr], and a [summary] when it did not. */
@@ -426,13 +442,27 @@ class RealIterm2KeyBytesTest {
         const val ANSWER_CHARS = 400
         const val DRAWN_CHARS = 60
         const val MENU_SHOWN = 3
-        val PROBE_CHARS = listOf("a", "/", "*", ".", "1", "?", "A", "~", "|")
-        val OSASCRIPT_CHARS = listOf("/", "*")
-        const val ITERM2_BUNDLE_ID = "com.googlecode.iterm2"
-        val SENT = Sent()
+        val SHORT_CHARS = listOf("a", "/", "*", "-", "+", "=", ".")
+        val CLAUDE_CHARS = listOf("a", "/", "*", ".", "1", "?", "A", "~", "|", "-", "+", "=")
+        /** US ANSI: each character that needs Shift, and the unshifted key it is on (letters aside). */
+        val US_SHIFTED: Map<Char, Char> = "!1@2#3$4%5^6&7*8(9)0_-+={[}]|\\:;\"'<,>.?/~`".chunked(2).associate { it[0] to it[1] }
 
-        /** US key codes: kVK_ANSI_Slash, and kVK_ANSI_8 with Shift for `*`. */
-        val KEY_CODES = mapOf("/" to "key code 44", "*" to "key code 28 using shift down")
+        /** CSI key[:shifted[:base]] [; mods[:event]] [; text] u. */
+        val CSI_U = Regex("\u001b\\[(\\d+)(?::(\\d*))?(?::(\\d+))?(?:;(\\d*)(?::\\d+)?)?(?:;[\\d:]*)?u")
+        val MODIFY_OTHER_KEYS = Regex("\u001b\\[27;(\\d+);(\\d+)~")
+        val MODIFIER_NAMES = listOf("shift", "alt", "ctrl", "super", "hyper", "meta", "caps", "num")
+
+        fun modifierNames(modifiers: Int): String {
+            val bits = modifiers - 1
+            val names = MODIFIER_NAMES.filterIndexed { index, _ -> bits and (1 shl index) != 0 }
+            return "$modifiers" + if (names.isEmpty()) " (none)" else " (${names.joinToString("+")})"
+        }
+
+        /** A key number as its character when printable ASCII, else U+XXXX. */
+        fun glyph(code: Int): String = if (code in 0x20..0x7e) "'${code.toChar()}'" else "U+%04X".format(code)
+
+        val ALL_ASCII = listOf(" ") + (0x21..0x7e).map { it.toChar().toString() }
+
         val ESC = "\u001b"
         val CAPTURE_MODES = listOf(
             CaptureMode("plain", emptyList(), "nothing"),
@@ -441,6 +471,7 @@ class RealIterm2KeyBytesTest {
             CaptureMode("kitty1", listOf("kitty1"), "ESC[>1u"),
             CaptureMode("kitty3", listOf("kitty3"), "ESC[>3u"),
             CaptureMode("kitty31", listOf("kitty31"), "ESC[>31u"),
+            CaptureMode("kitty5", listOf("kitty5", "mok2"), "ESC[>5u ESC[>4;2m (Claude Code's)", ALL_ASCII, decodeKitty = true),
         )
 
         /** Claude Code's prompt footer ("? for shortcuts") and its placeholder ("Try …"). */

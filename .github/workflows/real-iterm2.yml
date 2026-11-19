@@ -163,9 +163,9 @@ jobs:
         run: bash ci/real-iterm2/install-claude-code.sh
 
       # The key-bytes probe (RealIterm2KeyBytesTest): which bytes reach a program when the phone
-      # types / * and friends (sendKey) beside a real keypress (osascript), under kitty flags,
-      # bracketed paste and modifyOtherKeys, and in real Claude Code. It reports in the log
-      # (key-bytes: lines) and fails only when the rig broke.
+      # types / * and friends (sendKey), under kitty flags (all of printable ASCII under Claude
+      # Code's flags 5, decoded), bracketed paste and modifyOtherKeys, and in real Claude Code. It
+      # reports in the log (key-bytes: lines) and fails only when the rig broke.
       - name: Probe the bytes each key delivers
         if: success() || failure()
         continue-on-error: true
