@@ -10,7 +10,21 @@
 #    (LLMMetadata.manualModel): Chat Completions (api 1) at FAKE_MODEL_URL, function calling and
 #    streaming on, credential "none" (AIModelCredential.none: iTerm2 sends its self-hosted
 #    placeholder, never a vendor key). AiModel names it, so LLMMetadata.model() picks it.
-# 3. The answers to iTerm2's one-time AI prompts (iTermWarning modals, which block the main
+# 3. The conversation's token budget: AiMaxTokens=128000 and AiResponseMaxTokens=4096. A chat
+#    turn sizes its request from these two global preferences, not from the manual model's
+#    contextWindowTokens: maxTokens = AiMaxTokens - min(AiMaxTokens / 2, AiResponseMaxTokens)
+#    (AIConversation.swift:142-151). Left unset, the first AITermController (AITerm.swift:318)
+#    runs migrateAISettings, which writes both from a model guessed from AiModel's name
+#    (iTermMigrationHelper.m:568-624): an unknown name such as ours guesses 8192 and 8192
+#    (AIMetadata.swift:99-116; iTerm2's own defaults of 128000 and 8192, iTermPreferences.m:797-798,
+#    are not registered with NSUserDefaults, so the migration sees no value). That makes
+#    maxTokens 4096, below the orchestrator's system prompt alone, and truncate(messages:maxTokens:)
+#    (AITerm.swift:1695-1736) then never ends: it never shortens system messages, and its inner
+#    loop keeps halving the last message, which stops shrinking at "…[truncated]…". The main
+#    thread spins inside it (seen on the runner: every sample in truncate, from
+#    AIConversation.truncatedMessages). The manual entry's contextWindowTokens and
+#    maxResponseTokens below are set to the same values for consistency.
+# 4. The answers to iTerm2's one-time AI prompts (iTermWarning modals, which block the main
 #    thread until someone clicks), so none can come up on the runner:
 #    - AIModelUpdatesEnabled=NO (iTermPreferences.m:277, default NO at :820) and
 #      NoSyncAIModelCatalogUpdateConsent=2, denied (iTermUserDefaults.m:60, .h:152-156): the
@@ -21,7 +35,8 @@
 #      (iTermMigrationHelper.m:436-460, run by every AITermController, AITerm.swift:318), and
 #      NoSyncAISafetyCheckNagComplete=YES (RemoteCommand+Mac.swift:38): the safety-check
 #      provider migration and its nag.
-# 4. The user keychain search list holds only the CI keychain. Every chat turn builds an
+# 5. Hardening, not the cause seen on the runner: the user keychain search list holds only the CI
+#    keychain. Every chat turn builds an
 #    AIConversation (ChatAgent.swift:185), whose init reads the default model's registration on
 #    the main thread (AIConversation.swift:165, AITermControllerRegistrationHelper.swift:15-31).
 #    resolvedRegistration reads the vendor's stored API key before it looks at the credential
@@ -73,6 +88,8 @@ defaults write "$domain" AIManualModelConfigurations "<array><dict>
     <key>maxResponseTokens</key><integer>4096</integer>
 </dict></array>"
 
+defaults write "$domain" AiMaxTokens -int 128000
+defaults write "$domain" AiResponseMaxTokens -int 4096
 defaults write "$domain" AIModelUpdatesEnabled -bool false
 defaults write "$domain" NoSyncAIModelCatalogUpdateConsent -int 2
 defaults write "$domain" NoSyncAutoProvideConsent -int 2
@@ -80,7 +97,7 @@ defaults write "$domain" "AI Safety Check" -bool false
 defaults write "$domain" NoSyncAISafetyCheckProviderMigrationDone -bool true
 defaults write "$domain" NoSyncAISafetyCheckNagComplete -bool true
 
-# --- 4. The keychain search list ---------------------------------------------------------------
+# --- 5. The keychain search list ---------------------------------------------------------------
 
 [[ -f "$CI_KEYCHAIN" ]] || die "no CI keychain at $CI_KEYCHAIN; run seed-pairing.sh first"
 log "user keychain search list before: $(security list-keychains -d user | tr -s ' \n' ' ')"
@@ -99,7 +116,7 @@ model_value() {
     plutil -extract "AIManualModelConfigurations.0.$1" raw -o - "$exported" 2>/dev/null
 }
 log "AI defaults for $domain:"
-for key in GenerativeAIAllowed UseRecommendedAIModel AiModel AIModelUpdatesEnabled NoSyncAIModelCatalogUpdateConsent \
+for key in GenerativeAIAllowed UseRecommendedAIModel AiModel AiMaxTokens AiResponseMaxTokens AIModelUpdatesEnabled NoSyncAIModelCatalogUpdateConsent \
     NoSyncAutoProvideConsent "AI Safety Check" NoSyncAISafetyCheckProviderMigrationDone NoSyncAISafetyCheckNagComplete; do
     printf '    %s = %s\n' "$key" "$(defaults read "$domain" "$key")"
 done
@@ -107,6 +124,8 @@ for key in id name url api credential functionCalling streaming contextWindowTok
     printf '    AIManualModelConfigurations[0].%s = %s\n' "$key" "$(model_value "$key")"
 done
 [[ "$(defaults read "$domain" UseRecommendedAIModel)" == 0 ]] || die "UseRecommendedAIModel did not stick"
+[[ "$(defaults read "$domain" AiMaxTokens)" == 128000 ]] || die "AiMaxTokens did not stick"
+[[ "$(defaults read "$domain" AiResponseMaxTokens)" == 4096 ]] || die "AiResponseMaxTokens did not stick"
 [[ "$(model_value url)" == "$FAKE_MODEL_URL" ]] || die "the manual model's url did not stick"
 [[ "$(model_value api)" == 1 ]] || die "the manual model's api is not the integer 1 (Chat Completions)"
 [[ "$(model_value credential)" == none ]] || die "the manual model's credential is not none"

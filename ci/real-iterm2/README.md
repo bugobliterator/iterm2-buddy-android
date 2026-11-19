@@ -103,7 +103,7 @@ what was typed.
 | Install the AI plugin | `install-ai-plugin.sh` | The same for `iTermAI-1.1.zip`, with iTerm2's AI plugin key. Until its zip is pinned, it prints the zip's sha256. |
 | Mint the pairing | `generate-pairing.sh` | Runs `GenerateCiPairing.java` to make a Mac X25519 key pair, a phone X25519 key pair, a room secret and a pairing ID. It writes them to `$RUNNER_TEMP/real-iterm2/pairing.env` with mode 600. |
 | Seed iTerm2 | `seed-pairing.sh` | Writes the root-owned `EnableCompanionPairing` secure setting with sudo and sets the defaults (relay origin, an empty resolver for direct mode, the paired ID, the Claude watcher off, no tips or update prompts). It also puts the Mac private key and the phone public key in a CI keychain whose partition list names iTerm2's team. |
-| Seed AI | `seed-ai.sh` | Writes the root-owned `EnableAI` secure setting and the AI defaults (`UseRecommendedAIModel` off, one `AIManualModelConfigurations` entry for the fake model, `AiModel` naming it), answers iTerm2's one-time AI prompts (model catalog updates, automatic terminal sharing, the safety-check migration), and reads them back typed. |
+| Seed AI | `seed-ai.sh` | Writes the root-owned `EnableAI` secure setting and the AI defaults (`UseRecommendedAIModel` off, one `AIManualModelConfigurations` entry for the fake model, `AiModel` naming it, the token budget `AiMaxTokens`/`AiResponseMaxTokens`), answers iTerm2's one-time AI prompts (model catalog updates, automatic terminal sharing, the safety-check migration), and reads them back typed. |
 | Start the relay | `start-relay.sh` | Fetches the relay at `b8aa2f9` the way `scripts/relay-it.sh` does and makes a throwaway CA and a `localhost` certificate. It trusts the CA system-wide and starts the relay on `127.0.0.1:8787` (open mode, `RELAY_ORIGIN=https://localhost:8443`). Then it starts `tls-proxy.mjs` on `localhost:8443`. |
 | Start the fake model | `start-fake-model.sh` | Starts `fake-model.mjs` on `127.0.0.1:8790` and waits for `/health`. |
 | Launch iTerm2 | `launch-iterm2.sh` | Runs `open -a iTerm`, then waits for the relay to log `hello role=mac` (iTerm2 parked) and takes a screenshot. |
@@ -183,12 +183,22 @@ never runs them. `RealIterm2Rig` holds the setup they share.
 - **AI off.** The test fails first with "the Mac reports AI off" when iTerm2's hello says AI is
   unavailable: the AI plugin is missing or fails its check (version 1.1 expected), or `EnableAI`
   was not read. The diagnostics show the AI plugin lookup and the secure setting.
-- **The keychain on a chat turn.** Every turn's AIConversation reads the vendor API key on the
-  main thread, even with credential none (AIConversation.swift:165, AITerm.swift:267-292). The
-  item is absent, so the read searches the user's keychain list, and a locked login keychain
-  would bring up a SecurityAgent unlock prompt that blocks iTerm2's main thread with no iTerm2
-  alert. `seed-ai.sh` therefore leaves only the CI keychain in that list. The state dump lists
-  other apps' windows and whether SecurityAgent runs.
+- **The token budget (an upstream bug).** A chat turn sizes its request from the global
+  `AiMaxTokens` and `AiResponseMaxTokens`, not from the manual model's `contextWindowTokens`
+  (AIConversation.swift:142-151). When they are unset, `migrateAISettings` writes them from a
+  model guessed from `AiModel`'s name, 8192 each for a name iTerm2 does not know
+  (iTermMigrationHelper.m:568-624, AIMetadata.swift:99-116). That leaves 4096 tokens, less than
+  the orchestrator's system prompt, and `truncate(messages:maxTokens:)` (AITerm.swift:1695-1736)
+  then loops forever on the main thread: it never shortens system messages, and its inner loop
+  keeps halving a last message that has stopped shrinking. Run 44444477077 caught it there, with
+  every sample inside `truncate` under `AIConversation.truncatedMessages`. So any manual model
+  with an unrecognised name hangs iTerm2 on its first orchestrator turn, which is worth
+  reporting upstream. `seed-ai.sh` sets `AiMaxTokens=128000` and `AiResponseMaxTokens=4096`.
+- **The keychain on a chat turn (hardening).** Every turn's AIConversation reads the vendor API
+  key on the main thread, even with credential none (AIConversation.swift:165,
+  AITerm.swift:267-292). For the absent item that read searches the user's keychain list, so
+  `seed-ai.sh` leaves only the unlocked CI keychain there, and a locked login keychain cannot
+  bring up a SecurityAgent prompt. It was not the cause on the runner.
 - **The Ollama probe.** iTerm2 probes `http://localhost:11434` (the built-in Ollama endpoint)
   whenever it reads its model list, and retries every 5 s when that fails. It is not the chat's
   endpoint; the fake model's stub answers it with no models (`ollama-stub:` lines in its log).
