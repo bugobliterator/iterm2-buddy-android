@@ -29,8 +29,9 @@ import kotlinx.serialization.json.long
  * - [delayReply] holds back the next reply to a case (the serve loop goes on); [streamReply] sends
  *   a scripted turn; [pushChatList], [flipAi] and [refuseDelete] send the unsolicited messages.
  * - AI off ([setAiAvailable]) as the Mac's `updateAIAvailability` and `requireAI` (`HB:2250-2300`):
- *   every subscription is dropped, a `subscribe` is refused with the typed `aiUnavailable` error,
- *   a `publish` (no request ID) is dropped silently, the list is answered with no chats
+ *   every subscription is dropped, a `subscribe` or `createChat` is refused with the typed
+ *   `aiUnavailable` error, a `publish`, `deleteChat`, `deleteMessages` or `linkSession` (no request
+ *   ID) is dropped silently, the list is answered and pushed with no chats
  *   (`HB:448-455`), and nothing is streamed. The flip is announced separately ([announceAi]),
  *   as the Mac's `link.poke(.aiAvailability)` is a task of its own, so a reply computed after the
  *   flip can reach the phone before the announcement. [flipAi] does both.
@@ -67,6 +68,8 @@ class FakeChatMac(val mac: FakeMac, private val scope: CoroutineScope) {
         reply("resolveMentions") { _, id -> send(samplePayload("mentions-resolved.json"), id) }
         reply("fetchWorkgroupInfo") { _, id -> send(samplePayload("workgroup-info.json"), id) }
         reply("unsubscribe") { body, _ -> subscribed -= body.getValue("chatID").jsonPrimitive.content }
+        // AI-only requests the phone sends without a reply; refused (dropped) while AI is off.
+        for (case in listOf("deleteChat", "deleteMessages", "linkSession")) reply(case) { _, id -> refusedWithoutAi(id) }
         reply("subscribe") { body, id ->
             val chatID = body.getValue("chatID").jsonPrimitive.content
             if (refusedWithoutAi(id)) return@reply
@@ -115,8 +118,15 @@ class FakeChatMac(val mac: FakeMac, private val scope: CoroutineScope) {
         return JsonObject(mapOf("delivery" to JsonObject(delivery + ("message" to renamed))))
     }
 
-    /** Pushes `chatListChanged` with the sample list. */
-    suspend fun pushChatList() = send(samplePayload("chat-list-changed.json"), null)
+    /** Pushes `chatListChanged` with the sample list, or with no chats while AI is off (`HB:284-290`). */
+    suspend fun pushChatList() = send(
+        if (aiAvailable) {
+            samplePayload("chat-list-changed.json")
+        } else {
+            JsonObject(mapOf("chatListChanged" to JsonObject(mapOf("chats" to JsonArray(emptyList())))))
+        },
+        null,
+    )
 
     /** Turns AI on or off ([setAiAvailable]) and announces it ([announceAi]), as the Mac does. */
     suspend fun flipAi(available: Boolean) {

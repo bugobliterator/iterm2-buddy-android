@@ -440,6 +440,23 @@ class TranscriptMergeTest {
     }
 
     /** Status deltas into one message of a 5 000-message transcript; [StreamRun.finalLength] counts the updates. */
+    @Test
+    fun transcriptThatFailsToBuildGivesItsBytesBack() {
+        val shared = SharedImageAllowance(limitBytes = 10)
+        shared.reclaim = { _, _ -> throw OutOfMemoryError("while making room") }
+        val history = listOf(
+            message(1, MessageBody.Multipart(listOf(Subpart.AttachmentPart(image("a", 6))))),
+            message(2, MessageBody.Multipart(listOf(Subpart.AttachmentPart(image("b", 6))))),
+        )
+        try {
+            Transcript(history, AttachmentBudgets(), shared)
+            throw AssertionError("expected the build to fail")
+        } catch (_: OutOfMemoryError) {
+            // The second image asked for room, and making it failed.
+        }
+        assertEquals("the first image's bytes went back", 0L, shared.heldBytes)
+    }
+
     private fun statusInto(deltas: Int): StreamRun {
         val first = Attachment(true, "status-a", AttachmentKind.StatusUpdate(AgentStatusUpdate.WebSearchStarted))
         val others = (1..5_000).map { message(it, MessageBody.Markdown("other $it")) }

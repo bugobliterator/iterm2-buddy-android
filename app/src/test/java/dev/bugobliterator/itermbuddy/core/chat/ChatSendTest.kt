@@ -69,7 +69,7 @@ class ChatSendTest {
     private fun draft(text: String): MentionDraft = MentionDraft.EMPTY.applyEdit(0, 0, text)
 
     /** A rig connected with chat [A] listed, open and loaded. */
-    private suspend fun TestScope.openRig(rig: ChatRig = ChatRig(this)): ChatRig {
+    private suspend fun TestScope.openRig(rig: ChatRig = ChatRig(this, snapshotUncollected = true)): ChatRig {
         rig.chats = listOf(A to MAC_TIME)
         rig.connect()
         rig.repository.open(A)
@@ -107,7 +107,7 @@ class ChatSendTest {
         assertNotNull("sent on the link the history came on", rig.publishLinks.single())
 
         // A lowercase UUID source still sends an uppercase uniqueID.
-        val lower = ChatRig(this, newUuid = { UUID.fromString("6a1d3f5b-2c4e-4a8b-9d0f-1e2a3b4c5d6e") })
+        val lower = ChatRig(this, snapshotUncollected = true, newUuid = { UUID.fromString("6a1d3f5b-2c4e-4a8b-9d0f-1e2a3b4c5d6e") })
         openRig(lower)
         assertEquals(SendOutcome.Sent, lower.repository.send(A, draft("hello")))
         runCurrent()
@@ -119,7 +119,7 @@ class ChatSendTest {
 
     @Test
     fun emptyAfterTrimIsNotSent() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         val before = rig.shown()
         assertEquals(SendOutcome.Empty, rig.repository.send(A, draft(" \n\t  ")))
         assertEquals(SendOutcome.Empty, rig.repository.send(A, MentionDraft.EMPTY))
@@ -130,7 +130,7 @@ class ChatSendTest {
 
     @Test
     fun echoIsReplacedByDelivery() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         val count = rig.shown().messages.size
         assertEquals(SendOutcome.Sent, rig.repository.send(A, draft("  Ship it  ")))
         runCurrent()
@@ -153,7 +153,7 @@ class ChatSendTest {
 
     @Test
     fun failedSendWithdrawsTheEchoAndKeepsDraft() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         val count = rig.shown().messages.size
         rig.failPublishes = true
         val drafts = ChatDrafts()
@@ -186,7 +186,7 @@ class ChatSendTest {
 
     @Test
     fun failedSendsLeaveNoStaleMark() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         val gate = CompletableDeferred<Unit>()
         rig.publishGate = gate
         // Two sends wait on the link; the earlier one's mark sits under the later one's.
@@ -212,7 +212,7 @@ class ChatSendTest {
 
     @Test
     fun ownSendSetsTheSeenMark() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         assertEquals(SendOutcome.Sent, rig.repository.send(A, draft("mine")))
         settle()
         // The list's bump for the send is the owner's own, not news.
@@ -229,7 +229,7 @@ class ChatSendTest {
 
     @Test
     fun consumerKeepsDrainingWhileAPublishWaits() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         val gate = CompletableDeferred<Unit>()
         rig.publishGate = gate
         val sending = async { rig.repository.send(A, draft("behind the lock")) }
@@ -281,7 +281,7 @@ class ChatSendTest {
 
     @Test
     fun historyOnThePublishLinkKeepsItSending() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         rig.repository.send(A, draft("Still on its way"))
         runCurrent()
         val id = rig.shown().idOf("Still on its way")
@@ -306,7 +306,7 @@ class ChatSendTest {
 
     @Test
     fun deliveryAfterDiscardBringsItBack() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         rig.repository.send(A, draft("Discarded"))
         advanceTimeBy(15.seconds)
         runCurrent()
@@ -332,7 +332,7 @@ class ChatSendTest {
             NotSendableReason.TOO_LARGE,
             ConversationPresenter().present(A, ConversationState.TooLarge, null, null, 12, null, null, emptyMap()).whyNotSendable,
         )
-        val rig = ChatRig(this)
+        val rig = ChatRig(this, snapshotUncollected = true)
         rig.chats = listOf(A to MAC_TIME)
         rig.repository.open(B)
         settle()
@@ -350,7 +350,7 @@ class ChatSendTest {
 
     @Test
     fun echoTimeoutMarksNotDelivered() = runTest {
-        val rig = openRig(ChatRig(this, timeouts = ChatTimeouts(echo = 10.seconds)))
+        val rig = openRig(ChatRig(this, snapshotUncollected = true, timeouts = ChatTimeouts(echo = 10.seconds)))
         rig.repository.send(A, draft("Anyone there?"))
         val id = rig.shown().idOf("Anyone there?")
         advanceTimeBy(9_900.milliseconds)
@@ -363,7 +363,7 @@ class ChatSendTest {
 
     @Test
     fun retryMintsANewUniqueId() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         rig.repository.send(A, draft("Try this"))
         settle()
         advanceTimeBy(15.seconds)
@@ -402,7 +402,7 @@ class ChatSendTest {
 
     @Test
     fun lateEchoMarksDelivered() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         rig.repository.send(A, draft("Late one"))
         advanceTimeBy(15.seconds)
         runCurrent()
@@ -428,7 +428,7 @@ class ChatSendTest {
 
     @Test
     fun pendingEchoSurvivesReconnect() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         rig.repository.send(A, draft("Lost in the drop"))
         runCurrent()
         val lost = rig.shown().idOf("Lost in the drop")
@@ -449,7 +449,7 @@ class ChatSendTest {
 
     @Test
     fun sendNeedsCurrentLink() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         rig.mac.stop()
         settle()
         assertEquals(SendOutcome.NotSendable(NotSendableReason.NOT_CONNECTED), rig.repository.send(A, draft("hello")))
@@ -460,7 +460,7 @@ class ChatSendTest {
 
     @Test
     fun sendRefusedWhenNotSubscribedOnThisLink() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         rig.holdNext[A] = 5.seconds
         rig.reconnect()
         advanceTimeBy(1.seconds)
@@ -484,7 +484,7 @@ class ChatSendTest {
 
     @Test
     fun pendingRequestWarnsBeforeSend() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         rig.sendSample("turn-lifecycle-started.json", A)
         rig.sendSample("typing-status-on.json", A)
         rig.sendSample("delivery-remote-command-classic.json", A)
@@ -529,7 +529,7 @@ class ChatSendTest {
 
     @Test
     fun noSendWhileAiUnavailable() = runTest {
-        val rig = openRig()
+        val rig = openRig(ChatRig(this, snapshotUncollected = true))
         rig.chatMac.flipAi(false)
         settle()
         assertEquals(NotSendableReason.AI_UNAVAILABLE, (rig.repository.conversation(A).value as? ConversationState.Shown)?.whyNotSendable)

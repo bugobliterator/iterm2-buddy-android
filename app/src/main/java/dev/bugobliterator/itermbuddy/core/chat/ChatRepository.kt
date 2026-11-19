@@ -16,8 +16,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -486,7 +488,10 @@ class ChatRepository(
     private val oversized = OversizedChats()
 
     /** The image bytes every held transcript keeps, under [ChatBudgets.sharedImageBytes]. */
-    private val images = SharedImageAllowance(budgets.sharedImageBytes)
+    private val images = SharedImageAllowance(budgets.sharedImageBytes).also { it.reclaim = ::reclaimImages }
+
+    /** The chat whose history is being built into a transcript now, for [reclaimImages]. */
+    private var buildingFor: String? = null
 
     /**
      * A list with no chats arrived while chats are listed, and is held: AI may have gone off
@@ -497,6 +502,9 @@ class ChatRepository(
 
     /** Names the scheduled confirmation; a superseded one's post does nothing. */
     private var emptyListConfirmSerial = 0L
+
+    /** A confirmation fetch for the held empty list already failed once. */
+    private var emptyListConfirmRetried = false
 
     /** Chats missing from the latest list applied (not from the one before): their marks are kept until the next. */
     private val absentOnce = HashSet<String>()
@@ -643,7 +651,10 @@ class ChatRepository(
      * a screen keeps the instance it was given across closes, reopens and evictions; [clear] resets
      * them to Loading. They grow with the chats the owner opens, a handful per session.
      */
-    private val conversationFlows = ConcurrentHashMap<String, MutableStateFlow<ConversationState>>()
+    private val conversationFlows = ConcurrentHashMap<String, ConversationFlow>()
+
+    /** Decodes a raw chat frame ([ChatInput.Payload.decode]); replaced by tests to make it throw. */
+    internal var decodePayload: (ChatInput.Payload, AttachmentBudgets) -> PayloadDecoding = { input, budgets -> input.decode(budgets) }
 
     /** For tests: transcripts held, as of the last publish. */
     @Volatile
@@ -680,19 +691,13 @@ class ChatRepository(
      * Loading again once it is closed and its transcript no longer kept. The same instance for the
      * life of the pairing (see [conversationFlows]). Thread-safe.
      */
-    fun conversation(chatID: String): StateFlow<ConversationState> {
-        conversationFlows[chatID]?.let { return it }
-        var created = false
-        val flow = conversationFlows.computeIfAbsent(chatID) {
-            created = true
-            MutableStateFlow(if (consumerStopped) STOPPED_CONVERSATION else ConversationState.Loading())
+    fun conversation(chatID: String): StateFlow<ConversationState> =
+        conversationFlows.computeIfAbsent(chatID) {
+            // Not snapshotted while nobody collects it: every new collector brings it up to date.
+            ConversationFlow(MutableStateFlow(if (consumerStopped) STOPPED_CONVERSATION else ConversationState.Loading())) {
+                post { refreshConversation(chatID) }
+            }
         }
-        if (created && !snapshotUncollected) {
-            // Not snapshotted while nobody collects it: brought up to date when a collector comes.
-            scope.launch { flow.subscriptionCount.collect { if (it > 0) post { refreshConversation(chatID) } } }
-        }
-        return flow
-    }
 
     /** The consumer stopped: nothing will publish again, so every screen says so instead of loading for good. */
     private fun consumerStopped() {
@@ -701,7 +706,7 @@ class ChatRepository(
         val failed = ChatListState.Failed(retryable = false)
         listFlow.value = failed
         snapshotFlow.value = ChatListSnapshot(failed, rowsFlow.value, aiFlow.value, snapshotEpoch)
-        conversationFlows.values.forEach { it.value = STOPPED_CONVERSATION }
+        conversationFlows.values.forEach { it.state.value = STOPPED_CONVERSATION }
     }
 
     /**
@@ -870,7 +875,8 @@ class ChatRepository(
         post(onDropped = { result.complete(stopped) }) {
             try {
                 block(result)
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                // An Error too: the caller (a draft's Send) must never wait forever.
                 result.complete(failed)
                 throw e
             }
@@ -905,7 +911,12 @@ class ChatRepository(
                 Outcome.Failed(e.javaClass.simpleName)
             }
             post(onDropped = { result.complete(CreateOutcome.Failed(retryable = true)) }) {
-                result.complete(createOutcome(outcome, linkId))
+                try {
+                    result.complete(createOutcome(outcome, linkId))
+                } catch (e: Throwable) {
+                    result.complete(CreateOutcome.Failed(retryable = true))
+                    throw e
+                }
             }
         }
     }
@@ -1093,6 +1104,10 @@ class ChatRepository(
                 // It may have reached the Mac: the echo stays, and its timeout decides.
                 log("chat $chatID: $uniqueID may not have been sent: ${e.javaClass.simpleName}")
                 result.complete(SendOutcome.Sent)
+            } catch (e: Throwable) {
+                // An Error: the caller must not wait forever. The echo stays, and its timeout decides.
+                result.complete(failed)
+                throw e
             }
         }
     }
@@ -1256,7 +1271,15 @@ class ChatRepository(
     }
 
     private fun payload(input: ChatInput.Payload) {
-        when (val decoded = input.decode(budgets.attachments)) {
+        val decoding = try {
+            decodePayload(input, budgets.attachments)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // decode reports failures as values; an Error (memory) still answers the request.
+            PayloadDecoding.Undecodable(input.requestID, input.case, e.javaClass.simpleName)
+        }
+        when (val decoded = decoding) {
             is PayloadDecoding.Decoded -> message(decoded.message, input.requestID, input.linkId, input.size)
             is PayloadDecoding.Undecodable -> undecodable(decoded, input.chatID, input.linkId)
         }
@@ -1306,9 +1329,22 @@ class ChatRepository(
         if (conversation != null) {
             // The old transcript's image bytes go back before the new one draws on the allowance.
             conversation.transcript?.release()
-            conversation.transcript = Transcript(history.messages, budgets.attachments, images)
-            conversation.historyLink = linkId
-            conversation.lostAppend = false
+            conversation.transcript = null
+            conversation.historyLink = null
+            buildingFor = chatID
+            try {
+                // A transcript that fails to build gives its bytes back itself (Transcript's init).
+                conversation.transcript = Transcript(history.messages, budgets.attachments, images)
+                conversation.historyLink = linkId
+                conversation.lostAppend = false
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                log("chat $chatID history could not be held: ${e.javaClass.simpleName}")
+                failedThisLink += chatID
+            } finally {
+                buildingFor = null
+            }
         }
         echoesAfterHistory(chatID, history.messages, linkId, conversation?.transcript)
         planNeeded = true
@@ -1349,6 +1385,8 @@ class ChatRepository(
      * none): it is marked stale and the chat subscribed once more on this link for a fresh history.
      */
     private fun lostAppend(chatID: String) {
+        // Whose words came last is unknown now: a later bump is not taken for the owner's.
+        newestDeliveryAuthor -= chatID
         val conversation = conversations[chatID]
         if (conversation?.transcript == null) {
             log("chat $chatID lost an append; no transcript is held")
@@ -1466,8 +1504,27 @@ class ChatRepository(
         }
     }
 
+    /**
+     * A list request got no list while an empty one is held (a timeout, a refusal): the
+     * confirmation is tried once more, then the held list is applied, so a real last delete is
+     * not held for good.
+     */
+    private fun emptyListUnconfirmed() {
+        if (!heldEmptyList) return
+        if (!emptyListConfirmRetried) {
+            emptyListConfirmRetried = true
+            log("the chat list did not come to confirm a held empty one: trying again")
+            scheduleEmptyListConfirm()
+            return
+        }
+        log("the chat list did not come again: applying the held empty one")
+        dropHeldEmptyList(null)
+        applyListNow(emptyList())
+    }
+
     /** The held empty list, if any, is dropped ([why]; null when it was applied). */
     private fun dropHeldEmptyList(why: String?) {
+        emptyListConfirmRetried = false
         if (!heldEmptyList) return
         heldEmptyList = false
         emptyListConfirm?.cancel()
@@ -1494,6 +1551,9 @@ class ChatRepository(
         absentOnce.clear()
         for (chatID in absentBefore) if (chatID !in entryByID) forgetChat(chatID)
         previous?.forEach { if (it.chat.id !in entryByID && it.chat.id !in absentBefore) leftList(it.chat.id) }
+        // Marks of chats this process has not seen listed (kept from before a cold start, or of a
+        // chat deleted while the phone was away) count as missing once too, so they do not leak.
+        for (chatID in seen.chatIDs()) if (chatID !in entryByID && chatID !in absentBefore) absentOnce += chatID
         val firstMarks = HashMap<String, Double>()
         for (entry in newEntries) {
             val chatID = entry.chat.id
@@ -1653,6 +1713,7 @@ class ChatRepository(
                         listUnanswered = false
                         planNeeded = true
                         listFailed = true
+                        emptyListUnconfirmed()
                     }
                     else -> log("unexpected reply to the chat list request: ${reply.javaClass.simpleName}")
                 }
@@ -1665,6 +1726,7 @@ class ChatRepository(
                 is Outcome.Failed -> {
                     log("the chat list request failed: $outcome")
                     if (listGeneration == generation) listFailed = true
+                    emptyListUnconfirmed()
                     if (listSuspect) {
                         // Waiting on it any longer would hold every chat back on this link. It
                         // stays unanswered, so if it ends this link alone it is still latched.
@@ -1824,6 +1886,28 @@ class ChatRepository(
     }
 
     /** [chatID]'s transcript is gone: its delivered and withdrawn sends need no tracking. Those not delivered are put back by the next history. */
+    /**
+     * [requester] needs [bytes] more of the shared image allowance. For an open conversation's
+     * transcript, closed transcripts holding images are dropped, least recently closed first,
+     * until it fits: the chat on screen keeps its images before a cached one does (a closed
+     * chat's history comes back when it is opened again). A closed transcript gets no room.
+     */
+    private fun reclaimImages(requester: Transcript, bytes: Long) {
+        val chatID = buildingFor ?: conversations.entries.firstOrNull { it.value.transcript === requester }?.key ?: return
+        if (chatID !in open) return
+        var needed = bytes
+        for (evicted in closed.toList()) {
+            if (needed <= 0) break
+            val held = conversations[evicted]?.transcript ?: continue
+            if (held === requester || held.keptImageBytes == 0L) continue
+            val before = images.heldBytes
+            log("chat $evicted: cached transcript dropped for the open chat's images")
+            dropConversation(evicted)
+            dropSettledEchoes(evicted)
+            needed -= before - images.heldBytes
+        }
+    }
+
     private fun dropSettledEchoes(chatID: String) {
         val sent = echoes[chatID] ?: return
         sent.values.removeIf { it.state == EchoState.DELIVERED || it.withdrawn }
@@ -1876,7 +1960,7 @@ class ChatRepository(
         leftWhileOpen.clear()
         absentOnce.clear()
         dropHeldEmptyList("unpaired")
-        conversationFlows.values.forEach { it.value = ConversationState.Loading(NotSendableReason.NOT_CONNECTED) }
+        conversationFlows.values.forEach { it.state.value = ConversationState.Loading(NotSendableReason.NOT_CONNECTED) }
         visibleChat = null
         tracker.visibilityChanged(null)
         newestDeliveryAuthor.clear()
@@ -2022,9 +2106,9 @@ class ChatRepository(
         snapshotFlow.value = ChatListSnapshot(listFlow.value, rowsFlow.value, ai, snapshotEpoch)
         for ((chatID, flow) in conversationFlows) {
             // Nobody collects it: not snapshotted until a collector comes (refreshConversation).
-            if (!snapshotUncollected && flow.subscriptionCount.value == 0) continue
+            if (!snapshotUncollected && flow.state.subscriptionCount.value == 0) continue
             val next = conversationState(chatID, now)
-            if (next != flow.value) flow.value = next
+            if (next != flow.value) flow.state.value = next
         }
         heldTranscripts = conversations.values.count { it.transcript != null }
         heldImageBytes = images.heldBytes
@@ -2040,7 +2124,7 @@ class ChatRepository(
         val flow = conversationFlows[chatID] ?: return
         conversations[chatID]?.snapshotAtMillis = null
         val next = conversationState(chatID, nowMillis())
-        if (next != flow.value) flow.value = next
+        if (next != flow.value) flow.state.value = next
     }
 
     private fun conversationState(chatID: String, now: Long): ConversationState {
@@ -2153,3 +2237,23 @@ private const val MAX_PLAN_PASSES = 64
 private const val LIST_REPLY_CASE = "chatsAndSessions"
 
 private val MacMessage.Error.isAiUnavailable: Boolean get() = code == "aiUnavailable"
+
+/**
+ * A conversation's state as [ChatRepository.conversation] hands it out: [state], and [onCollect]
+ * run at the start of every collection, so each new collector (not only the first) gets the
+ * conversation brought up to date, even one that comes as another leaves.
+ */
+@OptIn(ExperimentalForInheritanceCoroutinesApi::class)
+private class ConversationFlow(
+    val state: MutableStateFlow<ConversationState>,
+    private val onCollect: () -> Unit,
+) : StateFlow<ConversationState> {
+    override val value: ConversationState get() = state.value
+
+    override val replayCache: List<ConversationState> get() = state.replayCache
+
+    override suspend fun collect(collector: FlowCollector<ConversationState>): Nothing {
+        onCollect()
+        state.collect(collector)
+    }
+}
