@@ -8,7 +8,10 @@ import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.core.wire.decodeEnvelope
 import dev.bugobliterator.itermbuddy.core.wire.encodeEnvelope
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -159,17 +162,32 @@ class WorkgroupWatchTest {
         rig.watch.setForeground(true)
         runCurrent()
         rig.assertNoRequest()
-        // The link coming back resumes with one request.
+        // The new link, announced while the gate is still shut, asks once the client is connected.
+        rig.watch.linkUp()
+        runCurrent()
+        rig.assertNoRequest()
         rig.watch.setConnected(true)
         runCurrent()
         rig.nextRequest().reply.complete(info())
         runCurrent()
         rig.assertNoRequest()
 
-        // A resume in the background waits for the foreground.
+        // The gate alone reopening (no new link) restarts the poll timer without asking at once.
+        rig.watch.setConnected(false)
+        rig.watch.setConnected(true)
+        advanceTimeBy(poll - 1.seconds)
+        runCurrent()
+        rig.assertNoRequest()
+        advanceTimeBy(1.seconds)
+        runCurrent()
+        rig.nextRequest().reply.complete(info())
+        runCurrent()
+
+        // A link up in the background waits for the foreground.
         rig.watch.setConnected(false)
         rig.watch.setForeground(false)
         rig.watch.setConnected(true)
+        rig.watch.linkUp()
         advanceTimeBy(poll * 3)
         runCurrent()
         rig.assertNoRequest()
@@ -196,6 +214,20 @@ class WorkgroupWatchTest {
         rig.assertNoRequest()
         first.reply.complete(info())
         runCurrent()
+        rig.assertNoRequest()
+
+        // A refresh while a poll is out sends nothing more, but shows the list refreshing until it lands.
+        advanceTimeBy(poll)
+        runCurrent()
+        val polled = rig.nextRequest()
+        assertFalse(shown(rig.watch).refreshing)
+        rig.watch.refresh()
+        assertTrue(shown(rig.watch).refreshing)
+        runCurrent()
+        rig.assertNoRequest()
+        polled.reply.complete(info())
+        runCurrent()
+        assertFalse(shown(rig.watch).refreshing)
         rig.assertNoRequest()
 
         // A refresh while shown marks the list refreshing until its answer lands.
@@ -265,6 +297,7 @@ class WorkgroupWatchTest {
         advanceTimeBy(poll * 5)
         rig.watch.setConnected(false)
         rig.watch.setConnected(true)
+        rig.watch.linkUp()
         rig.watch.setForeground(false)
         rig.watch.setForeground(true)
         rig.watch.refresh()
@@ -285,6 +318,7 @@ class WorkgroupWatchTest {
         advanceTimeBy(poll / 2)
         rig.watch.setConnected(false)
         rig.watch.setConnected(true)
+        rig.watch.linkUp()
         runCurrent()
         rig.nextRequest().reply.complete(info())
         runCurrent()
@@ -297,6 +331,7 @@ class WorkgroupWatchTest {
         val oldLink = rig.nextRequest()
         rig.watch.setConnected(false)
         rig.watch.setConnected(true)
+        rig.watch.linkUp()
         runCurrent()
         rig.assertNoRequest()
         oldLink.reply.completeExceptionally(CompanionRequestException("connection lost"))
@@ -375,12 +410,133 @@ class WorkgroupWatchTest {
         rig.awaitConnected(2)
         advanceTimeBy(1.seconds)
         runCurrent()
-        assertTrue("asked on the new link", asked() >= 4)
+        assertEquals("asked once on the new link", 4, asked())
         assertFalse(shown(watch).stale)
         watch.stop()
         val stopped = asked()
         advanceTimeBy(poll * 4)
         runCurrent()
         assertEquals(stopped, asked())
+    }
+
+    @Test
+    fun cancelledTimerNeitherAsksNorForksALoop() = runTest {
+        val rig = rig()
+        rig.watch.start()
+        runCurrent()
+        rig.nextRequest().reply.complete(info())
+        runCurrent()
+        // The timer has waited its interval; before it takes the lock another thread backgrounds the
+        // app (cancelling it), so it must not ask.
+        rig.watch.beforeTimerLock = {
+            rig.watch.beforeTimerLock = {}
+            rig.watch.setForeground(false)
+        }
+        advanceTimeBy(poll)
+        runCurrent()
+        rig.assertNoRequest()
+        advanceTimeBy(poll * 3)
+        runCurrent()
+        rig.assertNoRequest()
+        rig.watch.setForeground(true)
+        runCurrent()
+        rig.nextRequest().reply.complete(info())
+        runCurrent()
+
+        // Here the gate shuts and reopens meanwhile, which starts a new timer: the old one must not
+        // ask too, or two poll loops would run.
+        rig.watch.beforeTimerLock = {
+            rig.watch.beforeTimerLock = {}
+            rig.watch.setConnected(false)
+            rig.watch.setConnected(true)
+        }
+        advanceTimeBy(poll)
+        runCurrent()
+        rig.assertNoRequest()
+        // One loop: exactly one request per interval from here on.
+        repeat(4) {
+            advanceTimeBy(poll)
+            runCurrent()
+            rig.nextRequest().reply.complete(info())
+            runCurrent()
+            rig.assertNoRequest()
+        }
+    }
+
+    @Test
+    fun inFlightIsReleasedWhenTheScopeIsCancelled() = runTest {
+        val link = ScriptedStreamLink()
+        val scope = CoroutineScope(backgroundScope.coroutineContext + Job())
+        val watch = WorkgroupWatch(link, scope, workgroupID, pollInterval = poll)
+        // A scope already cancelled: the request never runs, and is not left "in flight".
+        scope.cancel()
+        watch.start()
+        runCurrent()
+        assertTrue(link.requests.tryReceive().isFailure)
+        assertTrue(watch.toString(), "asking=false" in watch.toString())
+
+        // A request cancelled with its scope while out is released as well.
+        val live = CoroutineScope(backgroundScope.coroutineContext + Job())
+        val other = WorkgroupWatch(link, live, workgroupID, pollInterval = poll)
+        other.start()
+        runCurrent()
+        link.requests.tryReceive().getOrThrow()
+        assertTrue("asking=true" in other.toString())
+        live.cancel()
+        runCurrent()
+        assertTrue(other.toString(), "asking=false" in other.toString())
+    }
+
+    @Test
+    fun startAfterGoneAsksAgain() = runTest {
+        val rig = rig()
+        rig.watch.start()
+        runCurrent()
+        rig.nextRequest().reply.complete(sampleReply("error-unknown-workgroup"))
+        runCurrent()
+        assertEquals(WorkgroupState.Failed(WorkgroupFailure.GONE, retryable = false), rig.watch.state.value)
+        // The view appears again: a fresh start asks once more, showing Loading meanwhile.
+        rig.watch.stop()
+        rig.watch.start()
+        runCurrent()
+        assertEquals(WorkgroupState.Loading, rig.watch.state.value)
+        rig.nextRequest().reply.complete(info())
+        runCurrent()
+        assertFalse(shown(rig.watch).stale)
+    }
+
+    @Test
+    fun reAskAfterFailureShowsLoading() = runTest {
+        val rig = rig()
+        rig.watch.start()
+        runCurrent()
+        rig.nextRequest().reply.completeExceptionally(CompanionRequestException("timed out"))
+        runCurrent()
+        assertEquals(WorkgroupState.Failed(WorkgroupFailure.UNREACHABLE, retryable = true), rig.watch.state.value)
+        // The next poll asks again: the failure gives way to Loading while it is out.
+        advanceTimeBy(poll)
+        runCurrent()
+        assertEquals(WorkgroupState.Loading, rig.watch.state.value)
+        rig.nextRequest().reply.complete(info())
+        runCurrent()
+        assertTrue(rig.watch.state.value is WorkgroupState.Shown)
+    }
+
+    @Test
+    fun stopWhileRefreshingClearsRefreshing() = runTest {
+        val rig = rig()
+        rig.watch.start()
+        runCurrent()
+        rig.nextRequest().reply.complete(info())
+        runCurrent()
+        rig.watch.refresh()
+        runCurrent()
+        val refresh = rig.nextRequest()
+        assertTrue(shown(rig.watch).refreshing)
+        rig.watch.stop()
+        assertFalse(shown(rig.watch).refreshing)
+        refresh.reply.complete(otherError())
+        runCurrent()
+        assertEquals(false, shown(rig.watch).stale)
     }
 }
