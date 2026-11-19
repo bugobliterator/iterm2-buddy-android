@@ -41,6 +41,86 @@ the JVM has no HEVC decoder. The test checks that:
 
 This is the first check that VideoToolbox can encode HEVC on the hosted (virtual) Mac.
 
+## The Claude Code status probe
+
+The owner's plan: the Sessions rows show Working, Waiting, Done and Error chips parsed from the
+session subtitle, once the owner's profile has `\(status)` in its Subtitle, and the phone
+re-fetches the session tree about every 4 s while the Sessions list is visible.
+`RealIterm2ClaudeStatusTest` proves that path on the real Mac.
+
+What carries the state, in iTerm2 3.7.7:
+
+- Claude Code's hook is `it2 handle-agent-hook` (`cc-status` is a shim for it). It reads the
+  event's JSON on stdin and runs `it2 set-status` for the session it runs in, found by
+  `TERM_SESSION_ID` (AgentHookAddress.swift:44-102). Its decision table
+  (AgentHookEvent.swift:229-455): UserPromptSubmit, PreToolUse and PostToolUse say `working`;
+  PermissionRequest and Notification `waiting`; Stop `done`; StopFailure `error`; SessionStart
+  and SessionEnd `idle`.
+- `status` is the session's tab status text (PTYSession.m:27470-27480, iTermVariables.m:103),
+  and the session's subtitle is its profile's Subtitle evaluated as an interpolated string in
+  the session scope (PTYSession.m:6644, 6783-6807, 6880-6881). An escape sequence cannot set an
+  interpolated subtitle (PTYSession.m:17149-17156), so the format comes from a profile.
+- A subtitle change does not push a session tree: iTerm2 pushes one only when a session ends, the
+  session count changes or a presentation name changes (CompanionHostBridge.swift:191-201). The
+  phone must re-fetch.
+
+`seed-claude-status.sh` sets it up before launch:
+
+- the Dynamic Profile `~/Library/Application Support/iTerm2/DynamicProfiles/buddy-ci-status.json`,
+  `{"Profiles":[{"Guid":"buddy-ci-status","Name":"buddy-ci-status","Subtitle":"\\(status)"}]}`;
+- `Default Bookmark Guid` = `buddy-ci-status`, so the window iTerm2 opens at launch uses it.
+  ITAddressBookMgr makes a Dynamic Profile the default when it has the GUID the defaults name
+  (ITAddressBookMgr.m:308, 369-376). This needs no AppleScript (Automation permission) and no
+  API call to open a window. Every test's first terminal session is therefore on this profile;
+  its subtitle stays empty until a status is set;
+- what the bundled it2 needs to reach iTerm2 from inside the session. it2 talks to the API
+  server's unix socket, `~/Library/Application Support/iTerm2/private/socket`
+  (SocketConnection.swift:8-42, 131-150), which exists only with the Python API on, so
+  `EnableAPIServer` is on (read at launch, iTermApplicationDelegate.m:1806-1808; no "Enable
+  Python API?" prompt when it is already on, iTermAPIHelper.m:681-688). Without the socket
+  handle-agent-hook does nothing and says nothing (AgentHookAddress.swift:85-101). it2 takes its
+  cookie from `ITERM2_COOKIE` and otherwise asks iTerm2 for one over AppleScript
+  (CookieAuth.swift:7-15), which needs the Automation permission; the advanced setting
+  `SetCookie` puts `ITERM2_COOKIE` in new sessions (PTYSession.m:3501-3504). That cookie is single
+  use (iTermWebSocketCookieJar.m:35-53) and it2 asks for no auth UI (WebSocketClient.swift:27), so
+  the later connections are let in by "Allow all apps to connect": the root-owned
+  `disable-automation-auth` file in Application Support, hex(its path), a space and a fixed UUID
+  (iTermAPIHelper.m:70, 410-462, 566-576, 1634-1654), written with sudo as iTerm2 would write it
+  behind an administrator prompt;
+- a check that `/Applications/iTerm.app/Contents/Resources/utilities/it2` exists and has
+  `handle-agent-hook` and `set-status`. iTerm2 copies it2 into `Contents/Resources/utilities`
+  (project.pbxproj:5036-5042, the CopyFiles phase with `dstPath = utilities` and
+  `dstSubfolderSpec = 7`, from `it2cli/bin/it2`, :8413). Claude Code's installer only symlinks
+  it as `<dot dir>/it2`, usually `~/.config/iterm2/it2` (ClaudeCodeOnboarding.swift:1966-1983,
+  2042-2077); the Claude watcher is off here, so the test calls the bundle's copy.
+
+The test runs after stages 1 and 2 and before Agent Chat, which can leave the main thread
+blocked. It types, through the app's `InputSender` as the input test does, one line per hook
+event into the first terminal session: `printf '%s' '<event JSON>' | "<it2>" handle-agent-hook`,
+with it2's stderr appended to `claude-status-it2-stderr.txt` in the diagnostics. The hook runs in
+the session, so it finds the session and authenticates exactly as Claude Code's would. After
+each line it polls `fetchSessionTree` until the session's subtitle, trimmed and lowercased, reads:
+
+| Event | Subtitle |
+| --- | --- |
+| `SessionStart` (a session boundary: a hook that cannot reach iTerm2 says why on stderr) | `idle` |
+| `UserPromptSubmit` | `working` |
+| `PermissionRequest`, `tool_name` `Bash` | `waiting` |
+| `Stop` | `done` |
+| `StopFailure` | `error` |
+
+Typing the StopFailure line turns `done` to `idle` first (a key press is the owner seeing the
+result, iTermTabStatusController.swift:256-272); the hook then says `error`. The test also logs
+every unsolicited session tree that arrives while it runs and what it said about the session.
+None is expected from the status itself; a job name in the session's title can still push one.
+
+The fallback to `it2 set-status --status working` was not needed as the method: it uses the same
+socket and cookie as the hook, so it would not avoid any of the setup. It is used only to
+diagnose a failed step. Then the test runs `it2 session get-status --session <guid>` (is the
+status stored?) and `it2 set-status --session <guid> --status probe` (does the subtitle follow
+a status set without the hook?) in the session, and puts both answers and it2's stderr in the
+failure message.
+
 ## Stage 3: Agent Chat on a fake model
 
 iTerm2's AI runs on `fake-model.mjs`, a local OpenAI Chat Completions server (Node built-ins only)
@@ -104,11 +184,12 @@ what was typed.
 | Mint the pairing | `generate-pairing.sh` | Runs `GenerateCiPairing.java` to make a Mac X25519 key pair, a phone X25519 key pair, a room secret and a pairing ID. It writes them to `$RUNNER_TEMP/real-iterm2/pairing.env` with mode 600. |
 | Seed iTerm2 | `seed-pairing.sh` | Writes the root-owned `EnableCompanionPairing` secure setting with sudo and sets the defaults (relay origin, an empty resolver for direct mode, the paired ID, the Claude watcher off, no tips or update prompts). It also puts the Mac private key and the phone public key in a CI keychain whose partition list names iTerm2's team. |
 | Seed AI | `seed-ai.sh` | Writes the root-owned `EnableAI` secure setting and the AI defaults (`UseRecommendedAIModel` off, one `AIManualModelConfigurations` entry for the fake model, `AiModel` naming it, the token budget `AiMaxTokens`/`AiResponseMaxTokens`), answers iTerm2's one-time AI prompts (model catalog updates, automatic terminal sharing, the safety-check migration), and reads them back typed. |
+| Seed the status profile | `seed-claude-status.sh` | Installs the `buddy-ci-status` Dynamic Profile (Subtitle `\(status)`) and makes it the default, turns on `EnableAPIServer` and `SetCookie`, writes the root-owned `disable-automation-auth` file, and checks the bundled it2. It continues on error: a failure here fails only `RealIterm2ClaudeStatusTest`. |
 | Start the relay | `start-relay.sh` | Fetches the relay at `b8aa2f9` the way `scripts/relay-it.sh` does and makes a throwaway CA and a `localhost` certificate. It trusts the CA system-wide and starts the relay on `127.0.0.1:8787` (open mode, `RELAY_ORIGIN=https://localhost:8443`). Then it starts `tls-proxy.mjs` on `localhost:8443`. |
 | Start the fake model | `start-fake-model.sh` | Starts `fake-model.mjs` on `127.0.0.1:8790` and waits for `/health`. |
 | Launch iTerm2 | `launch-iterm2.sh` | Runs `open -a iTerm`, then waits for the relay to log `hello role=mac` (iTerm2 parked) and takes a screenshot. |
-| Test | `./gradlew realIterm2Test --tests …` | Runs stages 1 and 2, then, in its own step that runs even when they fail, stage 3, so a main thread that Agent Chat leaves blocked cannot fail them. The phone connects to the relay directly at `ws://127.0.0.1:8787/` and signs for `https://localhost:8443`. |
-| Diagnostics | `collect-diagnostics.sh` | Always runs. It collects screenshots, the relay, proxy and fake model logs, the companion and AI defaults, both secure settings, which seeded keychain items were migrated, both plugin lookups, the fake model's counts and captured request shape, iTerm2's unified log and crash reports. They are uploaded with the test reports as `real-iterm2-<run>-<attempt>`. |
+| Test | `./gradlew realIterm2Test --tests …` | Runs stages 1 and 2, then, each in its own step that runs even when the ones before fail, the Claude Code status probe and stage 3, so a main thread that Agent Chat leaves blocked cannot fail the others. The phone connects to the relay directly at `ws://127.0.0.1:8787/` and signs for `https://localhost:8443`. |
+| Diagnostics | `collect-diagnostics.sh` | Always runs. It collects screenshots, the relay, proxy and fake model logs, the companion and AI defaults, both secure settings, the status probe's defaults and files (the profile, `disable-automation-auth`, the API socket, it2), which seeded keychain items were migrated, both plugin lookups, the fake model's counts and captured request shape, iTerm2's unified log and crash reports. They are uploaded with the test reports as `real-iterm2-<run>-<attempt>`. |
 
 `dump-iterm2-state.sh <label>` prints, as text in the job log, what a screenshot would show:
 iTerm2's on-screen windows (CGWindowList: ID, owner PID, layer, bounds, and the pixel size of a
@@ -158,6 +239,16 @@ never runs them. `RealIterm2Rig` holds the setup they share.
 - Actions: pinned by commit SHA, the same as `android-build.yml`.
 
 ## Known risks
+
+- **The status probe.** The failure message says which part broke. it2's stderr (in the
+  diagnostics, `claude-status-it2-stderr.txt`) names a connection or authentication error when
+  it2 cannot reach iTerm2: the socket is missing (`EnableAPIServer` was not read), or the
+  connection was refused (`disable-automation-auth` is not root-owned or does not match, which
+  can also bring up iTerm2's "Python API Permissions Reset" warning; see the screenshots).
+  `get-status` showing the expected status while the subtitle stays empty means the session is
+  not on the `\(status)` profile (`Default Bookmark Guid` did not take, or the Dynamic Profile did
+  not load). A direct `set-status` that shows while the hook's does not puts the fault in the
+  hook's path: it found no `TERM_SESSION_ID`, or decided differently.
 
 - **System trust for the local CA.** `security add-trusted-cert` into the System keychain can
   need interaction on recent macOS. The script relaxes `com.apple.trust-settings.admin` first.
