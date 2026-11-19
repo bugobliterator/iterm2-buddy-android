@@ -111,9 +111,13 @@ what was typed.
 | Diagnostics | `collect-diagnostics.sh` | Always runs. It collects screenshots, the relay, proxy and fake model logs, the companion and AI defaults, both secure settings, which seeded keychain items were migrated, both plugin lookups, the fake model's counts and captured request shape, iTerm2's unified log and crash reports. They are uploaded with the test reports as `real-iterm2-<run>-<attempt>`. |
 
 `dump-iterm2-state.sh <label>` prints, as text in the job log, what a screenshot would show:
-iTerm2's on-screen windows (CGWindowList), each dialog's or sheet's texts and buttons (System
-Events), the top of iTerm2's main thread (`sample`) and its unified log filtered to AI, chat,
-network, plugin and companion lines. It runs after launch, in the diagnostics, and from
+iTerm2's on-screen windows (CGWindowList: ID, owner PID, layer, bounds, and the pixel size of a
+`screencapture -l` of each non-terminal window), each dialog's or sheet's texts and buttons
+(System Events), the AI defaults as iTerm2 holds them, the top of iTerm2's main thread (`sudo
+sample`, else `sudo spindump`) and its unified log filtered to AI, chat, network, plugin and
+companion lines. A centered layer-25 window 88 points high is CompanionToast ("iTerm2 Buddy
+connected"), which outlives its 1.8 s timer only while the main thread is blocked; System Events
+reporting no windows while CGWindowList lists some also means a blocked main thread, not a modal. It runs after launch, in the diagnostics, and from
 `RealIterm2AgentChatTest` when it fails. The chat test also fails within 30 s of a send when the
 fake model gets no chat request, and prints the Mac's `macStatus` (main thread blocked, open
 alerts) as it changes.
@@ -179,6 +183,9 @@ never runs them. `RealIterm2Rig` holds the setup they share.
 - **AI off.** The test fails first with "the Mac reports AI off" when iTerm2's hello says AI is
   unavailable: the AI plugin is missing or fails its check (version 1.1 expected), or `EnableAI`
   was not read. The diagnostics show the AI plugin lookup and the secure setting.
+- **The Ollama probe.** iTerm2 probes `http://localhost:11434` (the built-in Ollama endpoint)
+  whenever it reads its model list, and retries every 5 s when that fails. It is not the chat's
+  endpoint; the fake model's stub answers it with no models (`ollama-stub:` lines in its log).
 - **The model call.** If the fake log shows no `POST`, iTerm2 never called the model: the manual
   model was not picked up (`defaults-ai-models.txt`), or App Transport Security refused plain http
   to `127.0.0.1`. If the reply step fails while the fake logged `text:no-trigger` answers, the

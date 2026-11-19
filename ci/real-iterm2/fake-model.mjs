@@ -8,6 +8,14 @@
 //   FAKE_MODEL_TOOL                      the tool the approval trigger calls (session_execute_command)
 //   FAKE_MODEL_TOOL_SCHEMA_SHA256        that tool's pinned schema hash; empty: not pinned yet
 //   FAKE_MODEL_CHUNK_DELAY_MS (250)      the pause between streamed chunks
+//   FAKE_MODEL_OLLAMA_PORT (11434)       an Ollama discovery stub on 127.0.0.1 and ::1; 0 turns it off
+//
+// The Ollama stub: iTerm2 probes the built-in Ollama endpoint, http://localhost:11434
+// (LLMMetadata.swift:627), whenever it reads its manual models (manualModels() names the built-in
+// Ollama models, LLMMetadata.swift:543-564, through OllamaModelCache, which retries a failed
+// endpoint every 5 s, OllamaModelCache.swift:114-118). That probe is not the chat's endpoint. The
+// stub answers GET /api/tags with no models (and /api/version), so the probe succeeds quietly, and
+// its log lines show that iTerm2 reaches plain http on this machine.
 //
 // POST /v1/chat/completions answers as OpenAI does, as server-sent events when the body asks for
 // `stream` and as one JSON object otherwise:
@@ -38,6 +46,7 @@ const diagnosticsDir = process.env.FAKE_MODEL_DIAGNOSTICS_DIR || "";
 const toolName = process.env.FAKE_MODEL_TOOL || "session_execute_command";
 const pinnedSchemaSha256 = (process.env.FAKE_MODEL_TOOL_SCHEMA_SHA256 || "").trim();
 const chunkDelayMs = Number(process.env.FAKE_MODEL_CHUNK_DELAY_MS || 250);
+const ollamaPort = Number(process.env.FAKE_MODEL_OLLAMA_PORT ?? 11434);
 
 // Synthetic test data, mirrored in RealIterm2AgentChatTest; never real content.
 const TRIGGER = "buddy-ci-approval-trigger";
@@ -61,6 +70,8 @@ const stats = {
   // /v1/chat/completions.
   firstPaths: [],
   pathCounts: {},
+  // Requests to the Ollama discovery stub, by method and path.
+  ollamaPathCounts: {},
   firstToolsRequest: null,
   targetTool: { name: toolName, offered: null, sha256: null, pinnedSha256: pinnedSchemaSha256 || null, matchesPin: null },
   lastDecision: null,
@@ -351,4 +362,25 @@ server.listen(port, "127.0.0.1", () => {
       `reply of ${REPLY.length} chars in ${REPLY_PARTS.length} chunks ${chunkDelayMs} ms apart`,
   );
 });
+// The Ollama discovery stub (see the header).
+function handleOllama(req, res) {
+  const url = new URL(req.url, "http://127.0.0.1");
+  const key = `${req.method} ${url.pathname}`;
+  stats.ollamaPathCounts[key] = (stats.ollamaPathCounts[key] ?? 0) + 1;
+  log(`ollama-stub: ${key} from ${req.socket.remoteAddress}`);
+  req.resume();
+  if (req.method === "GET" && url.pathname === "/api/tags") return sendJson(res, 200, { models: [] });
+  if (req.method === "GET" && url.pathname === "/api/version") return sendJson(res, 200, { version: "0.0.0-buddy-ci" });
+  return sendJson(res, 404, { error: "not found" });
+}
+const ollamaServers = [];
+if (ollamaPort > 0) {
+  for (const host of ["127.0.0.1", "::1"]) {
+    const ollama = http.createServer(handleOllama);
+    ollama.on("error", (error) => log(`ollama-stub: cannot listen on [${host}]:${ollamaPort}: ${error.code}`));
+    ollama.listen(ollamaPort, host, () => log(`ollama-stub: listening on [${host}]:${ollamaPort}`));
+    ollamaServers.push(ollama);
+  }
+}
+
 for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => server.close(() => process.exit(0)));

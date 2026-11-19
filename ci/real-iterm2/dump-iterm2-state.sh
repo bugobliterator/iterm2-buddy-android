@@ -2,12 +2,19 @@
 # Prints into the job log what a screenshot of iTerm2 would show, since the uploaded artifact may
 # be out of reach: usage `dump-iterm2-state.sh <label>`.
 #
-# 1. Every on-screen window owned by iTerm2 (CGWindowListCopyWindowInfo): layer, name, bounds.
+# 1. Every on-screen window owned by iTerm2 (CGWindowListCopyWindowInfo): window ID, owner PID,
+#    layer, name, bounds, and the pixel size of a `screencapture -l` of each window that is not
+#    the terminal (the image stays in the diagnostics). A layer-25 window of 88 points' height
+#    in the screen's middle is CompanionToast ("iTerm2 Buddy connected", CompanionToast.swift:30,
+#    53, 84-97): it fades out on a main-queue timer, so it stays up only while the main thread is
+#    blocked.
 # 2. Through System Events (Accessibility), each iTerm2 window's role and title, and the static
 #    texts and button titles of each dialog, sheet or alert: iTerm2's own UI strings. A terminal
-#    window's text areas are not read.
-# 3. A 2-second `sample` of iTerm2 and the top of its main thread's call graph (function names
-#    only), which tells a modal (NSApplication runModal) from a hang.
+#    window's text areas are not read. Accessibility is served by the app's main thread: "windows:
+#    0" while CGWindowList lists windows means the main thread is not running its run loop (a
+#    hang, not a modal: NSApplication.runModal keeps serving it).
+# 3. The main thread's stack (function names only): `sudo sample` for 2 s (iTerm2's hardened
+#    runtime refuses an unprivileged sample), else `sudo spindump`.
 # 4. The last 10 minutes of iTerm2's unified log, filtered to AI, LLM, chat, URLSession, ATS,
 #    plugin and companion lines, with long quoted strings redacted and lines cut at 300 chars.
 #
@@ -40,18 +47,42 @@ if [[ -z "$pid" ]]; then
 fi
 say "iTerm2 pid $pid"
 
-say "--- on-screen windows (CGWindowList): layer | name | x,y wxh"
-bounded 20 osascript -l JavaScript -e '
+say "--- on-screen windows (CGWindowList): id | pid | layer | name | x,y wxh"
+windows="$(bounded 20 osascript -l JavaScript -e '
 ObjC.import("CoreGraphics");
 const list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, $.kCGNullWindowID)));
 const lines = [];
 for (const w of list || []) {
   if (w.kCGWindowOwnerName !== "iTerm2") continue;
   const b = w.kCGWindowBounds || {};
-  lines.push(`layer ${w.kCGWindowLayer} | ${w.kCGWindowName === undefined ? "(no name)" : JSON.stringify(w.kCGWindowName)} | ${b.X},${b.Y} ${b.Width}x${b.Height} | alpha ${w.kCGWindowAlpha}`);
+  lines.push(`${w.kCGWindowNumber} | pid ${w.kCGWindowOwnerPID} | layer ${w.kCGWindowLayer} | ${w.kCGWindowName === undefined ? "(no name)" : JSON.stringify(w.kCGWindowName)} | ${b.X},${b.Y} ${b.Width}x${b.Height} | alpha ${w.kCGWindowAlpha}`);
 }
 lines.length ? lines.join("\n") : "no on-screen iTerm2 windows";
-' 2>&1 | sed 's/^/    /' | tee -a "$out"
+' 2>&1)"
+printf '%s\n' "$windows" | sed 's/^/    /' | tee -a "$out"
+# A picture of each window that is not a terminal window (layer 0 named after its session) or the
+# status item; only its size reaches the log.
+printf '%s\n' "$windows" | while IFS='|' read -r id _ layer name _; do
+    id="$(printf '%s' "$id" | tr -d ' ')"
+    [[ "$id" =~ ^[0-9]+$ ]] || continue
+    [[ "$layer" == *"layer 0"* || "$name" == *Item-* ]] && continue
+    shot="$DIAGNOSTICS_DIR/window-$safe_label-$id.png"
+    if bounded 15 screencapture -x -o -l"$id" "$shot" 2>/dev/null && [[ -s "$shot" ]]; then
+        say "    window $id captured: $(sips -g pixelWidth -g pixelHeight "$shot" 2>/dev/null | awk '/pixel/ { printf "%s=%s ", $1, $2 }')($(wc -c < "$shot" | tr -d ' ') bytes, $(basename "$shot"))"
+    else
+        say "    window $id: screencapture -l failed"
+    fi
+done
+
+say "--- AI defaults as iTerm2 sees them now (JSON)"
+exported="$WORK_DIR/iterm2-defaults-$safe_label.plist"
+if defaults export "$ITERM2_BUNDLE_ID" "$exported" 2>/dev/null; then
+    for key in UseRecommendedAIModel AiModel AIVendor AIEconomyModelName AIManualModelConfigurations AICustomHeadersEnabled; do
+        say "    $key = $(plutil -extract "$key" json -o - "$exported" 2>&1 | cut -c1-600)"
+    done
+    say "    NoSyncOllamaDiscoveredModels present: $(plutil -extract NoSyncOllamaDiscoveredModels json -o /dev/null "$exported" 2>/dev/null && echo yes || echo no)"
+    rm -f "$exported"
+fi
 
 say "--- windows, sheets and alerts (System Events): role | title, then texts and buttons of dialogs"
 bounded 40 osascript <<'APPLESCRIPT' 2>&1 | sed 's/^/    /' | tee -a "$out"
@@ -125,15 +156,27 @@ with timeout of 30 seconds
 end timeout
 APPLESCRIPT
 
-say "--- main thread (sample, 2 s; function names only)"
+say "--- main thread (function names only)"
 sample_file="$DIAGNOSTICS_DIR/iterm2-sample-$safe_label.txt"
-if bounded 30 sample "$pid" 2 -file "$sample_file" >/dev/null 2>&1 && [[ -f "$sample_file" ]]; then
+rm -f "$sample_file"
+if bounded 40 sudo -n /usr/bin/sample "$pid" 2 -file "$sample_file" > "$sample_file.err" 2>&1 && [[ -s "$sample_file" ]]; then
+    say "    (sudo sample, 2 s)"
     awk '/^Call graph:/ { graph = 1; next }
          graph && /^ *[0-9]+ Thread_/ { if (main) exit; if ($0 ~ /main-thread|DispatchQueue_1:/) main = 1 }
-         main { print; if (++n >= 70) exit }' "$sample_file" |
-        cut -c1-200 | sed 's/^/    /' | tee -a "$out"
+         main { print; if (++n >= 90) exit }' "$sample_file" |
+        cut -c1-220 | sed 's/^/    /' | tee -a "$out"
 else
-    say "    sample failed"
+    say "    sudo sample failed: $(tr '\n' ' ' < "$sample_file.err" | cut -c1-300)"
+    spin_file="$DIAGNOSTICS_DIR/iterm2-spindump-$safe_label.txt"
+    if bounded 150 sudo -n /usr/sbin/spindump "$pid" 2 -file "$spin_file" > "$spin_file.err" 2>&1 && [[ -s "$spin_file" ]]; then
+        sudo -n chmod a+r "$spin_file" 2>/dev/null
+        say "    (sudo spindump, 2 s)"
+        awk '/^ *Thread 0x/ { if (main) exit; if ($0 ~ /main-thread/) main = 1 }
+             main { print; if (++n >= 90) exit }' "$spin_file" |
+            cut -c1-220 | sed 's/^/    /' | tee -a "$out"
+    else
+        say "    sudo spindump failed: $(tr '\n' ' ' < "$spin_file.err" | cut -c1-300)"
+    fi
 fi
 
 say "--- iTerm2 unified log, last 10 min, AI/chat/network/plugin/companion lines (last 250)"
