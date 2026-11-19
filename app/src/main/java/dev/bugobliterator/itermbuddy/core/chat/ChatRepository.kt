@@ -159,6 +159,15 @@ sealed interface ConversationState {
     }
 }
 
+/** What [ChatRepository.create] did. Carries no content. */
+sealed interface CreateOutcome {
+    /** The Mac created [chatID] (`chatCreated`); it is in the list, and the caller opens it. */
+    data class Created(val chatID: String) : CreateOutcome
+
+    /** Not created; [retryable] unless AI is off on the Mac (Try again then cannot help). */
+    data class Failed(val retryable: Boolean) : CreateOutcome
+}
+
 /** A chat-list row: the Mac's entry, the agent's state and whether it moved since the owner looked. */
 data class ChatRow(val entry: ChatListEntry, val state: AgentState, val unread: Boolean)
 
@@ -179,6 +188,7 @@ data class ChatListSnapshot(val list: ChatListState, val rows: List<ChatRow>, va
 data class ChatTimeouts(
     val list: Duration = 15.seconds,
     val subscribe: Duration = 15.seconds,
+    val create: Duration = 15.seconds,
     val echo: Duration = 10.seconds,
     val deleteListWait: Duration = 3.seconds,
     val snapshotInterval: Duration = 100.milliseconds,
@@ -261,6 +271,18 @@ data class ChatTimeouts(
  * [discardUnsent] drops it. A late echo of an original withdrawn by Retry or Delete still upserts:
  * the original reappears, delivered, at the end of the transcript, after the copy, and only the
  * next history restores the Mac's order.
+ *
+ * **Managing chats** (`AM:2582-2765`). [create] asks the Mac for a chat (`createChat`, a request in
+ * its own coroutine); its `chatCreated` reply inserts the entry at the top if missing, and the
+ * caller opens it. [delete] removes the row, its transcript, activity and marks at once and sends
+ * `deleteChat`; since the Mac pushes the list only when it changes and drops the delete silently
+ * while AI is off (`HB:2289-2293`), a list that does not come within [ChatTimeouts.deleteListWait]
+ * is fetched (an Android addition), and an unsolicited `error` while a delete is pending (a
+ * refused delete, `HB:458-470`) fetches it at once; its text is never shown or logged. [setMuted]
+ * flips the entry at once and sends `setChatMuted`; the Mac persists it without a push
+ * (`CompanionChatMuteRegistry.swift:28-38`), so the flag stands until the next list. [deleteFrom]
+ * truncates an open transcript from one of the owner's own messages at once and sends
+ * `deleteMessages` (Mac revision 12 and later); the `messagesRemoved` echo removes nothing more.
  *
  * [clear] (unpair) drops everything, ignores every input from links up to then, and clears the
  * [OversizedChats] and [seen] on the consumer, so no mark lands after the wipe.
@@ -453,6 +475,13 @@ class ChatRepository(
     /** This phone's sends by chat, then by `uniqueID`, in sending order. */
     private val echoes = HashMap<String, LinkedHashMap<String, Echo>>()
 
+    /** Chats deleted on this link with no list since: a list fetch is due if none comes. */
+    private val pendingDeletes = HashSet<String>()
+    private var deleteWait: Job? = null
+
+    /** Names the scheduled delete wait; a superseded one's post does nothing. */
+    private var deleteWaitSerial = 0L
+
     /** Process-wide counter for [ConversationState.Shown.version]. */
     private var snapshotSerials = 0L
     private var cost = LinkCost(0, 0)
@@ -581,7 +610,7 @@ class ChatRepository(
      * [SendOutcome.Sent] once the publish is handed to the link ([NotSendableReason.SEND_FAILED],
      * the echo not delivered, when it cannot be). Suspends the caller only, never the consumer.
      */
-    suspend fun send(chatID: String, draft: MentionDraft): SendOutcome = onConsumer { result ->
+    suspend fun send(chatID: String, draft: MentionDraft): SendOutcome = onConsumer(SEND_WITHOUT_CONSUMER, SEND_THAT_THREW) { result ->
         val refused = whyNotSendable(chatID)
         val text = draft.serialised().trim()
         when {
@@ -595,7 +624,7 @@ class ChatRepository(
      * Sends again a message of this phone's marked [EchoState.NOT_DELIVERED]: a copy with a new
      * `uniqueID` takes its place at the end of the transcript.
      */
-    suspend fun retrySend(chatID: String, uniqueID: String): SendOutcome = onConsumer { result ->
+    suspend fun retrySend(chatID: String, uniqueID: String): SendOutcome = onConsumer(SEND_WITHOUT_CONSUMER, SEND_THAT_THREW) { result ->
         val echo = echoes[chatID]?.get(uniqueID.uppercase(Locale.ROOT))
         val refused = whyNotSendable(chatID)
         when {
@@ -615,21 +644,209 @@ class ChatRepository(
         if (echo != null && echo.state == EchoState.NOT_DELIVERED && !echo.withdrawn) withdraw(chatID, echo)
     }
 
-    /** Runs [block] on the consumer and returns what it completes; a dead consumer sends nothing. */
-    private suspend fun onConsumer(block: (CompletableDeferred<SendOutcome>) -> Unit): SendOutcome {
-        val stopped = SendOutcome.NotSendable(NotSendableReason.NOT_CONNECTED)
+    /**
+     * Creates a chat (`AM:2582-2602`): `createChat` titled "Orchestrator" or "New Chat" by [mode],
+     * on the current link, bounded by [ChatTimeouts.create]. [CreateOutcome.Created] once the
+     * Mac's `chatCreated` is in the list (inserted at the top if missing); the caller opens the
+     * conversation. Not connected, a timeout or a refusal is retryable; AI off is not (and is
+     * not asked). Suspends the caller only, never the consumer.
+     */
+    suspend fun create(mode: NewChatMode): CreateOutcome =
+        onConsumer(CREATE_WITHOUT_CONSUMER, CREATE_WITHOUT_CONSUMER) { result -> createNow(mode, result) }
+
+    /**
+     * Deletes [chatID] (the owner confirmed): the row, its transcript, activity and marks go at
+     * once (`AM:2605-2632`), and `deleteChat` is sent; see the class notes for the list fetch that
+     * follows when the Mac pushes none. Offline, the row goes and the next link's list brings it
+     * back (iOS removes it and the send fails).
+     */
+    fun delete(chatID: String) = post { deleteNow(chatID) }
+
+    /**
+     * Mutes or unmutes [chatID] (`AM:2748-2765`): its entry flips at once and `setChatMuted` is
+     * sent (not AI-gated on the Mac, `HB:481-486`). Nothing changes while there is no link, since
+     * nothing would reach the Mac.
+     */
+    fun setMuted(chatID: String, muted: Boolean) = post { setMutedNow(chatID, muted) }
+
+    /**
+     * Delete From Here (`AM:2637-2669`): removes [messageID]'s message and every one after it from
+     * [chatID]'s transcript at once and sends their IDs in `deleteMessages`. Only for the owner's
+     * own message ([Participant.USER]), only when the Mac's revision is 12 or later (an older Mac
+     * ignores it, `AM:2678-2680`) and the chat is sendable (a history on this link, AI on, listed).
+     * Returns whether it truncated and sent.
+     */
+    suspend fun deleteFrom(chatID: String, messageID: String): Boolean =
+        onConsumer(false, false) { result -> result.complete(deleteFromNow(chatID, messageID)) }
+
+    /**
+     * Runs [block] on the consumer and returns what it completes; a dead consumer does nothing and
+     * answers [stopped]; [block] throwing answers [failed].
+     */
+    private suspend fun <T> onConsumer(stopped: T, failed: T, block: (CompletableDeferred<T>) -> Unit): T {
         if (inbox.stopped) return stopped
-        val result = CompletableDeferred<SendOutcome>()
+        val result = CompletableDeferred<T>()
         // The consumer may stop after the check: the dropped post answers then.
         post(onDropped = { result.complete(stopped) }) {
             try {
                 block(result)
             } catch (e: Exception) {
-                result.complete(SendOutcome.NotSendable(NotSendableReason.SEND_FAILED))
+                result.complete(failed)
                 throw e
             }
         }
         return result.await()
+    }
+
+    // Managing chats
+
+    private fun createNow(mode: NewChatMode, result: CompletableDeferred<CreateOutcome>) {
+        val linkId = currentLink
+        if (linkId == null) {
+            result.complete(CreateOutcome.Failed(retryable = true))
+            return
+        }
+        if (!ai) {
+            // HB:2325: the Mac refuses it; iOS hides New Chat behind the AI-off panel.
+            result.complete(CreateOutcome.Failed(retryable = false))
+            return
+        }
+        val title = if (mode == NewChatMode.Orchestrator) ORCHESTRATOR_TITLE else NEW_CHAT_TITLE
+        log("creating a chat: ${if (mode == NewChatMode.Orchestrator) "orchestrator" else "session-bound"}")
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            val outcome = try {
+                Outcome.Replied(link.request(PhoneMessage.CreateChat(title, mode), onLink = linkId, timeout = timeouts.create) {})
+            } catch (e: CancellationException) {
+                result.complete(CreateOutcome.Failed(retryable = true))
+                throw e
+            } catch (e: RequestNotSentException) {
+                Outcome.NotSent(e.javaClass.simpleName)
+            } catch (e: Exception) {
+                Outcome.Failed(e.javaClass.simpleName)
+            }
+            post(onDropped = { result.complete(CreateOutcome.Failed(retryable = true)) }) {
+                result.complete(createOutcome(outcome, linkId))
+            }
+        }
+    }
+
+    private fun createOutcome(outcome: Outcome, linkId: Long): CreateOutcome {
+        val reply = (outcome as? Outcome.Replied)?.reply
+        return when {
+            reply is MacMessage.ChatCreated -> {
+                // Its reply went through the sink first and was inserted there; again here
+                // (idempotent) in case that link has gone since.
+                if (currentLink == linkId) chatCreated(reply.entry)
+                log("chat ${reply.entry.chat.id} created")
+                CreateOutcome.Created(reply.entry.chat.id)
+            }
+            reply is MacMessage.Error && reply.isAiUnavailable -> {
+                if (currentLink == linkId) aiOff()
+                CreateOutcome.Failed(retryable = false)
+            }
+            reply is MacMessage.Error -> {
+                log("creating a chat was refused: ${reply.code}")
+                CreateOutcome.Failed(retryable = true)
+            }
+            reply != null -> {
+                log("unexpected reply to creating a chat: ${reply.javaClass.simpleName}")
+                CreateOutcome.Failed(retryable = true)
+            }
+            else -> {
+                log("creating a chat failed: $outcome")
+                CreateOutcome.Failed(retryable = true)
+            }
+        }
+    }
+
+    private fun deleteNow(chatID: String) {
+        val listed = entries
+        if (listed != null && chatID in entryByID) setEntries(listed.filter { it.chat.id != chatID })
+        // At once, as iOS does: no typing or activity lingers until the Mac's list comes.
+        tracker.forget(chatID)
+        failedThisLink -= chatID
+        leftList(chatID)
+        // No longer wanted: the plan unsubscribes it (iOS tears its watch down too).
+        planNeeded = true
+        val linkId = currentLink
+        if (linkId == null) {
+            log("chat $chatID deleted while not connected: the next list restores it")
+            return
+        }
+        log("chat $chatID: deleting")
+        launchSend(PhoneMessage.DeleteChat(chatID), linkId)
+        pendingDeletes += chatID
+        deleteWait?.cancel()
+        val serial = ++deleteWaitSerial
+        deleteWait = scope.launch {
+            delay(timeouts.deleteListWait)
+            post { if (serial == deleteWaitSerial && pendingDeletes.isNotEmpty()) refetchAfterDelete("no list came") }
+        }
+    }
+
+    /** A delete is pending and the Mac refused it or pushed no list: the list is fetched now. */
+    private fun refetchAfterDelete(why: String) {
+        log("fetching the chat list after ${pendingDeletes.size} deletes: $why")
+        endDeleteWait()
+        if (ai) requestList()
+    }
+
+    private fun endDeleteWait() {
+        pendingDeletes.clear()
+        deleteWait?.cancel()
+        deleteWait = null
+        deleteWaitSerial++
+    }
+
+    private fun setMutedNow(chatID: String, muted: Boolean) {
+        val linkId = currentLink
+        if (linkId == null) {
+            log("chat $chatID mute not changed: not connected")
+            return
+        }
+        val listed = entries
+        if (listed != null && entryByID[chatID]?.muted != muted && chatID in entryByID) {
+            setEntries(listed.map { if (it.chat.id == chatID) it.copy(muted = muted) else it })
+        }
+        log("chat $chatID: muted $muted")
+        launchSend(PhoneMessage.SetChatMuted(chatID, muted), linkId)
+    }
+
+    private fun deleteFromNow(chatID: String, messageID: String): Boolean {
+        val revision = revisionFlow.value ?: 0
+        if (revision < MESSAGE_DELETION_REVISION) {
+            log("chat $chatID: Delete From Here needs Mac revision $MESSAGE_DELETION_REVISION, not $revision")
+            return false
+        }
+        val refused = whyNotSendable(chatID)
+        if (refused != null) {
+            log("chat $chatID: Delete From Here refused: $refused")
+            return false
+        }
+        val linkId = checkNotNull(currentLink)
+        val conversation = checkNotNull(conversations[chatID])
+        val transcript = checkNotNull(conversation.transcript)
+        val index = transcript.indexOf(messageID)
+        if (index < 0) return false
+        val message = transcript[index]
+        if (message.author != Participant.USER || message.hidden) {
+            log("chat $chatID: Delete From Here is only for the owner's own messages")
+            return false
+        }
+        // A suffix, in the transcript's order: the Mac truncates from the earliest it holds (CLM:253-281).
+        val ids = transcript.suffixFrom(messageID)
+        transcript.removeAll(ids.toSet())
+        val sent = echoes[chatID]
+        if (sent != null) {
+            // Sends of this phone's in the suffix go with it: none is put back by a later history.
+            for (id in ids) if (sent.remove(id) != null) forgetOwnSend(chatID, id)
+            if (sent.isEmpty()) echoes -= chatID
+        }
+        // Shown at once, not after the streaming rate limit.
+        conversation.snapshotAtMillis = null
+        log("chat $chatID: deleting ${ids.size} messages from ${message.uniqueID}")
+        launchSend(PhoneMessage.DeleteMessages(chatID, ids), linkId)
+        return true
     }
 
     // Sending
@@ -832,6 +1049,8 @@ class ChatRepository(
         }
         subscriptions = ChatSubscriptions(oversized)
         tracker.onLinkDown()
+        // The next link fetches the list anyway.
+        endDeleteWait()
         currentLink = null
         listInFlight = false
         log("chat link $linkId down: ${cost.subscribes} subscribes, ${cost.histories} histories, ${cost.bytes} bytes")
@@ -861,7 +1080,12 @@ class ChatRepository(
             is MacMessage.ChatListChanged -> applyList(message.chats)
             is MacMessage.ChatCreated -> chatCreated(message.entry)
             is MacMessage.AiAvailabilityChanged -> if (message.available) aiOn() else aiOff()
-            is MacMessage.Error -> log("chat error from the Mac: ${message.code}")
+            is MacMessage.Error -> {
+                log("chat error from the Mac: ${message.code}")
+                // A refused deleteChat comes back as an unsolicited error (HB:458-470): the list
+                // says what the Mac holds now.
+                if (requestID == null && pendingDeletes.isNotEmpty()) refetchAfterDelete("an error came")
+            }
             else -> log("chat input not handled: ${message.javaClass.simpleName}")
         }
     }
@@ -990,6 +1214,8 @@ class ChatRepository(
         }
         val previous = entries
         setEntries(newEntries)
+        // Any list now says what the Mac holds: a pending delete needs no fetch of its own.
+        if (pendingDeletes.isNotEmpty()) endDeleteWait()
         listOnThisLink = true
         listFailed = false
         listGeneration++
@@ -1318,6 +1544,7 @@ class ChatRepository(
         sendMarks.clear()
         previousModified.clear()
         echoes.clear()
+        endDeleteWait()
         lastWanted = emptyList()
         ai = true
         aiFlow.value = true
@@ -1523,6 +1750,17 @@ class ChatRepository(
             "This chat was deleted on your Mac. You can keep reading it until you leave, but nothing new can be sent."
     }
 }
+
+/** The title iOS gives an orchestrator chat it creates, and any other (`AM:2586`). */
+private const val ORCHESTRATOR_TITLE = "Orchestrator"
+private const val NEW_CHAT_TITLE = "New Chat"
+
+/** The Mac applies `deleteMessages` from this revision (`CPV` `messageDeletionRevision`, `AM:2678-2680`). */
+const val MESSAGE_DELETION_REVISION = 12
+
+private val SEND_WITHOUT_CONSUMER: SendOutcome = SendOutcome.NotSendable(NotSendableReason.NOT_CONNECTED)
+private val SEND_THAT_THREW: SendOutcome = SendOutcome.NotSendable(NotSendableReason.SEND_FAILED)
+private val CREATE_WITHOUT_CONSUMER: CreateOutcome = CreateOutcome.Failed(retryable = true)
 
 /** [ChatRepository]'s request hand-off: the launch has not returned yet / has / the request finished first. */
 private const val LAUNCHING = 0

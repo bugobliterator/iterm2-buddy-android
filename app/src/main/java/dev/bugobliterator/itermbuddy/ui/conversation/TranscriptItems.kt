@@ -52,6 +52,16 @@ sealed interface TranscriptItem {
     }
 }
 
+/**
+ * Whether [item] offers "Delete From Here": the owner's own bubbles only, as iOS and the Mac window
+ * offer it (`IOS/Views/MessageBubbleView.swift:40-47`), not notices or request cards, and not a send
+ * of this phone's whose echo has not come back (the Mac does not hold it yet; "Not delivered" has
+ * its own Delete). The screen offers it only when the conversation's
+ * [ConversationContent.deletesFromHere] holds too.
+ */
+fun offersDeleteFromHere(item: TranscriptItem): Boolean =
+    item is TranscriptItem.Bubble && item.fromUser && (item.echo == null || item.echo == EchoState.DELIVERED)
+
 /** The typing indicator shows while the agent is working (not while it waits on the owner). */
 fun showsTyping(state: AgentState?): Boolean = state == AgentState.WORKING
 
