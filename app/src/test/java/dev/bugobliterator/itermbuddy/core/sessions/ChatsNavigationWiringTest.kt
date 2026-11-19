@@ -124,6 +124,20 @@ class ChatsNavigationWiringTest {
         assertEquals(ChatListContent.Loading, rig.graph.chatListNow())
     }
 
+    /** The old rows are refused the moment the chats are cleared, before (or without) the consumer running it. */
+    @Test
+    fun theOldRowsNeverShowOnceTheChatsAreCleared() = runTest {
+        val rig = connected()
+        val collector = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { rig.graph.chatList.collect { } }
+        settle()
+        assertTrue(rig.graph.chatListNow() is ChatListContent.Rows)
+        rig.chats.clear()
+        assertEquals("no consumer step has run yet", ChatListContent.Loading, rig.graph.chatListNow())
+        settle()
+        assertEquals(ChatListContent.Loading, rig.graph.chatListNow())
+        collector.cancel()
+    }
+
     /** A visit longer than the sharing stop: coming back shows the content as it was, on the first frame. */
     @Test
     fun backAfterALongVisitShowsThePreviousContentAtOnce() = runTest {

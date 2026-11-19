@@ -21,6 +21,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
 
 /** The chat list as the Chats tab shows it. */
@@ -212,8 +213,15 @@ data class ChatAvailability(val generation: Long, val aiAvailable: Boolean, val 
  * The chat list, its rows and AI availability as one value, published together, so a reader
  * never sees a new list with the previous rows. [toString] shows counts only.
  */
-data class ChatListSnapshot(val list: ChatListState, val rows: List<ChatRow>, val aiAvailable: Boolean) {
-    override fun toString(): String = "ChatListSnapshot(list=$list, rows=${rows.size}, aiAvailable=$aiAvailable)"
+data class ChatListSnapshot(
+    val list: ChatListState,
+    val rows: List<ChatRow>,
+    val aiAvailable: Boolean,
+    /** The pairing it belongs to ([ChatRepository.pairingEpoch] when it was published). */
+    val pairingEpoch: Long = 0,
+) {
+    override fun toString(): String =
+        "ChatListSnapshot(list=$list, rows=${rows.size}, aiAvailable=$aiAvailable, pairingEpoch=$pairingEpoch)"
 }
 
 /**
@@ -385,7 +393,26 @@ class ChatRepository(
     val availability: StateFlow<ChatAvailability?> = availabilityFlow.asStateFlow()
 
     /** How many times AI turned off on a link (`aiAvailabilityChanged(false)`), for [availability]. */
-    private var aiOffs = 0L
+    @Volatile private var aiOffs = 0L
+
+    /**
+     * [availability]'s AI-off count as it stands now (it may be ahead of the value a reader has
+     * received): the navigator's floor at an unpair, so the old pairing's values still on their
+     * way are ignored.
+     */
+    val aiOffCount: Long get() = aiOffs
+
+    private val pairingEpochFlow = MutableStateFlow(0L)
+
+    /**
+     * Bumped by [clear] at once, on the caller's thread: a [listSnapshot] whose
+     * [ChatListSnapshot.pairingEpoch] is below it belongs to a pairing that is gone, even while
+     * the consumer has not run the clear yet (or never will).
+     */
+    val pairingEpoch: StateFlow<Long> = pairingEpochFlow.asStateFlow()
+
+    /** The epoch [listSnapshot] is published with: the newest clear the consumer has run. Consumer only. */
+    private var snapshotEpoch = 0L
 
     private val aiFlow = MutableStateFlow(true)
 
@@ -634,7 +661,10 @@ class ChatRepository(
      * Unpair: drops everything, ignores every input from the links seen so far, and clears the
      * oversized chats and the seen marks on the consumer, so none lands after the wipe.
      */
-    fun clear() = post { clearNow() }
+    fun clear() {
+        val epoch = pairingEpochFlow.updateAndGet { it + 1 }
+        post { clearNow(epoch) }
+    }
 
     /**
      * An own message was published to [chatID] (the send action calls this): the first list value
@@ -1612,7 +1642,8 @@ class ChatRepository(
 
     // Unpair
 
-    private fun clearNow() {
+    private fun clearNow(epoch: Long) {
+        snapshotEpoch = maxOf(snapshotEpoch, epoch)
         // The barrier is taken when the consumer runs this, not when clear() was called: every
         // input already in the inbox was consumed before it, and every later one names a link up
         // to newestLink (dropped) or a newer link, which can only come from a new pairing because
@@ -1767,7 +1798,7 @@ class ChatRepository(
             val mark = seen.seen(chatID)
             ChatRow(entry, state, unread = state == AgentState.DONE || (mark != null && entry.chat.lastModifiedMillis > mark))
         }
-        snapshotFlow.value = ChatListSnapshot(listFlow.value, rowsFlow.value, ai)
+        snapshotFlow.value = ChatListSnapshot(listFlow.value, rowsFlow.value, ai, snapshotEpoch)
         for ((chatID, flow) in conversationFlows) {
             val next = conversationState(chatID, now)
             if (next != flow.value) flow.value = next

@@ -37,6 +37,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -175,27 +176,22 @@ fun HomeScaffold(model: HomeModel, actions: HomeActions, chats: ChatsHome, modif
     // Each stacked destination keeps its saved UI state (scroll positions) while it is covered or
     // its tab is not shown, and loses it once popped.
     val saved = rememberSaveableStateHolder()
-    val provided = remember { HashSet<String>() }
+    // The keys stacked last time (saved too, so a recreated activity still forgets what was popped
+    // before it); after each change, outside composition, the keys that left are dropped.
+    var stackedBefore by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
     LaunchedEffect(model.stackKeys) {
-        val gone = provided - model.stackKeys
-        for (key in gone) saved.removeState(key)
-        provided -= gone
+        for (gone in stackedBefore) if (gone !in model.stackKeys) saved.removeState(gone)
+        stackedBefore = model.stackKeys.toList()
     }
     val key = model.navKey
     if (!root) {
-        saved.SaveableStateProvider(key) {
-            provided += key
-            HomeDestinationView(destination, model, actions, chats, modifier)
-        }
+        saved.SaveableStateProvider(key) { HomeDestinationView(destination, model, actions, chats, modifier) }
         return
     }
     Column(modifier = modifier.fillMaxSize()) {
         // The bar below takes the navigation bar's inset; the root's own scaffold must not too.
         Box(modifier = Modifier.weight(1f).fillMaxWidth().consumeWindowInsets(WindowInsets.navigationBars)) {
-            saved.SaveableStateProvider(key) {
-                provided += key
-                HomeDestinationView(destination, model, actions, chats, Modifier)
-            }
+            saved.SaveableStateProvider(key) { HomeDestinationView(destination, model, actions, chats, Modifier) }
         }
         if (!WindowInsets.isImeVisible) HomeBottomBar(model.tab, model.chatsAttention, actions::selectTab)
     }

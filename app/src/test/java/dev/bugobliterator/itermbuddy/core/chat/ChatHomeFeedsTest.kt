@@ -56,6 +56,23 @@ class ChatHomeFeedsTest {
         assertEquals(ChatListState.AiUnavailable, rig.repository.listSnapshot.value.list)
     }
 
+    /** The pairing epoch moves the moment the chats are cleared; the snapshot carries it once the consumer ran the clear. */
+    @Test
+    fun clearBumpsThePairingEpochAtOnceAndTheSnapshotAfter() = runTest {
+        val rig = ChatRig(this)
+        rig.chats = listOf(A to MAC_TIME)
+        rig.connect()
+        settle()
+        assertEquals(0L, rig.repository.pairingEpoch.value)
+        assertEquals(0L, rig.repository.listSnapshot.value.pairingEpoch)
+        rig.repository.clear()
+        assertEquals("on the caller's thread", 1L, rig.repository.pairingEpoch.value)
+        assertEquals("not yet run on the consumer", 0L, rig.repository.listSnapshot.value.pairingEpoch)
+        settle()
+        assertEquals(1L, rig.repository.listSnapshot.value.pairingEpoch)
+        assertEquals(ChatListState.Loading, rig.repository.listSnapshot.value.list)
+    }
+
     @Test
     fun linkGenerationIsBumpedOnEveryChatLinkUp() = runTest {
         val rig = ChatRig(this)

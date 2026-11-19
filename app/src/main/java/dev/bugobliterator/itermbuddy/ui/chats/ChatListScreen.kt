@@ -69,6 +69,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 
 internal const val EMPTY_CHATS_TITLE = "No chats yet"
 internal const val EMPTY_CHATS_BODY = "Tap New Chat to start a conversation with a session or the orchestrator."
@@ -205,13 +206,26 @@ fun chatListContents(
     iconRef: (ByteBuffer?) -> ChatIconRef? = ::chatIconRef,
     presenter: ChatListPresenter? = null,
 ): Flow<ChatListContent> = flow {
-    val presenter = presenter ?: ChatListPresenter(iconRef)
-    emitAll(
-        combine(snapshot, macRevision, query, resolutions) { shot, revision, text, names ->
-            presenter.present(shot.list, shot.rows, shot.aiAvailable, revision, text, names)
-        },
-    )
-}.distinctUntilChanged().flowOn(context)
+    val shared = presenter ?: ChatListPresenter(iconRef)
+    emitAll(taggedChatListContents(snapshot, macRevision, query, resolutions, context) { shared }.map { it.second })
+}.distinctUntilChanged()
+
+/**
+ * [chatListContents], each content tagged with the [ChatListSnapshot.pairingEpoch] of the snapshot
+ * it was made from, so a reader can refuse a gone pairing's rows. [presenterFor] gives the
+ * presenter for an epoch (the caller keeps one per pairing, across collections).
+ */
+fun taggedChatListContents(
+    snapshot: Flow<ChatListSnapshot>,
+    macRevision: Flow<Int?>,
+    query: Flow<String>,
+    resolutions: Flow<Map<String, MentionResolution>>,
+    context: CoroutineContext = Dispatchers.Default,
+    presenterFor: (Long) -> ChatListPresenter,
+): Flow<Pair<Long, ChatListContent>> =
+    combine(snapshot, macRevision, query, resolutions) { shot, revision, text, names ->
+        shot.pairingEpoch to presenterFor(shot.pairingEpoch).present(shot.list, shot.rows, shot.aiAvailable, revision, text, names)
+    }.distinctUntilChanged().flowOn(context)
 
 /** How long until the next whole [intervalMillis] after [nowMillis] (the stamps refresh on the minute). */
 fun nextStampRefreshDelay(nowMillis: Long, intervalMillis: Long): Long = intervalMillis - Math.floorMod(nowMillis, intervalMillis)
