@@ -21,12 +21,23 @@
 #      (iTermMigrationHelper.m:436-460, run by every AITermController, AITerm.swift:318), and
 #      NoSyncAISafetyCheckNagComplete=YES (RemoteCommand+Mac.swift:38): the safety-check
 #      provider migration and its nag.
+# 4. The user keychain search list holds only the CI keychain. Every chat turn builds an
+#    AIConversation (ChatAgent.swift:185), whose init reads the default model's registration on
+#    the main thread (AIConversation.swift:165, AITermControllerRegistrationHelper.swift:15-31).
+#    resolvedRegistration reads the vendor's stored API key before it looks at the credential
+#    (AITerm.swift:267-292), so even credential "none" makes a synchronous keychain read
+#    (AITermControllerObjC.swift:97-101, 194-230, 253-280): the data-protection keychain, then,
+#    for an absent item, SecItemCopyMatching over the user's search list
+#    (iTermUpgradeSafeKeychain.swift:66-120, 389-396). With the runner's login keychain in that
+#    list, a locked login keychain asks SecurityAgent to unlock it: a window that is not iTerm2's
+#    and no iTermWarning, with iTerm2's main thread blocked until someone types a password. The
+#    API key item ("iTerm2 API Keys") is absent everywhere, so the search ends in the CI keychain.
 #
 # Reads back what it wrote, typed, and fails when a value did not stick.
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 require_macos
-require_tools defaults plutil shasum od sudo stat install pgrep
+require_tools defaults plutil shasum od sudo stat install pgrep security
 
 if pgrep -x iTerm2 >/dev/null; then
     die "iTerm2 is already running; it must read the AI settings at its first launch"
@@ -68,6 +79,19 @@ defaults write "$domain" NoSyncAutoProvideConsent -int 2
 defaults write "$domain" "AI Safety Check" -bool false
 defaults write "$domain" NoSyncAISafetyCheckProviderMigrationDone -bool true
 defaults write "$domain" NoSyncAISafetyCheckNagComplete -bool true
+
+# --- 4. The keychain search list ---------------------------------------------------------------
+
+[[ -f "$CI_KEYCHAIN" ]] || die "no CI keychain at $CI_KEYCHAIN; run seed-pairing.sh first"
+log "user keychain search list before: $(security list-keychains -d user | tr -s ' \n' ' ')"
+security list-keychains -d user -s "$CI_KEYCHAIN"
+security default-keychain -d user -s "$CI_KEYCHAIN"
+log "user keychain search list now: $(security list-keychains -d user | tr -s ' \n' ' ')"
+if security find-generic-password -s "iTerm2 API Keys" >/dev/null 2>&1; then
+    warn "an 'iTerm2 API Keys' item is reachable in the search list; it is not used (credential none)"
+else
+    log "no 'iTerm2 API Keys' item in the search list: the lookup ends in the CI keychain"
+fi
 
 exported="$WORK_DIR/iterm2-defaults.plist"
 defaults export "$domain" "$exported"

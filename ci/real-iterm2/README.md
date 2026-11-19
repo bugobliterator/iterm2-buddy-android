@@ -183,6 +183,12 @@ never runs them. `RealIterm2Rig` holds the setup they share.
 - **AI off.** The test fails first with "the Mac reports AI off" when iTerm2's hello says AI is
   unavailable: the AI plugin is missing or fails its check (version 1.1 expected), or `EnableAI`
   was not read. The diagnostics show the AI plugin lookup and the secure setting.
+- **The keychain on a chat turn.** Every turn's AIConversation reads the vendor API key on the
+  main thread, even with credential none (AIConversation.swift:165, AITerm.swift:267-292). The
+  item is absent, so the read searches the user's keychain list, and a locked login keychain
+  would bring up a SecurityAgent unlock prompt that blocks iTerm2's main thread with no iTerm2
+  alert. `seed-ai.sh` therefore leaves only the CI keychain in that list. The state dump lists
+  other apps' windows and whether SecurityAgent runs.
 - **The Ollama probe.** iTerm2 probes `http://localhost:11434` (the built-in Ollama endpoint)
   whenever it reads its model list, and retries every 5 s when that fails. It is not the chat's
   endpoint; the fake model's stub answers it with no models (`ollama-stub:` lines in its log).
