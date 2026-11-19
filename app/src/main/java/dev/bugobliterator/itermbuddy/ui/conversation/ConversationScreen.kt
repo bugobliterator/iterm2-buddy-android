@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -33,6 +34,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +54,7 @@ import dev.bugobliterator.itermbuddy.core.chat.ChatMessage
 import dev.bugobliterator.itermbuddy.core.chat.ChatRepository
 import dev.bugobliterator.itermbuddy.core.chat.ChatSummary
 import dev.bugobliterator.itermbuddy.core.chat.ConversationState
+import dev.bugobliterator.itermbuddy.core.chat.MESSAGE_DELETION_REVISION
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolution
 import dev.bugobliterator.itermbuddy.core.chat.NotSendableReason
 import dev.bugobliterator.itermbuddy.core.chat.StableSessionId
@@ -137,8 +140,9 @@ sealed interface ConversationBody {
  * `IOS/Screens/ConversationView.swift:16-18`); [showsMute] from Mac revision 5 (`AM:2670-2672`);
  * [goToSession] per [goToSession]; [workgroups] the workgroups an orchestrator chat claims;
  * [sendable] and [whyNotSendable] from the repository, and [warnsOfPendingRequest]
- * ([dev.bugobliterator.itermbuddy.core.chat.warnsOfPendingRequest]), for the composer. [toString]
- * shows no content.
+ * ([dev.bugobliterator.itermbuddy.core.chat.warnsOfPendingRequest]), for the composer.
+ * [deletesFromHere]: the owner's own messages offer "Delete From Here" ([offersDeleteFromHere]):
+ * Mac revision 12 and later (`AM:2678-2680`) while the chat is sendable. [toString] shows no content.
  */
 data class ConversationContent(
     val chatID: String,
@@ -151,11 +155,12 @@ data class ConversationContent(
     val sendable: Boolean,
     val whyNotSendable: NotSendableReason? = if (sendable) null else NotSendableReason.NOT_LOADED,
     val warnsOfPendingRequest: Boolean = false,
+    val deletesFromHere: Boolean = false,
 ) {
     override fun toString(): String =
         "ConversationContent(chatID=$chatID, title(len=${title.length}), body=$body, muted=$muted, showsMute=$showsMute, " +
             "goToSession=$goToSession, workgroups=${workgroups.size}, sendable=$sendable, whyNotSendable=$whyNotSendable, " +
-            "warnsOfPendingRequest=$warnsOfPendingRequest)"
+            "warnsOfPendingRequest=$warnsOfPendingRequest, deletesFromHere=$deletesFromHere)"
 }
 
 /**
@@ -193,6 +198,7 @@ class ConversationPresenter {
         } else {
             emptyList()
         }
+        val sendable = (state as? ConversationState.Shown)?.sendable == true
         return ConversationContent(
             chatID = chatID,
             title = chat?.title ?: "Chat",
@@ -201,9 +207,10 @@ class ConversationPresenter {
             showsMute = (macRevision ?: 0) >= MUTE_REVISION,
             goToSession = goToSession(chat, tree, live),
             workgroups = workgroups,
-            sendable = (state as? ConversationState.Shown)?.sendable == true,
+            sendable = sendable,
             whyNotSendable = state.whyNotSendable,
             warnsOfPendingRequest = state is ConversationState.Shown && warnsOfPendingRequest(activity, state.messages),
+            deletesFromHere = sendable && (macRevision ?: 0) >= MESSAGE_DELETION_REVISION,
         )
     }
 
@@ -290,6 +297,9 @@ interface ConversationActions {
 
     /** Drops a message of the owner's that was not delivered ([ChatRepository.discardUnsent]). */
     fun deleteUnsent(uniqueID: String)
+
+    /** Delete From Here, confirmed: [uniqueID]'s message and every one after it ([ChatRepository.deleteFrom]). */
+    fun deleteFromHere(uniqueID: String)
 }
 
 /**
@@ -297,6 +307,9 @@ interface ConversationActions {
  * the mute bell; the transcript ([MessageBubble] rows keyed by message, typing dots while the
  * agent works) pinned to the bottom while it is there, else a "New messages ↓" pill when more
  * arrives; the banners; and [composer] below. Loading, too large and failed states fill the body.
+ * The owner's own messages offer "Delete From Here" from a ⋯ menu beside them when
+ * [ConversationContent.deletesFromHere] holds (a long press would fight the text selection), and
+ * it asks first.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -307,6 +320,7 @@ fun ConversationScreen(
     modifier: Modifier = Modifier,
     composer: @Composable () -> Unit = {},
 ) {
+    var deletingFrom by rememberSaveable { mutableStateOf<String?>(null) }
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
@@ -331,7 +345,12 @@ fun ConversationScreen(
                         Text(FAILED_CONVERSATION_TEXT, textAlign = TextAlign.Center)
                         if (body.retryable) Button(onClick = actions::retry) { Text("Try again") }
                     }
-                    is ConversationBody.Shown -> Transcript(body.items, images, actions::openMention) { action, uniqueID ->
+                    is ConversationBody.Shown -> Transcript(
+                        body.items,
+                        images,
+                        actions::openMention,
+                        onDeleteFromHere = if (content.deletesFromHere) ({ deletingFrom = it }) else null,
+                    ) { action, uniqueID ->
                         when (action) {
                             UnsentAction.RETRY -> actions.retrySend(uniqueID)
                             UnsentAction.DELETE -> actions.deleteUnsent(uniqueID)
@@ -343,7 +362,25 @@ fun ConversationScreen(
             composer()
         }
     }
+    val pending = deletingFrom
+    if (pending != null) {
+        AlertDialog(
+            onDismissRequest = { deletingFrom = null },
+            title = { Text("Delete from here?") },
+            text = { Text(DELETE_FROM_HERE_TEXT) },
+            confirmButton = {
+                TextButton(onClick = {
+                    deletingFrom = null
+                    actions.deleteFromHere(pending)
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deletingFrom = null }) { Text("Cancel") } },
+        )
+    }
 }
+
+/** What the Delete From Here confirmation says. */
+const val DELETE_FROM_HERE_TEXT = "This message and everything after it are deleted from the chat, on your Mac too."
 
 @Composable
 private fun ConversationTopActions(content: ConversationContent, actions: ConversationActions) {
@@ -388,6 +425,7 @@ private fun Transcript(
     items: List<TranscriptItem>,
     images: ChatIconCache<ImageBitmap>,
     onMention: (LinkTarget) -> Unit,
+    onDeleteFromHere: ((String) -> Unit)?,
     onUnsent: (UnsentAction, String) -> Unit,
 ) {
     val listState = rememberLazyListState()
@@ -422,7 +460,10 @@ private fun Transcript(
             contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom),
         ) {
-            items(items.asReversed(), key = { it.key }) { item -> MessageBubble(item, images, onMention, onUnsent = onUnsent) }
+            items(items.asReversed(), key = { it.key }) { item ->
+                val deleteFrom = onDeleteFromHere?.takeIf { offersDeleteFromHere(item) }
+                MessageBubble(item, images, onMention, onUnsent = onUnsent, onDeleteFromHere = deleteFrom)
+            }
         }
         if (unseen && !atBottom) {
             SmallFloatingActionButton(

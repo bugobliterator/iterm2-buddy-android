@@ -14,14 +14,19 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -31,6 +36,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.Placeholder
@@ -295,7 +301,9 @@ private class BubbleColors(val text: Color, val secondary: Color, val link: Colo
  * centred and outlined, request cards left and outlined (`IOS/Views/MessageBubbleView.swift:19-38,
  * 181-197`). Text is selectable; a mention opens through [onMention]. Images decode through
  * [images] off the main thread. A message sent from this phone shows "Sending…" under it until its
- * echo comes back, or "Not delivered" with Retry and Delete ([onUnsent]).
+ * echo comes back, or "Not delivered" with Retry and Delete ([onUnsent]). With [onDeleteFromHere],
+ * a bubble shows a ⋯ menu beside it offering "Delete From Here", which calls it with the message's
+ * `uniqueID` (the caller confirms).
  */
 @Composable
 fun MessageBubble(
@@ -304,9 +312,10 @@ fun MessageBubble(
     onMention: (LinkTarget) -> Unit,
     modifier: Modifier = Modifier,
     onUnsent: (UnsentAction, String) -> Unit = { _, _ -> },
+    onDeleteFromHere: ((String) -> Unit)? = null,
 ) {
     when (item) {
-        is TranscriptItem.Bubble -> ChatBubble(item, images, onMention, modifier, onUnsent)
+        is TranscriptItem.Bubble -> ChatBubble(item, images, onMention, modifier, onUnsent, onDeleteFromHere)
         is TranscriptItem.Notice -> NoticeBubble(item, images, onMention, modifier)
         is TranscriptItem.RequestCard -> RequestCardView(item, onMention, modifier)
         TranscriptItem.Typing -> TypingIndicator(modifier)
@@ -323,9 +332,10 @@ private fun ChatBubble(
     onMention: (LinkTarget) -> Unit,
     modifier: Modifier,
     onUnsent: (UnsentAction, String) -> Unit,
+    onDeleteFromHere: ((String) -> Unit)?,
 ) {
     Column(modifier = modifier.fillMaxWidth(), horizontalAlignment = if (item.fromUser) Alignment.End else Alignment.Start) {
-        BubbleBody(item, images, onMention)
+        BubbleBody(item, images, onMention, onDeleteFromHere)
         when (item.echo) {
             EchoState.SENDING -> Text(
                 "Sending…",
@@ -349,7 +359,12 @@ private fun ChatBubble(
 }
 
 @Composable
-private fun BubbleBody(item: TranscriptItem.Bubble, images: ChatIconCache<ImageBitmap>, onMention: (LinkTarget) -> Unit) {
+private fun BubbleBody(
+    item: TranscriptItem.Bubble,
+    images: ChatIconCache<ImageBitmap>,
+    onMention: (LinkTarget) -> Unit,
+    onDeleteFromHere: ((String) -> Unit)?,
+) {
     val scheme = MaterialTheme.colorScheme
     val colors = if (item.fromUser) {
         BubbleColors(scheme.onPrimary, scheme.onPrimary.copy(alpha = 0.75f), scheme.onPrimary, scheme.onPrimary.copy(alpha = 0.15f))
@@ -357,7 +372,13 @@ private fun BubbleBody(item: TranscriptItem.Bubble, images: ChatIconCache<ImageB
         BubbleColors(scheme.onSurface, scheme.onSurfaceVariant, scheme.primary, scheme.onSurface.copy(alpha = 0.08f))
     }
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = if (item.fromUser) Arrangement.End else Arrangement.Start) {
-        if (item.fromUser) Spacer(Modifier.width(48.dp))
+        if (item.fromUser) {
+            if (onDeleteFromHere == null) {
+                Spacer(Modifier.width(48.dp))
+            } else {
+                MessageMenu(item.message.uniqueID, onDeleteFromHere)
+            }
+        }
         Surface(
             color = if (item.fromUser) scheme.primary else scheme.surfaceContainerHigh,
             shape = RoundedCornerShape(16.dp),
@@ -523,3 +544,23 @@ internal val WARNING_ORANGE_LIGHT = Color(0xFFFF9500)
 /** iOS's system orange for a background of [backgroundLuminance] (dark below one half). */
 internal fun warningOrange(backgroundLuminance: Float): Color =
     if (backgroundLuminance < 0.5f) WARNING_ORANGE_DARK else WARNING_ORANGE_LIGHT
+
+/** The ⋯ beside one of the owner's bubbles (48 dp, where the gutter is): "Delete From Here". */
+@Composable
+private fun MessageMenu(uniqueID: String, onDeleteFromHere: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box(modifier = Modifier.width(48.dp), contentAlignment = Alignment.CenterEnd) {
+        IconButton(onClick = { open = true }, modifier = Modifier.semantics { contentDescription = "Message actions" }) {
+            Text("⋯", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("Delete From Here", color = MaterialTheme.colorScheme.error) },
+                onClick = {
+                    open = false
+                    onDeleteFromHere(uniqueID)
+                },
+            )
+        }
+    }
+}
