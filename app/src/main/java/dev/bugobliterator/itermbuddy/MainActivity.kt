@@ -18,6 +18,7 @@ import dev.bugobliterator.itermbuddy.core.input.KeyEvent
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.ui.AppRoot
 import dev.bugobliterator.itermbuddy.ui.AppTheme
+import dev.bugobliterator.itermbuddy.ui.HomeTab
 import dev.bugobliterator.itermbuddy.ui.PairingActions
 import dev.bugobliterator.itermbuddy.ui.ScanOutcome
 import dev.bugobliterator.itermbuddy.ui.home.HomeActions
@@ -51,11 +52,14 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * The home's calls: session open and Back go to the app-scoped navigator, which alone opens
-     * and closes the stream, so this activity being recreated changes nothing.
+     * The home's calls: session open, tab selection and Back go to the app-scoped navigator, which
+     * alone opens and closes streams and conversations, so this activity being recreated changes
+     * nothing.
      */
     private val homeActions = object : HomeActions {
         override fun openSession(session: SessionSummary, title: String) = app.home.navigator.openSession(session, title)
+
+        override fun selectTab(tab: HomeTab) = app.home.navigator.selectTab(tab)
 
         override fun openSettings() = app.home.navigator.openSettings()
 
@@ -120,6 +124,8 @@ class MainActivity : ComponentActivity() {
             val unpairing by app.unpairing.collectAsStateWithLifecycle()
             val unpairFailed by app.unpairFailed.collectAsStateWithLifecycle()
             val destination by sessions.navigator.destination.collectAsStateWithLifecycle()
+            val tab by sessions.navigator.tab.collectAsStateWithLifecycle()
+            val chatsAttention by sessions.chatsAttention.collectAsStateWithLifecycle()
             val tree by sessions.repository.state.collectAsStateWithLifecycle()
             val live by sessions.controller.state.collectAsStateWithLifecycle()
             val relayOrigin by app.client.relayOrigin.collectAsStateWithLifecycle()
@@ -132,9 +138,10 @@ class MainActivity : ComponentActivity() {
                     paired = paired,
                     home = HomeModel(
                         state, destination, tree, live, unpairing, unpairFailed, version, relayOrigin,
-                        activeStream, video, debugBuild, videoStatsShown, query, macStatus,
+                        activeStream, video, debugBuild, videoStatsShown, query, macStatus, tab, chatsAttention,
                     ),
                     homeActions = homeActions,
+                    chats = sessions.chatsHome,
                     pairingActions = actions,
                     scanNotice = notice,
                 )

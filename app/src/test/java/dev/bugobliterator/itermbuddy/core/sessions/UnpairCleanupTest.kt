@@ -14,6 +14,7 @@ import dev.bugobliterator.itermbuddy.core.stream.Tiles
 import dev.bugobliterator.itermbuddy.fakemac.FakeChatMac
 import dev.bugobliterator.itermbuddy.fakemac.FakeMac
 import dev.bugobliterator.itermbuddy.ui.HomeDestination
+import dev.bugobliterator.itermbuddy.ui.HomeTab
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
@@ -51,6 +52,7 @@ class UnpairCleanupTest {
         runCurrent()
         val loaded = rig.repository.state.value as TreeState.Loaded
         val session = loaded.tree.windows.first().tabs.last().panes.single().session
+        rig.navigator.selectTab(HomeTab.SESSIONS)
         rig.navigator.openSession(session, session.name)
         runCurrent()
         assertEquals(HomeDestination.LiveSession(session, session.name), rig.navigator.destination.value)
@@ -77,7 +79,9 @@ class UnpairCleanupTest {
         assertEquals(false, rig.client.paired.value)
         assertNull("nothing stored, so no relay to show", rig.client.relayOrigin.value)
         assertEquals(TreeState.Loading, rig.repository.state.value)
-        assertEquals(HomeDestination.SessionList, rig.navigator.destination.value)
+        // The home starts again on the Chats root, in its connecting state.
+        assertEquals(HomeTab.CHATS, rig.navigator.tab.value)
+        assertEquals(HomeDestination.ChatList, rig.navigator.destination.value)
         assertEquals(LiveViewState.Closed, rig.controller.state.value)
         assertNull(rig.controller.activeStream.value)
         assertEquals(emptyMap<Long, TileState>(), rig.controller.historyTiles.tiles.value)
@@ -152,6 +156,7 @@ class UnpairCleanupTest {
         val loaded = rig.repository.state.value as TreeState.Loaded
         val session = loaded.tree.windows.first().tabs.last().panes.single().session
         rig.graph.search.set("vim")
+        rig.navigator.selectTab(HomeTab.SESSIONS)
         rig.navigator.openSession(session, session.name)
         runCurrent()
         rig.navigator.back()

@@ -2,6 +2,11 @@ package dev.bugobliterator.itermbuddy.ui
 
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.WaitReason
+import dev.bugobliterator.itermbuddy.core.chat.AgentState
+import dev.bugobliterator.itermbuddy.core.chat.ChatListEntry
+import dev.bugobliterator.itermbuddy.core.chat.ChatRow
+import dev.bugobliterator.itermbuddy.core.chat.ChatSummary
+import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -76,8 +81,32 @@ class AppRootTest {
     }
 
     @Test
-    fun oneHomeTabShowsNoBottomBar() {
-        assertEquals(listOf(HomeTab.SESSIONS), HomeTab.entries.toList())
-        assertFalse(showsBottomBar())
+    fun bottomBarOnlyOnTabRoots() {
+        assertEquals(listOf(HomeTab.CHATS, HomeTab.SESSIONS), HomeTab.entries.toList())
+        assertTrue(showsBottomBar(HomeDestination.ChatList))
+        assertTrue(showsBottomBar(HomeDestination.SessionList))
+        val session = SessionSummary("ptys_7K2M9Q4R8T1VH", "zsh", "~", false)
+        for (destination in listOf(
+            HomeDestination.Settings,
+            HomeDestination.NewChat,
+            HomeDestination.Conversation("C0DE0000-0000-4000-8000-000000000001"),
+            HomeDestination.Workgroup("wg-1", "crew"),
+            HomeDestination.LiveSession(session, "zsh"),
+            HomeDestination.BrowserSession(session.copy(isBrowser = true), "docs"),
+        )) {
+            assertFalse("$destination", showsBottomBar(destination))
+        }
+        assertEquals(HomeDestination.ChatList, HomeTab.CHATS.root)
+        assertEquals(HomeDestination.SessionList, HomeTab.SESSIONS.root)
+    }
+
+    @Test
+    fun chatsTabDotForUnreadOrWaiting() {
+        fun row(id: String, state: AgentState, unread: Boolean) =
+            ChatRow(ChatListEntry(ChatSummary(id, "t", 1.0, 2.0, false, null, null, emptyList(), null), null, false), state, unread)
+        assertFalse(chatsNeedAttention(emptyList()))
+        assertFalse(chatsNeedAttention(listOf(row("a", AgentState.WORKING, false), row("b", AgentState.DONE, false), row("c", AgentState.IDLE, false))))
+        assertTrue(chatsNeedAttention(listOf(row("a", AgentState.IDLE, false), row("b", AgentState.WAITING, false))))
+        assertTrue(chatsNeedAttention(listOf(row("a", AgentState.DONE, true))))
     }
 }

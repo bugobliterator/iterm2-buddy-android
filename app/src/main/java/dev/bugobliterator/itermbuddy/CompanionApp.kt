@@ -55,9 +55,9 @@ import kotlin.time.Duration.Companion.seconds
  * tests use): the [StreamController] (the client's stream sink, sending through the client), the
  * [HevcVideoOutput] it decodes into, the [SessionTreeRepository], the [ChatRepository] (the
  * client's chat sink, with its seen marks in [FileChatSeenStore]), and the
- * [SessionNavigator][dev.bugobliterator.itermbuddy.ui.SessionNavigator] that alone opens and
- * closes streams. Every unpair resets the navigator (stopping the stream) and clears the tree and
- * the chats. [ProcessLifecycleOwner] drives the controller, the chats and the workgroup watches
+ * [HomeNavigator][dev.bugobliterator.itermbuddy.ui.HomeNavigator] (the Chats and Sessions tabs)
+ * that alone opens and closes streams, conversations and workgroup watches. Every unpair resets
+ * the navigator (stopping the stream) and clears the tree and the chats. [ProcessLifecycleOwner] drives the controller, the chats and the workgroup watches
  * ([HomeGraph.setForeground]): `ON_STOP` (the last
  * activity stopped: lock, home, app switch) pauses the controller and makes no conversation
  * visible, and `ON_START` resumes both and kicks a reconnect ([CompanionClient.reconnectNow]); it
@@ -237,7 +237,8 @@ class CompanionApp : Application() {
 
                 override fun onStop(owner: LifecycleOwner) {
                     home.controller.pause()
-                    // Locked or backgrounded: no conversation is visible, so a turn ending now is Done.
+                    // Locked or backgrounded: no conversation is visible (a turn ending now is
+                    // Done) and the workgroup watches stop polling.
                     home.setForeground(false)
                 }
             },

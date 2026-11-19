@@ -117,6 +117,21 @@ fun goToSession(chat: ChatSummary?, tree: SessionTree?, live: Boolean?): GoToSes
     return GoToSession(SessionSummary(guid, chat.title, "", isBrowser = false), chat.title)
 }
 
+/**
+ * What tapping a session mention opens: the view titled with the mention's [name]
+ * (`IOS/Views/MessageBubbleView.swift:93`), for the session as [tree] lists it (so a browser opens
+ * the browser view), or, not listed, a terminal view by [guid] itself, which the Mac resolves.
+ */
+fun mentionSession(guid: String, name: String, tree: SessionTree?): GoToSession {
+    val wanted = sessionKey(guid)
+    if (tree != null) {
+        for (row in sessionRows(tree)) {
+            if (row is SessionRow.Session && sessionKey(row.summary.guid) == wanted) return GoToSession(row.summary, name)
+        }
+    }
+    return GoToSession(SessionSummary(guid, name, "", isBrowser = false), name)
+}
+
 /** Stable IDs compare in canonical form, raw guids without case. */
 private fun sessionKey(guid: String): String = StableSessionId.canonical(guid) ?: guid.uppercase()
 
