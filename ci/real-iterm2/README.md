@@ -123,16 +123,16 @@ failure message.
 
 ## The key-bytes probe
 
-On the owner's phone, `/` and `*` typed into Claude Code show nothing, while letters, digits,
-`.` and `,` do, and `echo /tmp/*` works in plain zsh. `RealIterm2KeyBytesTest` measures what
-reaches the program. It is a probe: it reports and does not assert on the bytes; it fails only
-when the rig broke (no connection, no `probe.env`, or the plain capture never started).
+On the owner's phone, `/` and `*` typed into Claude Code show nothing, while letters, digits, `.`
+and `,` do, and `echo /tmp/*` works in plain zsh. `RealIterm2KeyBytesTest` measures what reaches the
+program. It is a probe: it reports and does not assert on the bytes; it fails only when the rig
+broke (no connection, no `probe.env`, or the plain capture never started).
 
 `install-claude-code.sh` writes `$WORK_DIR/key-bytes/probe.env` (node, the repository), installs
-Claude Code (pinned in the script) globally with pnpm, letting its postinstall put the native
-binary in place, and seeds `~/.claude.json` (onboarding done, the probe's project trusted, the
-dummy key approved). The test types `bash key-probe.sh <probe.env> …` into the first terminal
-session for each mode:
+Claude Code (pinned in the script) globally with pnpm, letting its postinstall put the native binary
+in place, and seeds `~/.claude.json` (onboarding done, the probe's project trusted, the dummy key
+approved). The test types `bash key-probe.sh <probe.env> …` into the first terminal session for each
+mode:
 
 - `key-capture.mjs` (raw tty, every chunk logged as hex, the modes restored on exit) with no mode,
   bracketed paste (`CSI ? 2004 h`), modifyOtherKeys 2 (`CSI > 4 ; 2 m`) and kitty flags 1, 3 and
@@ -142,14 +142,16 @@ session for each mode:
   no nonessential traffic.
 
 It sends `a / * . 1 ? A ~ |` one at a time through the app's `InputSender` (`sendKey` text, the
-phone's path), then `pasteText` of `/*`, and `/` and `*` as real key presses from System Events
-(osascript; its error is reported if the runner does not allow it). In Claude Code it first sends
-`/` on the empty prompt (slash-command menu?) and erases it, by both paths, and ends with Return
-and Ctrl-C twice. The report, `key-bytes:` lines in the job log and `key-bytes-report.txt` in the
-diagnostics, gives per mode and character the bytes as hex and escapes, `sendKey` beside
-osascript, and for Claude Code the mode sequences it wrote and whether each character appeared in
-what it drew next (or the screen text, when it never reached its prompt). This probe prints
-terminal content: only the probe characters and Claude Code's UI in a throwaway CI terminal.
+phone's path), then `pasteText` of `/*`, and `/` and `*` as real key presses from System Events, as
+`keystroke` and as US key codes (44, and 28 with Shift), once iTerm2 is frontmost (osascript; the
+frontmost app and osascript's stderr are reported). In Claude Code it first sends `/` alone on the
+empty prompt (slash-command menu?) by `sendKey`, `pasteText` and osascript, and `*` by `pasteText`,
+erasing each with Backspace, and ends with Return and Ctrl-C twice. The report, `key-bytes:` lines
+in the job log and `key-bytes-report.txt` in the diagnostics, gives per mode and character the bytes
+as hex and escapes, `sendKey` beside osascript, and for Claude Code every keyboard-mode sequence it
+wrote (in order) and whether each character appeared in what it drew next (or the screen text, when
+it never reached its prompt). This probe prints terminal content: only the probe characters and
+Claude Code's UI in a throwaway CI terminal.
 
 ## Stage 3: Agent Chat on a fake model
 

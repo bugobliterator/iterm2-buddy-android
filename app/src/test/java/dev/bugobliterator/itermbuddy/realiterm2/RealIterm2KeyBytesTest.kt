@@ -19,6 +19,7 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -47,14 +48,16 @@ import org.junit.Test
  *
  * Then it sends each of [PROBE_CHARS] alone through the app's own [InputSender] (`sendKey`
  * text, no modifiers: the phone's path), waiting after each for the bytes to arrive, then
- * `pasteText` of [PASTE] (slash, star), and, for a baseline from a real key press, `/` and `*` typed by System
- * Events (osascript; its error is recorded when the runner does not allow it). For Claude Code,
- * `/` is first sent on the empty prompt (to see the slash-command menu) and erased with
- * Backspace, by both paths, and the run ends with Return, then Ctrl-C twice.
+ * `pasteText` of [PASTE] (slash, star), and, for a baseline from a real key press, `/` and `*` pressed by System
+ * Events, once as `keystroke` and once as a US key code, after waiting for iTerm2 to be frontmost
+ * (osascript; the frontmost app and osascript's stderr go in the report). For Claude Code, `/`
+ * is first sent alone on the empty prompt (to see the slash-command menu) by `sendKey`,
+ * `pasteText` and both osascript forms, and `*` by `pasteText`, each erased with Backspace; the
+ * run ends with Return, then Ctrl-C twice.
  *
  * The report (stdout and `diagnostics/key-bytes-report.txt`) gives, per mode and character, the
  * bytes as hex and as a readable escape form, `sendKey` beside osascript; for Claude Code also
- * the mode sequences it wrote, the terminal's answers, and whether each character appeared in
+ * every keyboard-mode sequence it wrote, in order, the terminal's answers, and whether each character appeared in
  * what Claude drew next. Unlike the other real-iTerm2 tests this one prints terminal content: the
  * probe characters and Claude Code's UI text in a throwaway CI terminal.
  */
@@ -138,26 +141,29 @@ class RealIterm2KeyBytesTest {
         line("  terminal's answer to CSI ? u: ${if (query.isEmpty()) "none" else describe(concat(query))}")
 
         for (char in PROBE_CHARS) {
-            val sent = captureArrival(capture) { probe.key(char); null }
+            val sent = captureArrival(capture) { probe.key(char); SENT }
             line("  ${char.padEnd(LABEL_WIDTH)} sendKey   ${sent}")
         }
-        line("  ${"/*".padEnd(LABEL_WIDTH)} pasteText ${captureArrival(capture) { probe.paste(PASTE); null }}")
-        for (char in OSASCRIPT_CHARS) {
-            line("  ${char.padEnd(LABEL_WIDTH)} osascript ${captureArrival(capture) { osascriptKeystroke(char) }}")
+        line("  ${"/*".padEnd(LABEL_WIDTH)} pasteText ${captureArrival(capture) { probe.paste(PASTE); SENT }}")
+        for (form in OsaForm.entries) {
+            for (char in OSASCRIPT_CHARS) {
+                line("  ${char.padEnd(LABEL_WIDTH)} ${form.label} ${captureArrival(capture) { osascriptKey(char, form) }}")
+            }
         }
         stopCapture(dir)
         return true
     }
 
-    /** Runs [send] (null, or an error to report) and returns what reached the capture after it. */
-    private suspend fun captureArrival(capture: File, send: suspend () -> String?): String {
+    /** Runs [send] and returns what reached the capture after it, with [Sent.note] when it has one. */
+    private suspend fun captureArrival(capture: File, send: suspend () -> Sent): String {
         val before = chunks(capture).size
-        val error = send()
-        if (error != null) return "failed: $error"
-        rig.poll(ARRIVAL_TIMEOUT) { chunks(capture).takeIf { it.size > before } } ?: return "nothing arrived within $ARRIVAL_TIMEOUT"
+        val sent = send()
+        if (sent.error != null) return "failed: ${sent.error}"
+        val note = sent.note?.let { " [$it]" } ?: ""
+        rig.poll(ARRIVAL_TIMEOUT) { chunks(capture).takeIf { it.size > before } } ?: return "nothing arrived within $ARRIVAL_TIMEOUT$note"
         delay(SETTLE)
         val arrived = chunks(capture).drop(before).map { it.second }
-        return describe(concat(arrived)) + if (arrived.size > 1) " (${arrived.size} reads)" else ""
+        return describe(concat(arrived)) + (if (arrived.size > 1) " (${arrived.size} reads)" else "") + note
     }
 
     private suspend fun stopCapture(dir: File) {
@@ -209,25 +215,36 @@ class RealIterm2KeyBytesTest {
             else -> line("  no prompt footer within $CLAUDE_START_TIMEOUT: a dialog, or it is still starting")
         }
         if (prompt != "prompt") line("  screen text so far: ${screenText(startup.output()).takeLast(SCREEN_DUMP_CHARS)}")
-        line("  modes Claude wrote: ${modeRequests(startup.output())}")
+        line("  private-mode CSIs Claude wrote: ${modeRequests(startup.output())}")
+        line("  keyboard-mode sequences Claude wrote, in order: ${keyboardModes(startup.output())}")
         line("  terminal's answers before any key: ${describe(startup.input()).take(ANSWER_CHARS)}")
 
         if (prompt != "exited") {
-            line("  -- / on the empty prompt, then Backspace")
-            line("  ${"/".padEnd(LABEL_WIDTH)} sendKey   ${claudeArrival(recording, "/", menu = true) { probe.key("/"); null }}")
-            claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE); null }
-            line("  ${"/".padEnd(LABEL_WIDTH)} osascript ${claudeArrival(recording, "/", menu = true) { osascriptKeystroke("/") }}")
-            claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE); null }
+            line("  -- / (and * pasted) alone on the empty prompt, each erased with Backspace")
+            line("  ${"/".padEnd(LABEL_WIDTH)} sendKey   ${claudeArrival(recording, "/", menu = true) { probe.key("/"); SENT }}")
+            claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE); SENT }
+            line("  ${"/".padEnd(LABEL_WIDTH)} pasteText ${claudeArrival(recording, "/", menu = true) { probe.paste("/"); SENT }}")
+            claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE); SENT }
+            line("  ${"*".padEnd(LABEL_WIDTH)} pasteText ${claudeArrival(recording, "*") { probe.paste("*"); SENT }}")
+            claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE); SENT }
+            for (form in OsaForm.entries) {
+                line("  ${"/".padEnd(LABEL_WIDTH)} ${form.label} ${claudeArrival(recording, "/", menu = true) { osascriptKey("/", form) }}")
+                claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE); SENT }
+            }
             line("  -- one at a time into the prompt")
             for (char in PROBE_CHARS) {
-                line("  ${char.padEnd(LABEL_WIDTH)} sendKey   ${claudeArrival(recording, char) { probe.key(char); null }}")
+                line("  ${char.padEnd(LABEL_WIDTH)} sendKey   ${claudeArrival(recording, char) { probe.key(char); SENT }}")
             }
-            for (char in OSASCRIPT_CHARS) {
-                line("  ${char.padEnd(LABEL_WIDTH)} osascript ${claudeArrival(recording, char) { osascriptKeystroke(char) }}")
+            for (form in OsaForm.entries) {
+                for (char in OSASCRIPT_CHARS) {
+                    line("  ${char.padEnd(LABEL_WIDTH)} ${form.label} ${claudeArrival(recording, char) { osascriptKey(char, form) }}")
+                }
             }
-            line("  ${"/*".padEnd(LABEL_WIDTH)} pasteText ${claudeArrival(recording, PASTE) { probe.paste(PASTE); null }}")
-            line("  ${"Return".padEnd(LABEL_WIDTH)} sendKey   ${claudeArrival(recording, null, settle = CLAUDE_RETURN_SETTLE) { probe.key("\n"); null }}")
-            line("  modes Claude wrote in all: ${modeRequests(records(recording).output())}")
+            line("  ${"/*".padEnd(LABEL_WIDTH)} pasteText ${claudeArrival(recording, PASTE) { probe.paste(PASTE); SENT }}")
+            line("  ${"Return".padEnd(LABEL_WIDTH)} sendKey   ${claudeArrival(recording, null, settle = CLAUDE_RETURN_SETTLE) { probe.key("\n"); SENT }}")
+            val output = records(recording).output()
+            line("  private-mode CSIs Claude wrote in all: ${modeRequests(output)}")
+            line("  keyboard-mode sequences Claude wrote, in order: ${keyboardModes(output)}")
         }
         stopClaude(probe, dir)
     }
@@ -242,11 +259,11 @@ class RealIterm2KeyBytesTest {
         glyph: String?,
         menu: Boolean = false,
         settle: Duration = CLAUDE_KEY_SETTLE,
-        send: suspend () -> String?,
+        send: suspend () -> Sent,
     ): String {
         val before = records(recording).size
-        val error = send()
-        if (error != null) return "failed: $error"
+        val sent = send()
+        if (sent.error != null) return "failed: ${sent.error}"
         val arrived = rig.poll(ARRIVAL_TIMEOUT) { records(recording).drop(before).takeIf { new -> new.any { it.direction == 'i' } } }
         delay(settle)
         val after = records(recording).drop(before)
@@ -263,7 +280,7 @@ class RealIterm2KeyBytesTest {
         } else {
             ""
         }
-        return "$input | $shown$slashMenu"
+        return "$input | $shown$slashMenu" + (sent.note?.let { " [$it]" } ?: "")
     }
 
     private suspend fun stopClaude(probe: Probe, dir: File) {
@@ -324,31 +341,73 @@ class RealIterm2KeyBytesTest {
 
     // --- Helpers ------------------------------------------------------------------------
 
-    /** System Events types [char] into iTerm2 after activating it; null, or the error. */
-    private suspend fun osascriptKeystroke(char: String): String? {
-        osascriptBroken?.let { return "skipped (earlier: $it)" }
-        val result = runOnMac(
-            "osascript",
-            "-e", "tell application id \"com.googlecode.iterm2\" to activate",
-            "-e", "delay 0.3",
-            "-e", "tell application \"System Events\" to keystroke \"$char\"",
-        )
-        if (result != null) osascriptBroken = result
-        return result
+    /** What a send reported: an [error] (nothing was sent), or a [note] for the report. */
+    private class Sent(val error: String? = null, val note: String? = null)
+
+    /** How System Events presses a key: by character, or by the US key code (with Shift for `*`). */
+    private enum class OsaForm(val label: String) {
+        KEYSTROKE("osa-keystroke"),
+        KEY_CODE("osa-keycode"),
     }
 
-    /** Runs a command on this Mac with a bound; null on success, else its exit and output. */
-    private suspend fun runOnMac(vararg command: String): String? = withContext(Dispatchers.IO) {
+    /**
+     * System Events presses [char] in iTerm2: it activates iTerm2 and waits up to 3 s for it to be
+     * the frontmost process, then presses the key in [form]. The note says which app was frontmost
+     * when the key went (and after), how long it waited, and anything osascript wrote to stderr.
+     */
+    private suspend fun osascriptKey(char: String, form: OsaForm): Sent {
+        osascriptBroken?.let { return Sent(error = "skipped (earlier: $it)") }
+        val press = when (form) {
+            OsaForm.KEYSTROKE -> "keystroke \"$char\""
+            OsaForm.KEY_CODE -> KEY_CODES[char] ?: return Sent(error = "no key code for $char")
+        }
+        val script = listOf(
+            "tell application id \"$ITERM2_BUNDLE_ID\" to activate",
+            "set waited to 0",
+            "repeat",
+            "tell application \"System Events\" to set frontId to bundle identifier of first process whose frontmost is true",
+            "if frontId is \"$ITERM2_BUNDLE_ID\" or waited > 29 then exit repeat",
+            "delay 0.1",
+            "set waited to waited + 1",
+            "end repeat",
+            "tell application \"System Events\" to set frontName to name of first process whose frontmost is true",
+            "tell application \"System Events\" to $press",
+            "delay 0.1",
+            "tell application \"System Events\" to set afterName to name of first process whose frontmost is true",
+            "return \"frontmost \" & frontName & \" (\" & frontId & \") after \" & (waited / 10) & \" s; after the key \" & afterName",
+        )
+        val result = runOnMac("osascript", *script.flatMap { listOf("-e", it) }.toTypedArray())
+        val stderr = result.stderr.takeIf { it.isNotBlank() }?.let { "; stderr: ${it.lines().take(2).joinToString(" ")}" } ?: ""
+        if (!result.ok) {
+            val error = "${result.summary}$stderr"
+            osascriptBroken = error
+            return Sent(error = error)
+        }
+        return Sent(note = "osascript: ${result.stdout.ifBlank { "no answer" }}$stderr")
+    }
+
+    /** A command's outcome: [ok] when it exited 0, its [stdout] and [stderr], and a [summary] when it did not. */
+    private class Outcome(val ok: Boolean, val stdout: String, val stderr: String, val summary: String)
+
+    /** Runs a command on this Mac with a bound. */
+    private suspend fun runOnMac(vararg command: String): Outcome = withContext(Dispatchers.IO) {
         try {
-            val process = ProcessBuilder(*command).redirectErrorStream(true).start()
-            if (!process.waitFor(COMMAND_TIMEOUT.inWholeSeconds, TimeUnit.SECONDS)) {
-                process.destroyForcibly()
-                return@withContext "${command[0]} timed out after $COMMAND_TIMEOUT"
+            val stderrFile = File.createTempFile("key-bytes", ".stderr")
+            try {
+                val process = ProcessBuilder(*command).redirectError(stderrFile).start()
+                val stdout = async { process.inputStream.bufferedReader().readText().trim() }
+                if (!process.waitFor(COMMAND_TIMEOUT.inWholeSeconds, TimeUnit.SECONDS)) {
+                    process.destroyForcibly()
+                    return@withContext Outcome(false, "", stderrFile.readText().trim(), "${command[0]} timed out after $COMMAND_TIMEOUT")
+                }
+                val out = stdout.await()
+                val err = stderrFile.readText().trim()
+                Outcome(process.exitValue() == 0, out, err, "${command[0]} exit ${process.exitValue()}")
+            } finally {
+                stderrFile.delete()
             }
-            val output = process.inputStream.bufferedReader().readText().trim()
-            if (process.exitValue() == 0) null else "${command[0]} exit ${process.exitValue()}: ${output.lines().take(2).joinToString(" ")}"
         } catch (e: java.io.IOException) {
-            "${command[0]} could not run (${e.javaClass.simpleName})"
+            Outcome(false, "", "", "${command[0]} could not run (${e.javaClass.simpleName})")
         }
     }
 
@@ -369,6 +428,11 @@ class RealIterm2KeyBytesTest {
         const val MENU_SHOWN = 3
         val PROBE_CHARS = listOf("a", "/", "*", ".", "1", "?", "A", "~", "|")
         val OSASCRIPT_CHARS = listOf("/", "*")
+        const val ITERM2_BUNDLE_ID = "com.googlecode.iterm2"
+        val SENT = Sent()
+
+        /** US key codes: kVK_ANSI_Slash, and kVK_ANSI_8 with Shift for `*`. */
+        val KEY_CODES = mapOf("/" to "key code 44", "*" to "key code 28 using shift down")
         val ESC = "\u001b"
         val CAPTURE_MODES = listOf(
             CaptureMode("plain", emptyList(), "nothing"),
@@ -385,6 +449,13 @@ class RealIterm2KeyBytesTest {
 
         /** A mode request: CSI with a private marker (? > = <), then parameters, then a final letter. */
         val MODE_REQUEST = Regex("\u001b\\[[?>=<][0-9;:]*[a-zA-Z]")
+
+        /**
+         * A keyboard-mode sequence: kitty push, pop, set and query (CSI > N u, CSI < N u,
+         * CSI = N ; M u, CSI ? u), bracketed paste and focus reporting (CSI ? 2004/1004 h/l),
+         * modifyOtherKeys (CSI > 4 ; N m) and modifyOtherKeys query (CSI ? 4 m).
+         */
+        val KEYBOARD_MODE = Regex("\u001b\\[(?:[>=<][0-9;:]*u|\\?u|\\?(?:2004|1004)[hl]|>4(?:;[0-9]*)?m|\\?4m)")
 
         val START_TIMEOUT = 15.seconds
         val CLAUDE_START_TIMEOUT = 45.seconds
@@ -439,6 +510,12 @@ class RealIterm2KeyBytesTest {
             val counts = linkedMapOf<String, Int>()
             MODE_REQUEST.findAll(text).forEach { counts.merge(it.value.replace(ESC, "ESC"), 1, Int::plus) }
             return if (counts.isEmpty()) "none" else counts.entries.joinToString(", ") { (seq, n) -> if (n == 1) seq else "$seq x$n" }
+        }
+
+        /** Every keyboard-mode sequence in [output], in order, as escapes. */
+        fun keyboardModes(output: ByteArray): String {
+            val found = KEYBOARD_MODE.findAll(String(output, Charsets.ISO_8859_1)).map { it.value.replace(ESC, "ESC") }.toList()
+            return if (found.isEmpty()) "none" else found.joinToString(" ")
         }
 
         /** The text Claude drew: escape sequences and control characters dropped, runs of spaces collapsed. */
