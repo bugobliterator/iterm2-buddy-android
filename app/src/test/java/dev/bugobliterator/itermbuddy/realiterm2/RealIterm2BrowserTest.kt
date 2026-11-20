@@ -81,8 +81,10 @@ import org.junit.Test
  *   whether the wheel's location offset follows the window's place on screen;
  * - **inner**: a page whose content scrolls in a full-window `overflow: auto` element, not the
  *   document (common in web apps): a raw scroll at its centre;
- * - **keys**: Page Down, Down ×5 and Space through `sendKey` (the browser key path), on both pages,
- *   as a fallback should synthetic scrolls be dead.
+ * - **keys**: Page Down, Down ×5 and Space through `sendKey` (the browser key path), on both pages;
+ * - **key drag**: the app's drag with "Scroll web pages with keys" on, with the window moved (where
+ *   raw scrolls land off target), on both pages, without and then with a tap first;
+ * - **calibrate**: how far one arrow, bursts of arrows at 0 to 250 ms gaps, and Page Down/Up move.
  *
  * Every result is a `browser:` line on stdout: the stream's size and scale, each step's deltas and
  * the page's scroll offset after it, and the wheel events WebKit delivered with where it put them
@@ -177,16 +179,32 @@ class RealIterm2BrowserTest {
         )
         withTimeoutOrNull(rig.requestTimeout) { driver.inputActive.first { it } }
             ?: failWith("browser input is not active (Mac revision ${macRevisionOf(client.state.value)}, below 15?)")
+        // The app's driver with Settings' "Scroll web pages with keys" on: drags go to the page as keys.
+        val keysDriver = BrowserDriver(
+            sender,
+            controller.activeStream,
+            controller.browserEditing,
+            controller.browserNavigation,
+            macRevision = client.state.map(::macRevisionOf).stateIn(rig.scope, SharingStarted.Eagerly, macRevisionOf(client.state.value)),
+            scope = rig.scope,
+            nowMillis = ::nowMillis,
+            scrollKeys = { true },
+            log = { line("keys driver: $it") },
+        )
         val probe = Probe(client, driver, sender, server, config, active.streamID, linkId, InputTarget(linkId, active.watchEpoch, browser.guid), sent)
 
         val scale = probe.tap()
         val raw = probe.raw(scale)
         probe.moved(scale, moveWindow)
+        // Still at the last (most offset) window position: the app's drag through the key path.
+        probe.keyDrag(keysDriver)
+        if (!moveWindow(0, 0)) line("could not move the window back to (0, 0)")
         probe.drag(scale)
         probe.small()
         val inner = probe.inner(scale)
         probe.keys(inner = false)
         probe.keys(inner = true)
+        probe.calibrateKeys()
 
         line("=== summary ===")
         probe.summary.forEach { line(it) }
@@ -518,6 +536,58 @@ class RealIterm2BrowserTest {
                 val after = if (inner) server.settledInnerY(step) else server.settledScrollY(step)
                 report(fmt("keys (%s): %s: %s %.0f -> %.0f, %d keydown events on the page", label, name, if (inner) "scrollTop" else "scrollY", before, after, server.count(step, "key") - keysBefore))
             }
+        }
+
+        /**
+         * The app's drag with "Scroll web pages with keys" on ([keysDriver]), at the window's
+         * current (moved) place, where a raw scroll's wheel lands off target: the same 600 px phone
+         * drag as [drag], on the document and on the inner-scroller page, first with no tap (as an
+         * owner who just drags), then, if that moved nothing, after a tap on the page.
+         */
+        suspend fun keyDrag(keysDriver: BrowserDriver) {
+            val density = (w / PHONE_WIDTH).toFloat()
+            for (inner in listOf(false, true)) {
+                val label = if (inner) "inner scroller" else "document"
+                val step = navigate(if (inner) "keydrag-inner" else "keydrag", inner)
+                for (tapFirst in listOf(false, true)) {
+                    if (tapFirst) {
+                        driver.tap(w / 2, h / 2)
+                        server.await(rig.requestTimeout) { it.step == step && it.kind == "click" }
+                    }
+                    val before = if (inner) server.innerY(step) else server.scrollY(step)
+                    val keysBefore = server.count(step, "key")
+                    repeat(DRAG_EVENTS) {
+                        keysDriver.scroll(0f, -600f / DRAG_EVENTS, density, 1f, (w / 2).toFloat(), (h / 2).toFloat())
+                        delay(EVENT_GAP)
+                    }
+                    val after = if (inner) server.settledInnerY(step) else server.settledScrollY(step)
+                    val keys = server.beacons.filter { it.step == step && it.kind == "key" }.drop(keysBefore).joinToString(",") { it.values["key"].orEmpty() }
+                    report(fmt("key drag (%s, %s): 600 view px up: %s %.0f -> %.0f; keys on the page: %s", label, if (tapFirst) "after a tap" else "no tap", if (inner) "scrollTop" else "scrollY", before, after, keys.ifEmpty { "none" }))
+                    if (after != before) break
+                }
+            }
+        }
+
+        /** How far one arrow, bursts of five arrows at a few gaps, and one Page Down/Up scroll the document. */
+        suspend fun calibrateKeys() {
+            val step = navigate("calibrate")
+            driver.tap(w / 2, h / 2)
+            server.await(rig.requestTimeout) { it.step == step && it.kind == "click" }
+            suspend fun measure(name: String, presses: Int, key: SpecialKey, gap: Duration) {
+                val before = server.scrollY(step)
+                repeat(presses) {
+                    sender.key(target, KeyEvent(Key.Special(key)), pasteKeys = false)
+                    if (gap > Duration.ZERO) delay(gap)
+                }
+                val after = server.settledScrollY(step)
+                report(fmt("calibrate: %s: scrollY %.0f -> %.0f (%+.0f CSS px, %.1f per press)", name, before, after, after - before, (after - before) / presses))
+            }
+            measure("Down x1", 1, SpecialKey.DOWN, Duration.ZERO)
+            for (gap in listOf(0, 60, 120, 250)) measure("Down x5 every $gap ms", 5, SpecialKey.DOWN, gap.milliseconds)
+            measure("Page Down x1", 1, SpecialKey.PAGE_DOWN, Duration.ZERO)
+            measure("Page Down x3 every 120 ms", 3, SpecialKey.PAGE_DOWN, 120.milliseconds)
+            measure("Up x1", 1, SpecialKey.UP, Duration.ZERO)
+            measure("Page Up x1", 1, SpecialKey.PAGE_UP, Duration.ZERO)
         }
 
         private fun wheelText(wheels: List<Beacon>, aimX: Double, aimY: Double): String {
