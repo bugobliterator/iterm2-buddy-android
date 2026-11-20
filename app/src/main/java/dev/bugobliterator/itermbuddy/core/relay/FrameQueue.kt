@@ -5,6 +5,7 @@ import kotlinx.coroutines.channels.ChannelIterator
 import kotlinx.coroutines.channels.ChannelResult
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.selects.SelectClause1
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -18,10 +19,24 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * [offer] never blocks, so OkHttp's single reader thread never stalls behind a slow consumer.
  * [incoming]'s select clauses are not supported: they could not release the budget.
+ *
+ * Each frame is stamped with [nanoTime] when it is offered; [lastReceivedAtNanos] is the stamp of
+ * the frame the reader received last (the live diagnostics' receive-to-decoder time).
  */
-internal class FrameQueue(private val maxQueuedBytes: Long) {
+internal class FrameQueue(private val maxQueuedBytes: Long, private val nanoTime: () -> Long = System::nanoTime) {
     private val frames = Channel<ByteArray>(Channel.UNLIMITED)
     private val queuedBytes = AtomicLong()
+
+    /** When each queued frame was offered, in queue order: pushed before its frame, polled as it is received. */
+    private val arrivals = ConcurrentLinkedQueue<Long>()
+
+    /**
+     * When the frame the reader received last was offered ([nanoTime]); [NO_ARRIVAL] before the
+     * first. Read it right after a receive, on the reader's side.
+     */
+    @Volatile
+    var lastReceivedAtNanos: Long = NO_ARRIVAL
+        private set
 
     /** The reader's side. */
     val incoming: ReceiveChannel<ByteArray> = Counted()
@@ -41,6 +56,7 @@ internal class FrameQueue(private val maxQueuedBytes: Long) {
             return false
         }
         queuedBytes.addAndGet(frame.size.toLong())
+        arrivals.add(nanoTime())
         return frames.trySend(frame).isSuccess
     }
 
@@ -51,6 +67,7 @@ internal class FrameQueue(private val maxQueuedBytes: Long) {
 
     private fun release(frame: ByteArray) {
         queuedBytes.addAndGet(-frame.size.toLong())
+        arrivals.poll()?.let { lastReceivedAtNanos = it }
     }
 
     private inner class Counted : ReceiveChannel<ByteArray> by frames {
@@ -80,6 +97,9 @@ internal class FrameQueue(private val maxQueuedBytes: Long) {
     companion object {
         /** Start of the reason of an over-budget close; RelayConnection also sends it as its WebSocket close reason. */
         const val OVER_BUDGET = "receive queue over budget"
+
+        /** [lastReceivedAtNanos] before any frame was received, and for sockets that do not stamp frames. */
+        const val NO_ARRIVAL = Long.MIN_VALUE
         private const val CLOSE_ABNORMAL = 1006
     }
 }

@@ -1,6 +1,7 @@
 package dev.bugobliterator.itermbuddy.core.input
 
 import dev.bugobliterator.itermbuddy.core.stream.ActiveStream
+import dev.bugobliterator.itermbuddy.core.stream.LatencyMeter
 import dev.bugobliterator.itermbuddy.core.stream.StreamLink
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import kotlinx.coroutines.CancellationException
@@ -88,6 +89,8 @@ fun isInputTarget(active: ActiveStream?, target: InputTarget): Boolean =
  * @param typeChunkBytes the largest piece of a typed draft, in UTF-8 bytes ([TYPE_CHUNK_BYTES]).
  * @param pasteKeys whether [PASTED_KEYS] are sent as pastes (see above); off unless given. The
  *   app passes its Settings switch.
+ * @param latency the live diagnostics' meter: told when each [key] item has been sent; null
+ *   measures nothing.
  */
 class InputSender(
     private val link: StreamLink,
@@ -97,6 +100,7 @@ class InputSender(
     private val sendBound: Duration = 2.seconds,
     private val typeChunkBytes: Int = TYPE_CHUNK_BYTES,
     private val pasteKeys: () -> Boolean = { false },
+    private val latency: LatencyMeter? = null,
 ) {
     private sealed interface Item {
         val target: InputTarget
@@ -203,7 +207,7 @@ class InputSender(
         }
         InputTrace.current.log { "sender: kept ${traceItem(item)} for ${target.sessionGuid} link ${target.linkId} watch ${target.watchEpoch}" }
         when (item) {
-            is KeyItem -> sendKey(item.event, target, item.label, item.pasteKeys)
+            is KeyItem -> if (sendKey(item.event, target, item.label, item.pasteKeys)) latency?.keySent()
             is PasteItem -> send(PhoneMessage.PasteText(target.sessionGuid, item.text), target, item.label)
             is TypeItem -> typeThenReturn(item)
             is WheelItem -> send(item.message, target, item.label)

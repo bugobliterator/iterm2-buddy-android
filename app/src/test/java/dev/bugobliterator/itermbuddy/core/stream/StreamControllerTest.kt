@@ -78,7 +78,11 @@ class StreamControllerTest {
         lateinit var target: StreamSink
         val accepted = CopyOnWriteArrayList<Pair<StreamInput, Long>>()
 
+        /** Runs before each input is passed on: a slow sink. */
+        @Volatile var before: suspend (StreamInput) -> Unit = {}
+
         override suspend fun accept(input: StreamInput) {
+            before(input)
             target.accept(input)
             accepted += input to now()
         }
@@ -89,9 +93,10 @@ class StreamControllerTest {
         timeouts: StreamTimeouts = StreamTimeouts(),
         clientTimeouts: ClientTimeouts = ClientTimeouts(),
         budgets: StreamBudgets = StreamBudgets(),
+        latency: LatencyMeter? = null,
     ) {
         val store = InMemoryPairingStore()
-        val relay = FakeRelay(ORIGIN)
+        val relay = FakeRelay(ORIGIN, nanoTime = { test.currentTime * NANOS_PER_MILLI })
         val logs = CopyOnWriteArrayList<String>()
         val video = FakeVideoOutput { test.currentTime }
         val sink = CountingSink { test.currentTime }
@@ -117,6 +122,7 @@ class StreamControllerTest {
             nowMillis = { test.currentTime },
             log = { logs += it },
             ackContext = EmptyCoroutineContext,
+            latency = latency,
         )
         val mac = FakeMac(relay, code, macKeys.first, test.backgroundScope)
 
@@ -1043,6 +1049,29 @@ class StreamControllerTest {
     }
 
     @Test
+    fun latencyMeterTimesTheActiveStreamsFramesFromTheirRelayArrival() = runTest {
+        val meter = LatencyMeter(nowNanos = { currentTime * NANOS_PER_MILLI })
+        val h = Harness(this, latency = meter)
+        h.openLive()
+        backgroundScope.launch { meter.measure { false } }
+        runCurrent()
+        // The sink takes 7 ms over each media frame: time in the phone's pipeline before submit.
+        h.sink.before = { if (it is StreamInput.Media) delay(7) }
+        h.mac.sendMedia(frame(1, 100))
+        advanceTimeBy(20)
+        val stats = meter.stats.value
+        assertEquals(7L * NANOS_PER_MILLI, stats.receiveToSubmitLast)
+        assertEquals(1, stats.framesPerSecond)
+        // Another stream's frame is not counted.
+        h.mac.sendMedia(frame(9, 200))
+        advanceTimeBy(20)
+        assertEquals(1, meter.stats.value.framesPerSecond)
+        h.mac.sendMedia(frame(1, 300))
+        advanceTimeBy(20)
+        assertEquals(40L * NANOS_PER_MILLI, meter.stats.value.frameIntervalLast)
+    }
+
+    @Test
     fun linkUpWithMissedLinkDownAndUnknownLinkDown() = runTest {
         val link = ScriptedStreamLink()
         val video = FakeVideoOutput { currentTime }
@@ -1547,6 +1576,7 @@ class StreamControllerTest {
         const val BROWSER_NAVIGATION = "messages/browser-sessions/browser-navigation-changed.json"
         const val KIB = 1024
         const val MIB = 1024L * 1024
+        const val NANOS_PER_MILLI = 1_000_000L
 
         val A = SessionSummary("guid-alpha", "$SENTINEL alpha", "subtitle alpha", isBrowser = false)
         val B = SessionSummary("guid-bravo", "$SENTINEL bravo", "subtitle bravo", isBrowser = false)

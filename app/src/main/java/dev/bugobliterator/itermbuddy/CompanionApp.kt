@@ -16,6 +16,7 @@ import dev.bugobliterator.itermbuddy.core.input.SharedPrefsPasteKeysStore
 import dev.bugobliterator.itermbuddy.core.input.isInputTarget
 import dev.bugobliterator.itermbuddy.core.relay.relayHttpClient
 import dev.bugobliterator.itermbuddy.core.stream.BrowserDriver
+import dev.bugobliterator.itermbuddy.core.stream.LatencyMeter
 import dev.bugobliterator.itermbuddy.core.stream.SelectionDriver
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
 import dev.bugobliterator.itermbuddy.core.sessions.SharedPrefsClaudeTipStore
@@ -110,6 +111,12 @@ class CompanionApp : Application() {
     lateinit var input: InputSender
         private set
 
+    /**
+     * The debug overlay's latency numbers: the stream controller and the input sender report to it,
+     * and it records only while the overlay is shown.
+     */
+    val latency = LatencyMeter()
+
     /** Selection gestures, Select All, Clear and Copy for the live session; see the class comment. */
     lateinit var selection: SelectionDriver
         private set
@@ -184,7 +191,7 @@ class CompanionApp : Application() {
                 CompanionClient(KeystorePairingStore(this), relayHttpClient(), scope, streamSink = sink, chatSink = chatSink)
             },
             newController = { link ->
-                StreamController(link, video, scope, nowMillis = SystemClock::uptimeMillis, log = { Log.i(STREAM_TAG, it) })
+                StreamController(link, video, scope, nowMillis = SystemClock::uptimeMillis, log = { Log.i(STREAM_TAG, it) }, latency = latency)
             },
             newRepository = { client -> SessionTreeRepository(client, scope) },
             newChats = { link ->
@@ -215,6 +222,7 @@ class CompanionApp : Application() {
             log = { Log.i(INPUT_TAG, it) },
             // Read as each key is sent: the Settings switch "Send / * + = as paste".
             pasteKeys = { home.pasteKeys.enabled.value },
+            latency = latency,
         )
         selection = SelectionDriver(
             link = home.client,

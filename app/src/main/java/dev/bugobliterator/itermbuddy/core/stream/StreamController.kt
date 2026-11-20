@@ -118,6 +118,8 @@ data class ActiveStream(
  *   content or session names.
  * @param ackContext where the [AckSender] runs: a background dispatcher by default, so acks never
  *   depend on [scope]'s dispatcher (which may be the main thread); tests pass their own.
+ * @param latency the live diagnostics' meter: told of each media frame of the active stream as it
+ *   is handled and once the output took it; null measures nothing.
  */
 class StreamController(
     private val link: StreamLink,
@@ -130,6 +132,7 @@ class StreamController(
     ackContext: CoroutineContext = Dispatchers.Default,
     tileTimeouts: TileTimeouts = TileTimeouts(),
     tileEncodedBudgetBytes: Long = DEFAULT_ENCODED_TILE_BYTES,
+    private val latency: LatencyMeter? = null,
 ) : StreamSink {
     private val stateFlow = MutableStateFlow<LiveViewState>(LiveViewState.Closed)
 
@@ -488,6 +491,7 @@ class StreamController(
         if (frame.streamID != stream.streamID) return
         // Ack first, every frame, depth 0 (SessionView.swift:976-984), whatever happens to it next.
         acks.ack(stream.linkId, stream.streamID, frame.ptsMilliseconds)
+        latency?.mediaArrived(media.receivedAtNanos)
         val configGeneration = stream.config?.generationId
         val frameGeneration = frame.generationId
         if (configGeneration != null && frameGeneration != null && frameGeneration < configGeneration) return
@@ -503,6 +507,7 @@ class StreamController(
             false
         }
         if (submitted) {
+            latency?.mediaSubmitted(media.receivedAtNanos)
             rejectingSince = null
             requestRunSince = null
         } else {

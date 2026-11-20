@@ -45,6 +45,8 @@ import kotlin.random.Random
 internal class FakeRelay(
     val origin: String,
     private val phoneQueueBytes: Long = Long.MAX_VALUE,
+    /** The clock the phone's queue stamps arrivals with (`RelaySocket.lastReceivedAtNanos`). */
+    private val nanoTime: () -> Long = System::nanoTime,
 ) : RelayTransport, MacRelay {
     private class Room {
         var verifier: ByteArray? = null
@@ -179,11 +181,13 @@ internal class FakeRelay(
     }
 
     private inner class PhoneSide(private val signedOrigin: String, private val roomName: String) : RelaySocket {
-        private val frames = FrameQueue(phoneQueueBytes)
+        private val frames = FrameQueue(phoneQueueBytes, nanoTime)
         private var admitted = false
         private var closed = false
 
         override val incoming: ReceiveChannel<ByteArray> get() = frames.incoming
+
+        override val lastReceivedAtNanos: Long get() = frames.lastReceivedAtNanos
 
         override suspend fun admit(proof: Proof): AdmissionResult = synchronized(this@FakeRelay) {
             val result = decide(proof)

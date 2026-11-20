@@ -4,6 +4,12 @@ import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import kotlin.time.Duration
 
+/**
+ * [StreamInput.Media.receivedAtNanos] when the arrival time is unknown; the same value as the
+ * relay queue's `FrameQueue.NO_ARRIVAL`.
+ */
+const val NO_RECEIVE_TIME: Long = Long.MIN_VALUE
+
 /** First byte of a media channel frame; a JSON envelope starts with `{` (`CompanionFrameChannel.swift`). */
 const val MEDIA_CHANNEL: Byte = 0x01
 
@@ -36,9 +42,14 @@ sealed interface StreamInput {
     /**
      * One media frame (*notes* → Media frame). It holds the decrypted channel frame as received,
      * `0x01` marker included, so a 3 MiB keyframe is not copied just to drop one byte; [parse]
-     * reads it from after the marker.
+     * reads it from after the marker. [receivedAtNanos] is when its first relay frame arrived on
+     * the phone, in [System.nanoTime] ([NO_RECEIVE_TIME] when unknown): for the live diagnostics.
      */
-    class Media(val linkId: Long, private val channelFrame: ByteArray) : StreamInput {
+    class Media(
+        val linkId: Long,
+        private val channelFrame: ByteArray,
+        val receivedAtNanos: Long = NO_RECEIVE_TIME,
+    ) : StreamInput {
         init {
             require(channelFrame.isNotEmpty() && channelFrame[0] == MEDIA_CHANNEL) { "not a media channel frame" }
         }

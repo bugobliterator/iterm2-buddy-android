@@ -86,14 +86,18 @@ import dev.bugobliterator.itermbuddy.core.input.ModifierKey
 import dev.bugobliterator.itermbuddy.core.input.StickyModifiers
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.core.stream.ActiveStream
+import dev.bugobliterator.itermbuddy.core.stream.LatencyMeter
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
 import dev.bugobliterator.itermbuddy.core.stream.fitGrid
+import dev.bugobliterator.itermbuddy.core.stream.latencyStatsText
 import dev.bugobliterator.itermbuddy.core.wire.SelectionPhase
 import dev.bugobliterator.itermbuddy.ui.LiveSessionTheme
 import dev.bugobliterator.itermbuddy.video.VideoStats
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** What the live view can ask for; the navigator, the controller and the input sender do the work. */
 interface LiveSessionActions {
@@ -833,13 +837,21 @@ internal fun actionLabel(action: OverlayAction): String = when (action) {
     OverlayAction.FIT -> "Fit to phone"
 }
 
-/** Debug builds: the decoder's counters, collected only while shown. */
+/**
+ * Debug builds: the decoder's counters and the latency numbers ([LatencyMeter]), collected only
+ * while shown. While it shows, the meter records and pings every 2 s, off the main thread.
+ */
 @Composable
 internal fun VideoStatsOverlay(source: LiveVideoSource, modifier: Modifier) {
     val stats by source.output.stats.collectAsStateWithLifecycle()
+    val meter = source.latency
+    val latency = meter?.stats?.collectAsStateWithLifecycle()?.value
+    if (meter != null) {
+        LaunchedEffect(meter) { withContext(Dispatchers.Default) { meter.measure(ping = source.ping) } }
+    }
     Surface(modifier = modifier, color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), shape = MaterialTheme.shapes.small) {
         Text(
-            text = videoStatsText(stats),
+            text = videoStatsText(stats) + (latency?.let { "\n" + latencyStatsText(it) } ?: ""),
             color = MaterialTheme.colorScheme.onSurface,
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.padding(8.dp),

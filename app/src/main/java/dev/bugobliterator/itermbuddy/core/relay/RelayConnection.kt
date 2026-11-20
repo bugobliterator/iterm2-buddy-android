@@ -214,6 +214,12 @@ class RelayConnection(
      */
     val incoming: ReceiveChannel<ByteArray> get() = frames.incoming
 
+    /**
+     * When the frame read last from [incoming] arrived from the relay, in [System.nanoTime];
+     * [FrameQueue.NO_ARRIVAL] before the first. For the reader, right after a receive.
+     */
+    val lastReceivedAtNanos: Long get() = frames.lastReceivedAtNanos
+
     private val admission = CompletableDeferred<AdmissionResult>()
     private val lock = Any()
     private var phase = Phase.NEW
