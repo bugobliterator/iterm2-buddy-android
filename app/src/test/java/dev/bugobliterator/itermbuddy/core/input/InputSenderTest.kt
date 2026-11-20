@@ -3,12 +3,15 @@ package dev.bugobliterator.itermbuddy.core.input
 import dev.bugobliterator.itermbuddy.Fixtures
 import dev.bugobliterator.itermbuddy.core.CompanionRequestException
 import dev.bugobliterator.itermbuddy.core.stream.ActiveStream
+import dev.bugobliterator.itermbuddy.core.stream.LatencyMeter
 import dev.bugobliterator.itermbuddy.core.stream.StreamLink
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.currentTime
@@ -78,13 +81,14 @@ class InputSenderTest {
         current: InputTarget? = first,
         typeChunkBytes: Int = InputSender.TYPE_CHUNK_BYTES,
         pasteKeys: () -> Boolean = { false },
+        latency: LatencyMeter? = null,
     ): Harness {
         val link = RecordingLink(this)
         val log = Collections.synchronizedList(mutableListOf<String>())
         lateinit var harness: Harness
         val sender = InputSender(
             link, backgroundScope, isCurrent = { it == harness.current }, log = { log += it }, typeChunkBytes = typeChunkBytes,
-            pasteKeys = pasteKeys,
+            pasteKeys = pasteKeys, latency = latency,
         )
         harness = Harness(link, sender, log)
         harness.current = current
@@ -110,6 +114,29 @@ class InputSenderTest {
         repeat(1_000) { h.sender.key(first, text("$it")) }
         settle()
         assertEquals((0 until 1_000).map { sendKey("$it") }, h.link.completed.map { it.message })
+    }
+
+    @Test
+    fun eachSentKeyIsTimedFromWhenItsSendReturned() = runTest {
+        val meter = LatencyMeter(nowNanos = { currentTime * 1_000_000 })
+        backgroundScope.launch { meter.measure { false } }
+        val h = harness(latency = meter)
+        // Each send takes 5 ms (handed to the socket at its end).
+        h.link.behaviour = { delay(5) }
+        h.sender.key(first, text("a"))
+        h.sender.paste(first, "not a key")
+        runCurrent()
+        advanceTimeBy(30)
+        // The key was sent at 5 ms; the paste is not a key and is not timed.
+        meter.mediaArrived(currentTime * 1_000_000)
+        assertEquals(25_000_000L, meter.stats.value.keyToFrameLast)
+        assertEquals(1, h.link.completed.count { it.message is PhoneMessage.SendKey })
+        // A key whose send failed is not timed.
+        h.link.behaviour = { throw CompanionRequestException("gone") }
+        h.sender.key(first, text("b"))
+        settle()
+        meter.mediaArrived(currentTime * 1_000_000)
+        assertEquals(25_000_000L, meter.stats.value.keyToFrameLast)
     }
 
     @Test

@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.Velocity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.bugobliterator.itermbuddy.core.stream.BrowserDriver
 import dev.bugobliterator.itermbuddy.core.stream.HistoryTileStore
+import dev.bugobliterator.itermbuddy.core.stream.LatencyMeter
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.stream.ScrollWheelAccumulator
 import dev.bugobliterator.itermbuddy.core.stream.SelectionDriver
@@ -66,6 +67,8 @@ import kotlin.math.roundToInt
  * per-frame stats and the live top recompose only what shows them: the process's [output], the
  * stream controller's [state] and its [historyTiles] (null: no scrollback), and the app's
  * [selection] driver (null: no selection) and [browser] driver (null: no browser view).
+ * [latency] is the debug overlay's meter (null: no latency lines), and [ping] one diagnostics
+ * ping on the active stream's link ([pingActiveLink]).
  */
 class LiveVideoSource(
     val output: HevcVideoOutput,
@@ -73,6 +76,8 @@ class LiveVideoSource(
     val historyTiles: HistoryTileStore? = null,
     val selection: SelectionDriver? = null,
     val browser: BrowserDriver? = null,
+    val latency: LatencyMeter? = null,
+    val ping: suspend () -> Boolean = { false },
 ) {
     /** [videoVisible] now, for the view of [sessionGuid]. */
     fun visible(sessionGuid: String): Boolean = videoVisible(state, output.stats, sessionGuid)

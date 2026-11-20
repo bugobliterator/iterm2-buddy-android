@@ -16,6 +16,7 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.bugobliterator.itermbuddy.core.input.InputTarget
 import dev.bugobliterator.itermbuddy.core.input.KeyEvent
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
+import dev.bugobliterator.itermbuddy.core.stream.pingActiveLink
 import dev.bugobliterator.itermbuddy.ui.AppRoot
 import dev.bugobliterator.itermbuddy.ui.AppTheme
 import dev.bugobliterator.itermbuddy.ui.HomeTab
@@ -115,7 +116,15 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val version = appVersion()
         val sessions = app.home
-        val video = LiveVideoSource(app.video, sessions.controller.state, sessions.controller.historyTiles, app.selection, app.browser)
+        val video = LiveVideoSource(
+            app.video,
+            sessions.controller.state,
+            sessions.controller.historyTiles,
+            app.selection,
+            app.browser,
+            latency = app.latency,
+            ping = { pingActiveLink(sessions.client, sessions.controller.activeStream.value) },
+        )
         val debugBuild = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         // The live view reads the stream's session and config; liveTop moves with the output, so
         // it is dropped here rather than recompose the whole home on every scroll.

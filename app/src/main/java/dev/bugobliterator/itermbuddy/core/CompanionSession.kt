@@ -19,6 +19,7 @@ import dev.bugobliterator.itermbuddy.core.relay.RelayConnection
 import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
 import dev.bugobliterator.itermbuddy.core.relay.RelayRegistrar
 import dev.bugobliterator.itermbuddy.core.stream.MEDIA_CHANNEL
+import dev.bugobliterator.itermbuddy.core.stream.NO_RECEIVE_TIME
 import dev.bugobliterator.itermbuddy.core.stream.StreamInput
 import dev.bugobliterator.itermbuddy.core.stream.StreamSink
 import dev.bugobliterator.itermbuddy.core.stream.isStreamScoped
@@ -61,6 +62,12 @@ internal interface RelaySocket {
     val incoming: ReceiveChannel<ByteArray>
 
     /**
+     * When the frame read last from [incoming] arrived, in [System.nanoTime]; [NO_RECEIVE_TIME]
+     * when unknown (the default: a socket that does not stamp its frames).
+     */
+    val lastReceivedAtNanos: Long get() = NO_RECEIVE_TIME
+
+    /**
      * Queues [frame] for the Mac. Must never suspend once it has started handing the frame over
      * (production queues on OkHttp and returns): [CompanionSession.sendEnvelope] relies on it, so
      * that a caller cancelled mid-send (the input sender's 2 s `withTimeout`) can only be cancelled
@@ -96,6 +103,8 @@ internal class OkHttpRelayTransport(
             override suspend fun admit(proof: Proof): AdmissionResult = connection.admit(proof)
 
             override val incoming: ReceiveChannel<ByteArray> get() = connection.incoming
+
+            override val lastReceivedAtNanos: Long get() = connection.lastReceivedAtNanos
 
             override suspend fun send(frame: ByteArray) = connection.send(frame)
 
@@ -423,6 +432,9 @@ internal class CompanionSession(
 
     private suspend fun receiveLoop() {
         var relayClose: RelayClose? = null
+        // When the first frame of the message being reassembled arrived (a message can span frames).
+        var messageReceivedAt = NO_RECEIVE_TIME
+        var midMessage = false
         try {
             while (true) {
                 val frame = if (endingForSink) {
@@ -436,9 +448,12 @@ internal class CompanionSession(
                     next.exceptionOrNull()?.let { throw it }
                     next.getOrNull() ?: break
                 }
+                if (!midMessage) messageReceivedAt = socket.lastReceivedAtNanos
+                midMessage = true
                 val plaintext = channel.decryptFrame(frame) ?: continue
+                midMessage = false
                 heardFromMac = true
-                handle(plaintext)
+                handle(plaintext, messageReceivedAt)
             }
             if (endingForSink) log("ending the link: the stream or chat sink failed or stalled")
         } catch (e: CancellationException) {
@@ -458,7 +473,8 @@ internal class CompanionSession(
         }
     }
 
-    private suspend fun handle(plaintext: ByteArray) {
+    /** One decrypted message; [receivedAtNanos] is when its first frame arrived ([RelaySocket.lastReceivedAtNanos]). */
+    private suspend fun handle(plaintext: ByteArray, receivedAtNanos: Long) {
         if (awaitingFirstFrame) {
             awaitingFirstFrame = false
             val verdict = decodePairingConfirmation(plaintext)
@@ -481,7 +497,7 @@ internal class CompanionSession(
             return
         }
         if (plaintext[0] == MEDIA_CHANNEL) {
-            deliver("Media") { StreamInput.Media(it, plaintext) }
+            deliver("Media") { StreamInput.Media(it, plaintext, receivedAtNanos) }
             return
         }
         val peek = try {
