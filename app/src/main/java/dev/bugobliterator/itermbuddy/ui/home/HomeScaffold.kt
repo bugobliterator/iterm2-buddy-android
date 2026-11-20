@@ -125,6 +125,9 @@ interface HomeActions : LiveSessionActions {
 
     /** The owner flipped Settings' "Include typed-key trace" switch ([HomeModel.keyTrace]). */
     fun setKeyTrace(enabled: Boolean) {}
+
+    /** Debug builds: the owner flipped Settings' "Decoder low-latency keys" switch ([HomeModel.decoderLowLatency]). */
+    fun setDecoderLowLatency(enabled: Boolean) {}
 }
 
 /**
@@ -135,7 +138,8 @@ interface HomeActions : LiveSessionActions {
  * [NavState][dev.bugobliterator.itermbuddy.ui.NavState], so they always agree; [chatsAttention]
  * is the Chats item's dot; [claudeTip] shows the Sessions list's `\(status)` tip; [pasteKeys] is
  * Settings' "Send / * + = as paste" switch, [scrollKeys] its "Scroll web pages with keys" and
- * [keyTrace] its "Include typed-key trace". The chat
+ * [keyTrace] its "Include typed-key trace"; [decoderLowLatency] is the debug builds' "Decoder
+ * low-latency keys" switch. The chat
  * destinations collect their own flows from [ChatsHome].
  */
 data class HomeModel(
@@ -161,6 +165,7 @@ data class HomeModel(
     val pasteKeys: Boolean = true,
     val scrollKeys: Boolean = true,
     val keyTrace: Boolean = false,
+    val decoderLowLatency: Boolean = true,
 )
 
 /**
@@ -242,6 +247,8 @@ private fun HomeDestinationView(destination: HomeDestination, model: HomeModel, 
                 debugBuild = model.debugBuild,
                 videoStatsShown = model.videoStatsShown,
                 onVideoStatsShownChange = actions::setVideoStatsShown,
+                decoderLowLatency = model.decoderLowLatency,
+                onDecoderLowLatencyChange = actions::setDecoderLowLatency,
                 pasteKeys = model.pasteKeys,
                 onPasteKeysChange = actions::setPasteKeys,
                 scrollKeys = model.scrollKeys,

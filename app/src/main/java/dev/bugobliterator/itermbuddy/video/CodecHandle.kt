@@ -11,18 +11,24 @@ import java.nio.ByteBuffer
 
 /**
  * What [HevcVideoOutput] configures a decoder with. [csd0] is `parameterSetsToCsd(extradata)`;
- * [lowLatency] sets `KEY_LOW_LATENCY = 1`; [maxInputSize] is `KEY_MAX_INPUT_SIZE`. Priority is
- * always 0 (real time).
+ * [integerKeys] are the MediaFormat integer keys, in order ([decoderIntegerKeys]: low latency,
+ * vendor keys, `KEY_PRIORITY = 0`, `KEY_MAX_INPUT_SIZE`); [request] is what they ask for.
  */
 class CodecFormat(
     val width: Int,
     val height: Int,
     val csd0: ByteArray,
-    val lowLatency: Boolean,
-    val maxInputSize: Int,
+    val request: LowLatencyRequest,
+    val integerKeys: Map<String, Int>,
 ) {
+    /** `KEY_LOW_LATENCY = 1` is set. */
+    val lowLatency: Boolean get() = integerKeys[MediaFormat.KEY_LOW_LATENCY] == 1
+
+    /** `KEY_MAX_INPUT_SIZE`. */
+    val maxInputSize: Int get() = integerKeys.getValue(MediaFormat.KEY_MAX_INPUT_SIZE)
+
     override fun toString(): String =
-        "CodecFormat(${width}x$height, csd0=${csd0.size} bytes, lowLatency=$lowLatency, maxInputSize=$maxInputSize)"
+        "CodecFormat(${width}x$height, csd0=${csd0.size} bytes, $request, keys=$integerKeys)"
 }
 
 /**
@@ -31,7 +37,9 @@ class CodecFormat(
  * callbacks must be delivered on that same thread (the real handle posts them to its looper).
  * Any call may throw a [RuntimeException] (`CodecException`, `IllegalStateException`, ...).
  * [configure] and [start] throw [InsufficientResourceException] when the codec reports
- * `ERROR_INSUFFICIENT_RESOURCE`, so the output moves to another decoder at once.
+ * `ERROR_INSUFFICIENT_RESOURCE`, so the output moves to another decoder at once. [reset] returns
+ * the codec to the unconfigured state (from any state, an error one included) so it can be
+ * configured again; the callback is set again after it.
  */
 interface CodecHandle {
     val name: String
@@ -41,6 +49,9 @@ interface CodecHandle {
     fun configure(format: CodecFormat, surface: Surface)
 
     fun start()
+
+    /** `MediaCodec.reset`: back to unconfigured, ready for [setCallback] and [configure] again. */
+    fun reset()
 
     /** The input buffer for [index], as `getInputBuffer`. */
     fun inputBuffer(index: Int): ByteBuffer?
@@ -98,14 +109,14 @@ private class MediaCodecHandle(private val codec: MediaCodec) : CodecHandle {
     override fun configure(format: CodecFormat, surface: Surface) {
         val mediaFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, format.width, format.height).apply {
             setByteBuffer("csd-0", ByteBuffer.wrap(format.csd0))
-            if (format.lowLatency) setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-            setInteger(MediaFormat.KEY_PRIORITY, 0)
-            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, format.maxInputSize)
+            for ((key, value) in format.integerKeys) setInteger(key, value)
         }
         resourceChecked { codec.configure(mediaFormat, surface, null, 0) }
     }
 
     override fun start() = resourceChecked { codec.start() }
+
+    override fun reset() = codec.reset()
 
     private inline fun resourceChecked(block: () -> Unit) {
         try {

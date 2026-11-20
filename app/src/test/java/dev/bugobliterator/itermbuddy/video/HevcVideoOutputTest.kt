@@ -26,6 +26,7 @@ class HevcVideoOutputTest {
     private val logs = CopyOnWriteArrayList<String>()
     private var catalog: HevcDecoderCatalog = FixedCatalog(listOf(decoder("hw.hevc", lowLatency = true)))
     private var factory = FakeCodecFactory(thread)
+    private val fallbacks = LowLatencyFallbacks()
 
     private fun output(maxPending: Long = DEFAULT_MAX_PENDING_INPUT_BYTES, decoderThread: DecoderThread = thread) =
         HevcVideoOutput(
@@ -36,6 +37,8 @@ class HevcVideoOutputTest {
             decoderThread = decoderThread,
             surfaceCallTimeoutMillis = 5_000,
             log = { logs += it },
+            sdkInt = 34,
+            lowLatencyFallbacks = fallbacks,
         ).also { it.setKeyframeRequester { requests.incrementAndGet() } }
 
     @After
@@ -76,15 +79,17 @@ class HevcVideoOutputTest {
     }
 
     @Test
-    fun smallStreamGetsTheFourMebibyteInputFloorAndNoLowLatencyWhenUnsupported() {
+    fun smallStreamGetsTheFourMebibyteInputFloorAndLowLatencyEvenWhenNotAdvertised() {
         catalog = FixedCatalog(listOf(decoder("plain", lowLatency = false)))
         val video = output()
         video.configure(streamConfig(width = 640, height = 400))
         video.attachSurface(fakeSurface())
         thread.drain()
         val format = checkNotNull(factory.last.configuredFormat)
-        assertFalse(format.lowLatency)
+        assertTrue(format.lowLatency)
+        assertEquals(LowLatencyRequest.REQUESTED, format.request)
         assertEquals(4 shl 20, format.maxInputSize)
+        assertEquals(LowLatencyState.ON, video.stats.value.lowLatency)
     }
 
     @Test
@@ -804,5 +809,229 @@ class HevcVideoOutputTest {
         assertEquals(listOf(0 to false), codec.rendered.toList())
         assertEquals(0L, video.stats.value.framesOutSinceReset)
         assertEquals(0L, video.stats.value.framesOut)
+    }
+
+    // ---- Low-latency keys ----
+
+    private fun exynos() = FixedCatalog(listOf(decoder("c2.exynos.hevc.decoder", lowLatency = false), decoder("sw.hevc", hardware = false)))
+
+    @Test
+    fun rejectedLowLatencyKeysRetryOnceWithTheMinimalFormatAndAreRemembered() {
+        catalog = exynos()
+        factory = FakeCodecFactory(thread) { rejectRequestedFormat = true }
+        val video = output()
+        video.configure(streamConfig())
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        val codec = factory.last
+        assertEquals(listOf(LowLatencyRequest.REQUESTED, LowLatencyRequest.MINIMAL), codec.configureCalls.map { it.request })
+        assertEquals("vendor key asked first", 1, codec.configureCalls[0].integerKeys["vendor.rtc-ext-dec-low-latency.enable"])
+        assertEquals(1, codec.resets.get())
+        assertTrue(codec.started)
+        assertFalse(codec.released)
+        val used = checkNotNull(codec.configuredFormat)
+        assertFalse("not advertised, so not in the minimal format", used.lowLatency)
+        assertEquals(setOf("priority", "max-input-size"), used.integerKeys.keys)
+        assertEquals(LowLatencyState.FALLBACK, video.stats.value.lowLatency)
+        assertEquals("c2.exynos.hevc.decoder", video.stats.value.decoderName)
+        assertTrue("c2.exynos.hevc.decoder" in fallbacks)
+        // Not a decoder failure: no extra keyframe request, still the same decoder, and it decodes.
+        assertEquals(1, requests.get())
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        thread.drain()
+        assertEquals(listOf(us(1)), codec.queued)
+        // Logged by key name only.
+        assertTrue(logs.any { it == "decoder c2.exynos.hevc.decoder rejected the low-latency keys (IllegalArgumentException); retrying with the minimal format" })
+        assertTrue(logs.any { it == "decoder c2.exynos.hevc.decoder started for 1280x800, low latency fallback: priority, max-input-size" })
+
+        // A rebuild for a new config goes straight to the minimal format.
+        video.configure(streamConfig(extradata = completeExtradata(tag = 2)))
+        thread.drain()
+        assertEquals(2, factory.made.size)
+        assertEquals(listOf(LowLatencyRequest.MINIMAL), factory.last.configureCalls.map { it.request })
+        assertEquals(0, factory.last.resets.get())
+        assertEquals(LowLatencyState.FALLBACK, video.stats.value.lowLatency)
+    }
+
+    @Test
+    fun aStartFailureWithTheLowLatencyKeysAlsoRetriesMinimal() {
+        catalog = exynos()
+        factory = FakeCodecFactory(thread) { rejectRequestedStart = true }
+        val video = output()
+        video.configure(streamConfig())
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        assertEquals(listOf(LowLatencyRequest.REQUESTED, LowLatencyRequest.MINIMAL), factory.last.configureCalls.map { it.request })
+        assertTrue(factory.last.started)
+        assertEquals(LowLatencyState.FALLBACK, video.stats.value.lowLatency)
+        assertEquals(1, factory.made.size)
+    }
+
+    @Test
+    fun aDecoderFailingBothFormatsIsAnOrdinaryFailureAndIsNotRemembered() {
+        catalog = exynos()
+        factory = FakeCodecFactory(thread) { index -> throwOnConfigure = index == 0 }
+        val video = output()
+        video.configure(streamConfig())
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        val first = factory.made[0]
+        assertEquals(listOf(LowLatencyRequest.REQUESTED, LowLatencyRequest.MINIMAL), first.configureCalls.map { it.request })
+        assertTrue(first.released)
+        assertEquals("attach + failure", 2, requests.get())
+        assertFalse("c2.exynos.hevc.decoder" in fallbacks)
+        // The rebuild asks for the keys again.
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        thread.drain()
+        assertEquals(listOf(LowLatencyRequest.REQUESTED), factory.last.configureCalls.map { it.request })
+        assertEquals(LowLatencyState.ON, video.stats.value.lowLatency)
+    }
+
+    @Test
+    fun insufficientResourceIsNotRetriedWithTheMinimalFormat() {
+        catalog = exynos()
+        factory = FakeCodecFactory(thread) {
+            if (name == "c2.exynos.hevc.decoder") configureError = InsufficientResourceException(IllegalStateException("busy"))
+        }
+        val video = output()
+        video.configure(streamConfig())
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        assertEquals(1, factory.made[0].configureCalls.size)
+        assertEquals(0, factory.made[0].resets.get())
+        assertFalse("c2.exynos.hevc.decoder" in fallbacks)
+    }
+
+    @Test
+    fun aDecoderWhoseRequestedFormatIsTheMinimalOneIsNotRetried() {
+        // Advertises FEATURE_LowLatency and has no vendor keys: both formats are the same.
+        factory = FakeCodecFactory(thread) { index -> throwOnConfigure = index == 0 }
+        val video = output()
+        video.configure(streamConfig())
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        assertEquals(1, factory.made[0].configureCalls.size)
+        assertTrue(factory.made[0].released)
+    }
+
+    @Test
+    fun theDebugSwitchRebuildsWithTheMinimalFormatAndBack() {
+        catalog = exynos()
+        val video = ready()
+        val first = factory.last
+        assertEquals(LowLatencyRequest.REQUESTED, first.configuredFormat?.request)
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        thread.drain()
+
+        video.setLowLatencyKeys(false)
+        thread.drain()
+        assertTrue(first.released)
+        assertEquals(2, factory.made.size)
+        assertEquals(LowLatencyRequest.MINIMAL, factory.last.configuredFormat?.request)
+        assertEquals(LowLatencyState.OFF, video.stats.value.lowLatency)
+        assertEquals("keyframe for the new decoder", 1, requests.get())
+        assertFalse("waits for that keyframe", video.submit(frame(2, keyframe = false)))
+        assertTrue(video.submit(frame(3, keyframe = true)))
+        thread.drain()
+        assertEquals(listOf(us(3)), factory.last.queued)
+        assertFalse("c2.exynos.hevc.decoder" in fallbacks)
+
+        video.setLowLatencyKeys(false)
+        thread.drain()
+        assertEquals("no change, no rebuild", 2, factory.made.size)
+
+        video.setLowLatencyKeys(true)
+        thread.drain()
+        assertEquals(3, factory.made.size)
+        assertEquals(LowLatencyRequest.REQUESTED, factory.last.configuredFormat?.request)
+        assertEquals(LowLatencyState.ON, video.stats.value.lowLatency)
+        assertEquals(2, requests.get())
+    }
+
+    @Test
+    fun theDebugSwitchWithoutASurfaceBuildsNothing() {
+        val video = output()
+        video.configure(streamConfig())
+        video.setLowLatencyKeys(false)
+        thread.drain()
+        assertEquals(0, factory.made.size)
+        assertEquals(0, requests.get())
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        assertEquals(LowLatencyRequest.MINIMAL, factory.last.configuredFormat?.request)
+        assertEquals(LowLatencyState.OFF, video.stats.value.lowLatency)
+    }
+
+    // ---- Latency figure ----
+
+    @Test
+    fun latencyIsTheOutputFramesOwnAcceptTimeNotACarriedOne() {
+        val video = ready()
+        clock.set(1_000)
+        assertTrue(video.submit(frame(10, keyframe = true)))
+        thread.drain()
+        // The codec is rebuilt (the switch) with frame 10 in flight: the overdue clock carries 1 000.
+        video.setLowLatencyKeys(false)
+        thread.drain()
+        clock.set(5_000)
+        assertTrue(video.submit(frame(20, keyframe = true)))
+        thread.drain()
+        assertEquals("the overdue clock carries", 1_000L, video.outputOverdueSinceMillis())
+        clock.set(5_040)
+        factory.last.output(us(20))
+        thread.drain()
+        assertEquals("from frame 20's own accept, not the carried time", 40L, video.stats.value.lastLatencyMillis)
+        assertEquals(40L, video.stats.value.medianLatencyMillis)
+    }
+
+    @Test
+    fun anOutputMatchingNoAcceptedFrameGivesNoSample() {
+        val video = ready()
+        clock.set(1_000)
+        assertTrue(video.submit(frame(10, keyframe = true)))
+        assertTrue(video.submit(frame(20, keyframe = false)))
+        thread.drain()
+        clock.set(1_050)
+        // An output before any accepted frame's time: the clock pops one, no latency sample.
+        factory.last.output(us(5))
+        thread.drain()
+        assertNull(video.stats.value.lastLatencyMillis)
+        assertNull(video.stats.value.medianLatencyMillis)
+        assertEquals(1L, video.stats.value.framesOut)
+    }
+
+    @Test
+    fun medianIsOverTheRecentFramesOfTheRunningDecoder() {
+        val video = ready()
+        val latencies = listOf(10L, 200L, 30L, 20L, 15L)
+        latencies.forEachIndexed { i, latency ->
+            val pts = (i + 1) * 100L
+            clock.set(pts * 10)
+            assertTrue(video.submit(frame(pts, keyframe = i == 0)))
+            thread.drain()
+            clock.set(pts * 10 + latency)
+            factory.last.output(us(pts))
+            thread.drain()
+        }
+        assertEquals(15L, video.stats.value.lastLatencyMillis)
+        assertEquals("median of 10, 200, 30, 20, 15", 20L, video.stats.value.medianLatencyMillis)
+
+        // Past the window, the oldest samples drop out.
+        repeat(LATENCY_WINDOW) { i ->
+            val pts = 1_000L + i * 100
+            clock.set(pts * 10)
+            assertTrue(video.submit(frame(pts, keyframe = false)))
+            thread.drain()
+            clock.set(pts * 10 + 7)
+            factory.last.output(us(pts))
+            thread.drain()
+        }
+        assertEquals(7L, video.stats.value.medianLatencyMillis)
+
+        // A new decoder starts a new window.
+        video.setLowLatencyKeys(false)
+        thread.drain()
+        assertNull(video.stats.value.medianLatencyMillis)
+        assertEquals("the last sample stays", 7L, video.stats.value.lastLatencyMillis)
     }
 }

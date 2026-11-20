@@ -85,6 +85,16 @@ class FakeCodecHandle(
     @Volatile var recycleInputs = true
     @Volatile var throwOnConfigure = false
 
+    /** Configure throws for a [LowLatencyRequest.REQUESTED] format: a decoder that rejects the low-latency keys. */
+    @Volatile var rejectRequestedFormat = false
+
+    /** Start throws for a [LowLatencyRequest.REQUESTED] format. */
+    @Volatile var rejectRequestedStart = false
+
+    /** Every format configure was called with, in order, thrown or not. */
+    val configureCalls = CopyOnWriteArrayList<CodecFormat>()
+    val resets = AtomicInteger()
+
     /** Thrown from configure when set (once per codec), e.g. an [InsufficientResourceException]. */
     @Volatile var configureError: RuntimeException? = null
     @Volatile var throwOnQueueInput = false
@@ -102,15 +112,30 @@ class FakeCodecHandle(
     }
 
     override fun configure(format: CodecFormat, surface: Surface) {
+        configureCalls += format
         if (throwOnConfigure) throw IllegalStateException("injected configure failure")
+        if (rejectRequestedFormat && format.request == LowLatencyRequest.REQUESTED) {
+            throw IllegalArgumentException("injected rejection of the low-latency keys")
+        }
         configureError?.let { throw it }
         configuredFormat = format
         configuredSurface = surface
     }
 
     override fun start() {
+        if (rejectRequestedStart && configuredFormat?.request == LowLatencyRequest.REQUESTED) {
+            throw IllegalStateException("injected start failure")
+        }
         started = true
         repeat(inputBuffers) { index -> post { onInputAvailable(index) } }
+    }
+
+    override fun reset() {
+        resets.incrementAndGet()
+        configuredFormat = null
+        configuredSurface = null
+        started = false
+        callback = null
     }
 
     override fun inputBuffer(index: Int): ByteBuffer? {

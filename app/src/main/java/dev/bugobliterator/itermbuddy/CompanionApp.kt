@@ -187,6 +187,20 @@ class CompanionApp : Application() {
         videoStatsShownFlow.value = shown
     }
 
+    private val decoderLowLatencyFlow = MutableStateFlow(true)
+
+    /**
+     * Debug builds: Settings' "Decoder low-latency keys" (on at every process start, not
+     * persisted). Off configures the decoder with the earlier minimal format, for comparing the
+     * overlay's decoder latency; release builds never turn it off.
+     */
+    val decoderLowLatency: StateFlow<Boolean> = decoderLowLatencyFlow.asStateFlow()
+
+    fun setDecoderLowLatency(enabled: Boolean) {
+        decoderLowLatencyFlow.value = enabled
+        video.setLowLatencyKeys(enabled)
+    }
+
     /**
      * Fit to phone for [sessionGuid], from an explicit tap only: sends `resizeSession` with
      * [fitGrid][dev.bugobliterator.itermbuddy.core.stream.fitGrid] on the active stream's link

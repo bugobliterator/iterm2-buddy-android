@@ -59,13 +59,22 @@ internal fun macStatusText(state: ClientState): String = when (state) {
  */
 internal fun decoderRowText(stats: VideoStats): String = stats.decoderName ?: stats.lastDecoderName ?: "Not used yet"
 
+/** Debug builds: the Settings switch for [dev.bugobliterator.itermbuddy.video.HevcVideoOutput.setLowLatencyKeys]. */
+internal const val DECODER_LOW_LATENCY_TITLE = "Decoder low-latency keys"
+
+internal const val DECODER_LOW_LATENCY_SUMMARY =
+    "Ask the decoder for low latency with every key known for it. Off rebuilds it with the earlier format, " +
+        "to compare the video stats' decoder latency."
+
 /**
  * Settings, reached from the home's overflow menu: the connection, the relay origin, Unpair
  * (confirmed first), the app version and the HEVC decoder ([decoder], [decoderRowText]). The
  * pairing screen's Connected content (status and Unpair) lives here now. The "Send / * + = as
  * paste" switch ([pasteKeys], [PASTE_KEYS_TITLE]) sets how the live view sends those four keys;
  * "Scroll web pages with keys" ([scrollKeys], [SCROLL_KEYS_TITLE]) how a browser page scrolls.
- * Debug builds ([debugBuild]) also get the "Video stats" toggle for the live view's stats overlay.
+ * Debug builds ([debugBuild]) also get the "Video stats" toggle for the live view's stats overlay
+ * and "Decoder low-latency keys" ([decoderLowLatency], [DECODER_LOW_LATENCY_TITLE]): off rebuilds
+ * the decoder with the earlier minimal format, to compare the overlay's decoder latency.
  * Diagnostics: Share log ([onShareLog], Android's share sheet), Clear log ([onClearLog],
  * confirmed first) and the "Include typed-key trace" switch ([keyTrace], [KEY_TRACE_TITLE]).
  */
@@ -92,6 +101,8 @@ fun SettingsScreen(
     onKeyTraceChange: (Boolean) -> Unit = {},
     onShareLog: () -> Unit = {},
     onClearLog: () -> Unit = {},
+    decoderLowLatency: Boolean = true,
+    onDecoderLowLatencyChange: (Boolean) -> Unit = {},
 ) {
     var confirming by rememberSaveable { mutableStateOf(false) }
     var confirmingClear by rememberSaveable { mutableStateOf(false) }
@@ -125,7 +136,10 @@ fun SettingsScreen(
             Entry("Decoder", decoder)
             SwitchRow(PASTE_KEYS_TITLE, PASTE_KEYS_SUMMARY, pasteKeys, onPasteKeysChange)
             SwitchRow(SCROLL_KEYS_TITLE, SCROLL_KEYS_SUMMARY, scrollKeys, onScrollKeysChange)
-            if (debugBuild) SwitchRow("Video stats", summary = null, videoStatsShown, onVideoStatsShownChange)
+            if (debugBuild) {
+                SwitchRow("Video stats", summary = null, videoStatsShown, onVideoStatsShownChange)
+                SwitchRow(DECODER_LOW_LATENCY_TITLE, DECODER_LOW_LATENCY_SUMMARY, decoderLowLatency, onDecoderLowLatencyChange)
+            }
             Text("Diagnostics", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 OutlinedButton(onClick = onShareLog) { Text("Share log") }
