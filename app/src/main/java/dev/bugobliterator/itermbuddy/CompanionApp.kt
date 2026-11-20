@@ -14,6 +14,7 @@ import dev.bugobliterator.itermbuddy.core.input.InputSender
 import dev.bugobliterator.itermbuddy.core.input.InputTrace
 import dev.bugobliterator.itermbuddy.core.input.SharedPrefsPasteKeysStore
 import dev.bugobliterator.itermbuddy.core.input.isInputTarget
+import dev.bugobliterator.itermbuddy.core.relay.relayHttpClient
 import dev.bugobliterator.itermbuddy.core.stream.BrowserDriver
 import dev.bugobliterator.itermbuddy.core.stream.SelectionDriver
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
@@ -45,7 +46,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import okhttp3.OkHttpClient
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration.Companion.seconds
 
@@ -181,7 +181,7 @@ class CompanionApp : Application() {
         home = wireHome(
             scope,
             newClient = { sink, chatSink ->
-                CompanionClient(KeystorePairingStore(this), OkHttpClient(), scope, streamSink = sink, chatSink = chatSink)
+                CompanionClient(KeystorePairingStore(this), relayHttpClient(), scope, streamSink = sink, chatSink = chatSink)
             },
             newController = { link ->
                 StreamController(link, video, scope, nowMillis = SystemClock::uptimeMillis, log = { Log.i(STREAM_TAG, it) })
