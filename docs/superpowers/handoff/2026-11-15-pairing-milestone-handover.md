@@ -238,6 +238,14 @@ Notes from that task:
   has no session-level clear). The bubble shows the whole host and elides the path. A waiting
   Mac-local link is dropped when its browser view is left, and a drop (left or 20 s timeout) shows
   a toast. A double-tap zoom, wheel notches, typing and pastes hide the bubble.
+- **Line mode (real-Mac run 25):** iTerm2's smart selection stops at the scheme's `:` (a tap on
+  `https://example.com/path` copied `example.com/path`), so the lookup now selects the tapped line
+  (`line` mode is iTerm2's whole soft-wrapped line), copies it and takes the link covering the
+  tapped column (`linksInLine`, `linkAtTap`: rows below the line's first row from the Mac's
+  selection report times the columns, plus the column, through rough cell widths; one cell of
+  slack; the nearest link when the mapping is unsure: wide or combining characters, or a long
+  line with no report). Smart is a fallback, taken only when it is a whole link. All within the
+  one 1 s bound, then the clear.
 - **Tests:** `LinkTapTest`, `BrowserLinkOpenerTest`, `LinkTapsTest` (virtual time),
   `LinkBubbleDeviceTest` (device), `RealIterm2LinkTapTest` (real-Mac CI, report-only step).
 - **Open:** the on-device check (Links in `docs/reports/live-session-on-device.md`) and the first

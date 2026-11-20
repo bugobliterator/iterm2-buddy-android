@@ -121,7 +121,7 @@ class LinkTapTest {
 
     private class Rig(val test: TestScope) {
         val link = ScriptedStreamLink()
-        val active = MutableStateFlow<ActiveStream?>(ActiveStream(1, 7, GUID, 1, null, 100))
+        val active = MutableStateFlow<ActiveStream?>(ActiveStream(1, 7, GUID, 1, terminalConfig(7), 100))
         val range = MutableStateFlow<SelectionSpan?>(null)
         val logs = CopyOnWriteArrayList<String>()
         val driver = SelectionDriver(link, active, range, test.backgroundScope, copyTimeout = 15.seconds)
@@ -134,7 +134,7 @@ class LinkTapTest {
     }
 
     @Test
-    fun aTapSmartSelectsCopiesThenClears() = runTest {
+    fun aTapSelectsTheLineCopiesThenClears() = runTest {
         val rig = Rig(this)
         val found = async { rig.lookup.lookup(GUID, POINT) }
         val request = rig.link.requests.receive()
@@ -142,12 +142,13 @@ class LinkTapTest {
         assertEquals("the request is bounded as the tap is", 1.seconds, request.timeout)
         assertEquals(
             listOf(
-                PhoneMessage.SelectionGesture(7, SelectionPhase.BEGIN, SelectionMode.SMART, POINT),
-                PhoneMessage.SelectionGesture(7, SelectionPhase.END, SelectionMode.SMART, POINT),
+                PhoneMessage.SelectionGesture(7, SelectionPhase.BEGIN, SelectionMode.LINE, POINT),
+                PhoneMessage.SelectionGesture(7, SelectionPhase.END, SelectionMode.LINE, POINT),
             ),
             rig.sent(),
         )
-        request.reply.complete(MacMessage.SelectionText("https://example.com/path."))
+        // The whole line, the URL under column 9.
+        request.reply.complete(MacMessage.SelectionText("https://example.com/path.\n"))
         assertEquals(TappedLink("https://example.com/path", macLocal = false), found.await())
         assertEquals(PhoneMessage.ClearSelection(7), rig.sent().last())
         assertEquals(3, rig.sent().size)
@@ -168,8 +169,61 @@ class LinkTapTest {
             val rig = Rig(this)
             val found = async { rig.lookup.lookup(GUID, POINT) }
             rig.link.requests.receive().reply.complete(MacMessage.SelectionText(text))
+            // No link in the line: the smart selection is tried, and finds none either.
+            val smart = rig.link.requests.receive()
+            assertEquals(1.seconds, smart.timeout)
+            smart.reply.complete(MacMessage.SelectionText(text))
             assertNull(found.await())
+            assertEquals(
+                listOf(SelectionMode.LINE, SelectionMode.LINE, SelectionMode.SMART, SelectionMode.SMART),
+                rig.sent().filterIsInstance<PhoneMessage.SelectionGesture>().map { it.mode },
+            )
             assertEquals(PhoneMessage.ClearSelection(7), rig.sent().last())
+            assertEquals(1, rig.sent().count { it is PhoneMessage.ClearSelection })
+        }
+    }
+
+    @Test
+    fun theSmartSelectionCountsOnlyWhenItIsAWholeLink() = runTest {
+        // iTerm2's smart selection stops at the scheme's colon: "example.com/path" is no link.
+        for ((smartText, want) in listOf("example.com/path" to null, "https://example.com/path" to "https://example.com/path", "www.example.com" to "https://www.example.com")) {
+            val rig = Rig(this)
+            val found = async { rig.lookup.lookup(GUID, POINT) }
+            rig.link.requests.receive().reply.complete(MacMessage.SelectionText("plain text only"))
+            rig.link.requests.receive().reply.complete(MacMessage.SelectionText(smartText))
+            assertEquals(want, found.await()?.url)
+            assertEquals(PhoneMessage.ClearSelection(7), rig.sent().last())
+            assertTrue("never the text in the log: ${rig.logs}", rig.logs.none { "example" in it })
+        }
+    }
+
+    @Test
+    fun theWholeLookupIsBoundedTogether() = runTest {
+        val rig = Rig(this)
+        val start = currentTime
+        val found = async { rig.lookup.lookup(GUID, POINT) }
+        advanceTimeBy(600)
+        rig.link.requests.receive().reply.complete(MacMessage.SelectionText("no link here"))
+        runCurrent()
+        rig.link.requests.receive()
+        advanceTimeBy(400)
+        runCurrent()
+        assertTrue(found.isCompleted)
+        assertNull(found.await())
+        assertEquals(1_000L, currentTime - start)
+    }
+
+    @Test
+    fun theLinkUnderTheTappedColumnIsTaken() = runTest {
+        val line = "see (https://example.com/a_(b)). ok and www.example.org/w too"
+        val cases = listOf(3 to null, 4 to "https://example.com/a_(b)", 5 to "https://example.com/a_(b)", 12 to "https://example.com/a_(b)", 30 to "https://example.com/a_(b)", 31 to null, 42 to "https://www.example.org/w", 58 to null)
+        for ((column, want) in cases) {
+            val rig = Rig(this)
+            val point = SelectionPoint(120, column)
+            val found = async { rig.lookup.lookup(GUID, point) }
+            rig.link.requests.receive().reply.complete(MacMessage.SelectionText(line))
+            if (want == null) rig.link.requests.receive().reply.complete(MacMessage.SelectionText("ok"))
+            assertEquals("column $column", want, found.await()?.url)
         }
     }
 
@@ -236,6 +290,49 @@ class LinkTapTest {
         request.reply.complete(MacMessage.SelectionText("https://example.com"))
         assertNull(found.await())
         assertTrue(rig.sent().none { it is PhoneMessage.ClearSelection })
+    }
+
+    @Test
+    fun linksAreFoundInALine() {
+        val line = "a https://a.example/x, (http://b.example/y_(z)). <ftp://c.example/f> www.d.example 'https://e.example' " +
+            "xhttps://no.example https://www.f.example nohttp:// https://exa\\@localhost/ \"https://g.example\"x"
+        assertEquals(
+            listOf(
+                "https://a.example/x", "http://b.example/y_(z)", "ftp://c.example/f", "https://www.d.example", "https://e.example",
+                "https://www.f.example", "https://g.example",
+            ),
+            linksInLine(line).map { it.url },
+        )
+        val first = linksInLine(line).first()
+        assertEquals("https://a.example/x", line.substring(first.start, first.end))
+        val www = linksInLine(line)[3]
+        assertEquals("www.d.example", line.substring(www.start, www.end))
+        assertTrue(linksInLine("").isEmpty())
+        assertTrue(linksInLine("plain words only").isEmpty())
+    }
+
+    @Test
+    fun aTapMapsToTheLineThroughTheSpanAndCellWidths() {
+        val url = "https://example.com/wrapped"
+        // A soft-wrapped logical line on a 20-column grid: the URL starts at cell 25 (row 2, column 5).
+        val line = "a".repeat(20) + " see " + url
+        val span = SelectionSpan(SelectionPoint(119, 0), SelectionPoint(121, 19))
+        assertEquals(url, linkAtTap(line, SelectionPoint(120, 8), span, columns = 20))
+        assertEquals("one cell off still counts", url, linkAtTap(line, SelectionPoint(120, 4), span, columns = 20))
+        assertNull("the plain text before it", linkAtTap(line, SelectionPoint(120, 1), span, columns = 20))
+        assertNull("the first row", linkAtTap(line, SelectionPoint(119, 8), span, columns = 20))
+        // No span for a line longer than a row: unsure, so the nearest link.
+        assertEquals(url, linkAtTap(line, SelectionPoint(120, 1), null, columns = 20))
+        // A span that does not cover the tap is not used.
+        assertEquals(url, linkAtTap(line, SelectionPoint(120, 1), SelectionSpan(SelectionPoint(10, 0), SelectionPoint(10, 3)), columns = 20))
+        // Wide characters: 日本 take four cells, so the URL starts at cell 5 but index 3; unsure, so the nearest.
+        assertEquals("https://e.example/", linkAtTap("日本 https://e.example/", SelectionPoint(0, 6), null, columns = 80))
+        assertEquals(3 to false, indexAtCell("日本 https://e.example/", 5))
+        // Combining marks take none.
+        assertEquals(3 to false, indexAtCell("e\u0301 x", 2))
+        assertEquals(2 to true, indexAtCell("ab", 7))
+        assertEquals(listOf(2, 1, 0, 2), listOf(cellWidth('日'.code), cellWidth('a'.code), cellWidth(0x0301), cellWidth(0x1F600)))
+        assertNull(linkAtTap("no links", SelectionPoint(0, 0), null, 80))
     }
 
     @Test
@@ -313,6 +410,8 @@ class LinkTapTest {
     private companion object {
         const val GUID = "guid-one"
         val POINT = SelectionPoint(120, 9)
+
+        fun terminalConfig(streamID: Long) = StreamConfig(streamID, 1, ByteArray(0), 800, 480, 2.0, 80, 24, CellGeometry(10.0, 20.0, 0.0, 0.0), 0, 0, true, false, false, isBrowser = false)
 
         fun browserConfig(streamID: Long) = StreamConfig(streamID, 1, ByteArray(0), 800, 600, 2.0, 0, 0, null, 0, 0, null, false, false, isBrowser = true)
     }

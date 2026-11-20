@@ -185,8 +185,8 @@ off, outlined; greyed when it cannot fit the session shown. A long press explain
 
 A single tap on a URL in a terminal shows a small bubble by the tap with the URL (shortened in
 the middle when long), **Open link** and **Copy**. The phone has only video, so the tap asks the
-Mac for its smart selection at the tapped cell, copies it and clears it at once (you may see the
-URL highlight on the Mac for a moment); with no answer within a second nothing shows.
+Mac to select the tapped line, copies it, finds the link under the tapped cell, and clears the
+selection at once (you may see the line highlight on the Mac for a moment); with no answer within a second nothing shows.
 
 - Run `echo https://example.com/path` and tap the URL once. Within about a second the bubble shows
   it. **Open link** opens it in the phone's browser; **Copy** puts it on the clipboard.

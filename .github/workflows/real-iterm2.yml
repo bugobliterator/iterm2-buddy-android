@@ -271,9 +271,10 @@ jobs:
           cp -R app/build/test-results/realIterm2Test "$kept/test-results" 2>/dev/null || true
           cp -R app/build/reports/tests/realIterm2Test "$kept/reports" 2>/dev/null || true
 
-      # The link tap report (RealIterm2LinkTapTest): prints https://example.com/path in the first
-      # session, taps its cell through the app's path (smart select, copySelection, clearSelection)
-      # and checks the tap found that URL and the selection is cleared afterwards. Report-only.
+      # The link tap report (RealIterm2LinkTapTest): prints a URL, a URL inside text and a bare
+      # www. link in the first session, taps each through the app's path (line select,
+      # copySelection, smart fallback, clearSelection) and checks every link was found and the
+      # selection is cleared afterwards. Report-only.
       - name: Tap a printed URL
         if: success() || failure()
         continue-on-error: true

@@ -216,14 +216,18 @@ it fails only when the stream could not start.
 ## The link tap report
 
 A single tap on a URL in a terminal shows an "Open link" bubble; the phone has only video, so it
-asks the Mac: `selectionGesture` begin and end in `smart` mode at the tapped cell, `copySelection`,
-then `clearSelection` (`LinkLookup`). `RealIterm2LinkTapTest` checks that on the runner, after the
-Fit to phone report, in its own step that continues on error. It streams the first terminal
-session in the app's `StreamController`, types `clear; echo https://example.com/path`, and taps the
-top rows in turn through the app's own mapping (`selectionPointAt` at fit) and `LinkLookup`, until
-one finds a link. It asserts that the link is exactly that URL, that the stream's selection report
-goes back to none, and that `copySelection` then answers `""` (nothing left selected). The report
-is `link-tap:` lines: rows, lengths and yes/no.
+asks the Mac (`LinkLookup`): `selectionGesture` begin and end in `line` mode at the tapped cell
+(iTerm2's whole, soft-wrapped line), `copySelection`, and the link under the tapped column in that
+text; failing that, a `smart` selection, used only when it is a whole link (run 25 showed iTerm2's
+smart selection stops at the scheme's `:`, giving `example.com/path`); then `clearSelection`.
+`RealIterm2LinkTapTest` checks that on the runner, after the Fit to phone report, in its own step
+that continues on error. It streams the first terminal session in the app's `StreamController`,
+types `clear` and echoes a plain URL, `see (https://example.com/a_(b)). ok` and
+`www.example.com/w`, and for each taps the top rows in turn through the app's own mapping
+(`selectionPointAt` at fit) and `LinkLookup` until the expected link is found. It asserts every
+link was found exactly, that the stream's selection report goes back to none, and that
+`copySelection` then answers `""` (nothing left selected). The report is `link-tap:` lines: rows,
+lengths and yes/no.
 
 ## The browser probe
 
