@@ -324,6 +324,179 @@ class AutoFitterTest {
         assertEquals(listOf(PhoneMessage.ResizeSession(GUID, 60, 55)), rig.resizes())
     }
 
+    @Test
+    fun aLateConfigOfAnEarlierFitIsNotTakenAsTheResult() = runTest {
+        val rig = Rig(this)
+        rig.open(config())
+        rig.view(2000, 1080)
+        advanceTimeBy(SETTLE)
+        runCurrent()
+        assertEquals(listOf(PhoneMessage.ResizeSession(GUID, 120, 32)), rig.resizes())
+        // A quick rotation before the Mac's landscape config arrives.
+        rig.view(1080, 2200)
+        advanceTimeBy(SETTLE)
+        runCurrent()
+        assertEquals(PhoneMessage.ResizeSession(GUID, 60, 61), rig.resizes().last())
+        // The landscape fit's late config (capped to 29 rows): not the portrait's result, no correction.
+        rig.macGrid(120, 29)
+        runCurrent()
+        assertEquals(2, rig.resizes().size)
+        // The portrait result: corrected from it, with the frozen cell.
+        rig.macGrid(60, 45)
+        runCurrent()
+        assertEquals(PhoneMessage.ResizeSession(GUID, 44, 45), rig.resizes().last())
+        assertEquals(3, rig.resizes().size)
+        assertTrue(rig.logs.toString(), rig.logs.none { "got 120x29" in it })
+    }
+
+    @Test
+    fun anIntermediateOrForeignGridIsNotAResult() = runTest {
+        val rig = Rig(this)
+        rig.open(config())
+        rig.view(1080, 2200)
+        advanceTimeBy(SETTLE)
+        runCurrent()
+        // An intermediate grid (rows first): kept waiting.
+        rig.macGrid(80, 45)
+        runCurrent()
+        assertEquals(1, rig.resizes().size)
+        rig.macGrid(60, 45)
+        runCurrent()
+        assertEquals(PhoneMessage.ResizeSession(GUID, 44, 45), rig.resizes().last())
+        // A resize from the Mac (or another phone) while the corrective step waits: never its result.
+        rig.macGrid(100, 30)
+        advanceTimeBy(RESULT + 1.milliseconds)
+        runCurrent()
+        assertEquals(2, rig.resizes().size)
+        assertEquals("the grid moved: no notice", emptyList<FitNotice>(), rig.notices)
+        assertTrue(rig.logs.toString(), rig.logs.contains("fit to phone for $GUID: corrective requested 44x45, no matching result in $RESULT; the grid is 100x30"))
+        // Kept: the same stream does not fight it.
+        rig.macGrid(100, 30)
+        advanceTimeBy(RESULT * 2)
+        assertEquals(2, rig.resizes().size)
+    }
+
+    @Test
+    fun refitFitsAgainNowEvenAfterACappedOutcome() = runTest {
+        val rig = Rig(this)
+        rig.open(config())
+        rig.view(1080, 2200)
+        advanceTimeBy(SETTLE)
+        runCurrent()
+        rig.macGrid(60, 45)
+        runCurrent()
+        rig.macGrid(44, 45)
+        runCurrent()
+        assertEquals(2, rig.resizes().size)
+        rig.fitter.refit(GUID)
+        runCurrent()
+        assertEquals(PhoneMessage.ResizeSession(GUID, 60, 61), rig.resizes().last())
+        // Another session's refit, or one while off, sends nothing.
+        rig.fitter.refit("guid-other")
+        rig.enabled.value = false
+        runCurrent()
+        rig.fitter.refit(GUID)
+        runCurrent()
+        assertEquals(3, rig.resizes().size)
+    }
+
+    @Test
+    fun atMostTwoFitsPerViewportPerStream() = runTest {
+        val rig = Rig(this)
+        rig.open(config())
+        val portrait = 1080 to 2000
+        val landscape = 2000 to 1080
+        for ((w, h) in listOf(portrait, landscape, portrait, landscape, portrait)) {
+            rig.view(w, h)
+            advanceTimeBy(SETTLE)
+            runCurrent()
+            // The Mac applies whatever was asked.
+            rig.resizes().last().let { rig.macGrid(it.columns, it.rows) }
+            runCurrent()
+        }
+        assertEquals(4, rig.resizes().size)
+        assertTrue(rig.logs.toString(), rig.logs.contains("fit to phone for $GUID: not sending 60x55: 2 fits already sent for viewport 1080x2000 on this stream"))
+        // A new stream starts counting again.
+        rig.open(config(columns = 120, rows = 32, streamID = 2))
+        runCurrent()
+        assertEquals(PhoneMessage.ResizeSession(GUID, 60, 55), rig.resizes().last())
+    }
+
+    @Test
+    fun aFontSizeChangeOnTheMacIsNotFollowed() = runTest {
+        val rig = Rig(this)
+        rig.open(config())
+        rig.view(1080, 2000)
+        advanceTimeBy(SETTLE)
+        runCurrent()
+        rig.macGrid(60, 55)
+        runCurrent()
+        // A bigger font: the cell is 20×40 now; the frozen 16×32 cell keeps the target 60x55.
+        val stream = checkNotNull(rig.active.value)
+        rig.active.value = stream.copy(config = stream.config?.copy(cellGeometry = CellGeometry(20.0, 40.0, 0.0, 0.0), generationId = 9, rows = 44))
+        advanceTimeBy(RESULT * 2)
+        assertEquals(1, rig.resizes().size)
+        // Even a viewport change uses the frozen cell: 1080x2200 is 61 rows at 16×32.
+        rig.view(1080, 2200)
+        advanceTimeBy(SETTLE)
+        runCurrent()
+        assertEquals(PhoneMessage.ResizeSession(GUID, 60, 61), rig.resizes().last())
+    }
+
+    @Test
+    fun theStreamEndingDropsTheWaitingFitAndItsTimer() = runTest {
+        val rig = Rig(this)
+        rig.open(config())
+        rig.view(1080, 2000)
+        advanceTimeBy(SETTLE)
+        runCurrent()
+        rig.active.value = null
+        advanceTimeBy(RESULT * 2)
+        assertEquals("no 'did not resize' for a stream that went", emptyList<FitNotice>(), rig.notices)
+        assertTrue(rig.logs.toString(), rig.logs.any { "dropped the waiting 60x55" in it })
+        // The view leaving does the same.
+        rig.open(config(streamID = 2))
+        runCurrent()
+        assertEquals(2, rig.resizes().size)
+        rig.fitter.clearViewport(GUID)
+        advanceTimeBy(RESULT * 2)
+        assertEquals(emptyList<FitNotice>(), rig.notices)
+    }
+
+    @Test
+    fun aResultWhoseConfigCannotResizeIsStillLogged() = runTest {
+        val rig = Rig(this)
+        rig.open(config())
+        rig.view(1080, 2200)
+        advanceTimeBy(SETTLE)
+        runCurrent()
+        // The window went full screen as the resize landed.
+        val stream = checkNotNull(rig.active.value)
+        rig.active.value = stream.copy(config = stream.config?.copy(columns = 60, rows = 45, generationId = 2, canResize = false))
+        runCurrent()
+        assertEquals("no correction for a window that cannot resize", 1, rig.resizes().size)
+        assertTrue(rig.logs.toString(), rig.logs.contains("fit to phone for $GUID: fit requested 60x61, got 60x45 (was 80x25) (canResize false)"))
+    }
+
+    @Test
+    fun turningOnAgainRetriesAfterAMacThatDidNotResize() = runTest {
+        val rig = Rig(this)
+        rig.open(config())
+        rig.view(1080, 2000)
+        advanceTimeBy(SETTLE)
+        runCurrent()
+        advanceTimeBy(RESULT * 2)
+        assertEquals(1, rig.notices.size)
+        rig.open(config(streamID = 2))
+        runCurrent()
+        assertEquals("remembered while on", 1, rig.resizes().size)
+        rig.enabled.value = false
+        runCurrent()
+        rig.enabled.value = true
+        runCurrent()
+        assertEquals(2, rig.resizes().size)
+    }
+
     private companion object {
         const val GUID = "guid-alpha"
         val SETTLE = 400.milliseconds

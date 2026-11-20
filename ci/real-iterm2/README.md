@@ -208,8 +208,9 @@ It streams the first terminal session in the app's own `StreamController` and ru
 then after splitting the session top/bottom with `it2 session split` (from the JVM, else typed
 into the session) and turning the toggle off and on. Each case prints the fitter's own log lines
 (the grid sent, the grid the next config showed, the corrective step and its result, or that the
-grid did not change) and the final config (grid, pixel size, cell, `canResize`). The added pane is
-closed with `it2 session close --force`. The report is `fit:` lines in the job log, numbers only;
+grid did not change) and the final config (grid, pixel size, cell, `canResize`). Afterwards, in a
+`finally`, it closes every added pane with `it2 session close --force` and checks the tree no
+longer has it, resizes the session back to its first grid, and stops the stream. The report is `fit:` lines in the job log, numbers only;
 it fails only when the stream could not start.
 
 ## The browser probe

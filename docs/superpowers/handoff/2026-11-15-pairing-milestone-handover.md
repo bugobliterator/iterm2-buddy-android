@@ -146,6 +146,15 @@ Notes from that task:
   the rows. One step per fit, never a loop. When the grid does not change within 4 s, or
   `canResize` is false, the view shows a brief message. Requested and resulting grids go to the
   app log (`fit to phone for <guid>: …`).
+- **Review follow-up:** a config counts as a fit's result only when its columns are the requested
+  ones (iTerm2 caps rows only) and the grid has moved since the send, so a late config of an
+  earlier fit (a quick rotation), an intermediate grid or a resize from elsewhere is never
+  "corrected"; without a result in 4 s it keeps the grid it ended at. The target uses the cell size
+  frozen at the stream's first evaluation (a Mac font change is not followed), at most 2 fits per
+  viewport per stream. The fit viewport leaves out the Mac alert banner. Remembered outcomes are
+  forgotten when the toggle turns on or off (unpair turns it off). The stream ending or the view
+  leaving drops a waiting fit and its timer. The too-large overlay's Fit is `fitNow`: the toggle on
+  and `AutoFitter.refit` for that session, so it fits even when the toggle was already on.
 - **Real-Mac report:** `RealIterm2FitTest` (`fit:` lines) runs the fitter on the runner's small
   screen for 1080×2200, landscape, and a split pane.
 - **Open:** the on-device check (Fit to phone in `docs/reports/live-session-on-device.md`), and
