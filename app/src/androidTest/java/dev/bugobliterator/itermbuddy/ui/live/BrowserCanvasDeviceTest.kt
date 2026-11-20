@@ -15,7 +15,9 @@ import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.bugobliterator.itermbuddy.core.input.InputSender
 import dev.bugobliterator.itermbuddy.core.input.InputTarget
+import dev.bugobliterator.itermbuddy.core.input.Key
 import dev.bugobliterator.itermbuddy.core.input.KeyEvent
+import dev.bugobliterator.itermbuddy.core.input.SpecialKey
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.core.input.isInputTarget
 import dev.bugobliterator.itermbuddy.core.stream.ActiveStream
@@ -47,7 +49,8 @@ import kotlin.time.Duration
  * The browser page's real touch path on a device: [VideoCanvas] as the browser screen composes it
  * (no double-tap zoom, a [BrowserDriver]), under real Compose pointer dispatch (its pan and press
  * detectors together), with a real [HevcVideoOutput] that never gets a config (no picture), the
- * driver and [InputSender] on a recording link. Swipes at fit and at the fill base, fast and
+ * driver and [InputSender] on a recording link; with Settings' "Scroll web pages with keys" on, a
+ * swipe goes to the page as keys. Swipes at fit and at the fill base, fast and
  * slow, with and without the keyboard's inset, must reach the link as `browserScroll` with the
  * right sign; a tap must still click the right page pixel. The driver's 40 ms ticker runs in
  * virtual time ([scheduler]), advanced by hand once a gesture is over.
@@ -70,7 +73,11 @@ class BrowserCanvasDeviceTest {
         macRevision = MutableStateFlow(15),
         scope = scope,
         nowMillis = { scheduler.currentTime },
+        scrollKeys = { keysOn },
     )
+
+    /** Settings' "Scroll web pages with keys"; off but in its own test. */
+    @Volatile private var keysOn = false
     private val output = HevcVideoOutput(MediaCodecCatalog())
     private val source = LiveVideoSource(output, MutableStateFlow<LiveViewState>(LiveViewState.Closed))
 
@@ -168,6 +175,21 @@ class BrowserCanvasDeviceTest {
         swipe(0.5f, 0.55f, 0.5f, 0.05f, 400)
         val sum = scrolls().sumOf { it.deltaY }
         assertTrue("deltaY sum $sum", sum < 0.0)
+    }
+
+    @Test
+    fun withScrollKeysOnASwipeSendsKeysToThePage() {
+        keysOn = true
+        show(fill = true)
+        swipe(0.5f, 0.8f, 0.5f, 0.2f, 400)
+        val sent = sent()
+        val keys = sent.filterIsInstance<PhoneMessage.SendKey>()
+        assertTrue("keys sent: $keys", keys.isNotEmpty())
+        assertTrue("all to the page, all downward: $keys", keys.all { it.sessionGuid == GUID && (it.event.key as Key.Special).key in setOf(SpecialKey.DOWN, SpecialKey.PAGE_DOWN) })
+        assertTrue("no vertical browserScroll", sent.filterIsInstance<PhoneMessage.BrowserScroll>().all { it.deltaY == 0.0 })
+        // A tap still clicks.
+        rule.onNodeWithTag(TAG).performTouchInput { click(center) }
+        assertEquals(1, sent().count { it is PhoneMessage.BrowserTap })
     }
 
     @Test

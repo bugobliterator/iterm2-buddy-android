@@ -98,6 +98,8 @@ class MainActivity : ComponentActivity() {
 
         override fun setPasteKeys(enabled: Boolean) = app.home.pasteKeys.set(enabled)
 
+        override fun setScrollKeys(enabled: Boolean) = app.home.scrollKeys.set(enabled)
+
         override fun reconnect() {
             app.clearNotices()
             app.client.start()
@@ -150,13 +152,14 @@ class MainActivity : ComponentActivity() {
             val macStatus by app.client.macStatus.collectAsStateWithLifecycle()
             val claudeTip by sessions.claudeTip.shown.collectAsStateWithLifecycle()
             val pasteKeys by sessions.pasteKeys.enabled.collectAsStateWithLifecycle()
+            val scrollKeys by sessions.scrollKeys.enabled.collectAsStateWithLifecycle()
             AppTheme {
                 AppRoot(
                     paired = paired,
                     home = HomeModel(
                         state, nav.destination, tree, live, unpairing, unpairFailed, version, relayOrigin,
                         activeStream, video, debugBuild, videoStatsShown, query, macStatus, nav.tab, chatsAttention,
-                        nav.key, nav.stackKeys, claudeTip, pasteKeys,
+                        nav.key, nav.stackKeys, claudeTip, pasteKeys, scrollKeys,
                     ),
                     homeActions = homeActions,
                     chats = sessions.chatsHome,
