@@ -246,6 +246,11 @@ Notes from that task:
   slack; the nearest link when the mapping is unsure: wide or combining characters, or a long
   line with no report). Smart is a fallback, taken only when it is a whole link. All within the
   one 1 s bound, then the clear.
+- **Run 26 follow-up:** the line is read as a grid line (NULs as spaces, trailing spaces and line
+  ends dropped); a sure tap takes the nearest link within 3 cells; a tap past the line's end counts
+  the blank cells; a whole line's report is used for its rows only (its start column is ignored).
+  The real-Mac step gets a clean prompt first (Ctrl-C, Ctrl-U, `clear`, waits for empty rows),
+  echoes each link with its own command and dumps the rows as the lookup sees them.
 - **Tests:** `LinkTapTest`, `BrowserLinkOpenerTest`, `LinkTapsTest` (virtual time),
   `LinkBubbleDeviceTest` (device), `RealIterm2LinkTapTest` (real-Mac CI, report-only step).
 - **Open:** the on-device check (Links in `docs/reports/live-session-on-device.md`) and the first

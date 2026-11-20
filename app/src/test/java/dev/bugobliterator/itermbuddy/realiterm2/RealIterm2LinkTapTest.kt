@@ -3,6 +3,9 @@ package dev.bugobliterator.itermbuddy.realiterm2
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.input.InputSender
 import dev.bugobliterator.itermbuddy.core.input.InputTarget
+import dev.bugobliterator.itermbuddy.core.input.Key
+import dev.bugobliterator.itermbuddy.core.input.KeyEvent
+import dev.bugobliterator.itermbuddy.core.input.KeyModifiers
 import dev.bugobliterator.itermbuddy.core.stream.FakeVideoOutput
 import dev.bugobliterator.itermbuddy.core.stream.LinkLookup
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
@@ -12,7 +15,14 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.core.stream.StreamInput
 import dev.bugobliterator.itermbuddy.core.stream.StreamSink
 import dev.bugobliterator.itermbuddy.core.stream.VideoReadiness
+import dev.bugobliterator.itermbuddy.core.stream.gridLine
 import dev.bugobliterator.itermbuddy.core.stream.hasCompleteHevcParameterSets
+import dev.bugobliterator.itermbuddy.core.stream.indexAtCell
+import dev.bugobliterator.itermbuddy.core.stream.linkAtTap
+import dev.bugobliterator.itermbuddy.core.stream.linksInLine
+import dev.bugobliterator.itermbuddy.core.wire.SelectionMode
+import dev.bugobliterator.itermbuddy.core.wire.SelectionPoint
+import dev.bugobliterator.itermbuddy.core.wire.SelectionSpan
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.realiterm2.RealIterm2Rig.Companion.failWith
@@ -27,6 +37,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -41,7 +52,12 @@ import kotlin.time.Duration.Companion.seconds
  * line, and asserts that every link was found exactly, and that the Mac's selection is cleared
  * afterwards (the stream's selection report goes back to none, and `copySelection` answers `""`).
  *
- * Reports lengths, rows and yes/no (`link-tap:` lines); the URL is the test's own.
+ * Before that it gets a clean prompt (Ctrl-C, Ctrl-U, `clear`, waiting until the rows below the
+ * first are empty) and echoes each link with its own command. It dumps the first rows as the
+ * lookup sees them: each row's whole-line text escaped (control characters and NULs as `\\uXXXX`),
+ * the Mac's selection report, the links found in it with their positions, and the smart selection
+ * at column 10; and for each tap the cell's string index and the link the dumped line gives.
+ * The content is the test's own, so these `link-tap:` lines print it whole.
  */
 class RealIterm2LinkTapTest {
     private val rig = RealIterm2Rig()
@@ -81,31 +97,80 @@ class RealIterm2LinkTapTest {
                 isCurrent = { target -> target.linkId == rig.linkId.value && client.state.value is ClientState.Connected },
                 log = { report("link-tap: input: $it") },
             )
-            val command = CASES.joinToString("; ", prefix = "clear; ") { "echo ${it.printed}" }
-            sender.typeThenReturn(InputTarget(linkId, watchEpoch = 0, sessionGuid = session.guid), command)
-            // The command runs and the next frames carry the new live top.
+            val target = InputTarget(linkId, watchEpoch = 0, sessionGuid = session.guid)
+
+            /** The cell ([row], [column]) of the live band as the app maps a tap there (the picture at fit, screen px = image px, no history). */
+            fun pointAt(row: Int, column: Int): SelectionPoint {
+                val stream = controller.activeStream.value ?: failWith("the stream went away")
+                val config = stream.config ?: failWith("no config")
+                val cell = config.cellGeometry ?: failWith("the config has no cell geometry")
+                val liveTop = stream.liveTop ?: failWith("no live top yet")
+                val fit = FitRect(0f, 0f, config.pixelWidth.toFloat(), config.pixelHeight.toFloat())
+                val layout = ScrollbackLayout(liveTop, liveTop, config.rows, config.rows, config.pixelHeight.toFloat() / config.rows, altScreen = false)
+                val x = (cell.leftMargin + (column + 0.5) * cell.cellWidth).toFloat()
+                val y = (cell.topMargin + (row + 0.5) * cell.cellHeight).toFloat()
+                return selectionPointAt(x, y, ZoomState.FIT, fit, layout, config) ?: failWith("the tap maps to no cell")
+            }
+
+            /** A diagnostic selection at [point] in [mode]: the copied text and the Mac's report, then cleared. */
+            suspend fun probe(point: SelectionPoint, mode: SelectionMode): Pair<String?, SelectionSpan?> {
+                selection.begin(point, mode)
+                selection.end(point)
+                val text = selection.copy(session.guid, PROBE_TIMEOUT)
+                val span = rig.poll(PROBE_TIMEOUT) { controller.selection.value }
+                selection.clear()
+                rig.poll { (controller.selection.value == null).takeIf { it } }
+                return text to span
+            }
+
+            // A clean prompt: interrupt anything running, drop a half-typed line, clear the screen.
+            sender.key(target, KeyEvent(Key.Text("c"), KeyModifiers(control = true)))
+            delay(KEY_PAUSE)
+            sender.key(target, KeyEvent(Key.Text("u"), KeyModifiers(control = true)))
+            delay(KEY_PAUSE)
+            sender.typeThenReturn(target, "clear")
+            delay(KEY_PAUSE)
+            val clearedScreen = rig.poll {
+                (1..3).all { row -> probe(pointAt(row, 0), SelectionMode.LINE).first?.let(::gridLine).isNullOrEmpty() }.takeIf { it }
+            }
+            report("link-tap: screen cleared: ${clearedScreen == true}")
+            // Each link on its own line, one command each.
+            for (case in CASES) {
+                sender.typeThenReturn(target, "echo ${case.printed}")
+                delay(KEY_PAUSE)
+            }
+            // The commands run and the next frames carry the new live top.
             delay(SETTLE)
+
+            // The screen's first rows as the app's lookup sees them (synthetic content: printed whole).
+            val rows = HashMap<Int, Pair<String?, SelectionSpan?>>()
+            for (row in 0 until ROWS_TRIED) {
+                val point = pointAt(row, 0)
+                val (text, span) = probe(point, SelectionMode.LINE)
+                rows[row] = text to span
+                val smart = probe(pointAt(row, SMART_PROBE_COLUMN), SelectionMode.SMART).first
+                report(
+                    "link-tap: row $row (line ${point.absLine}): line ${text?.length ?: -1} chars \"${text?.let(::escaped)}\", " +
+                        "report $span, links ${text?.let { linksInLine(gridLine(it)).map { l -> "${l.start}..${l.end} ${l.url}" } }}, " +
+                        "smart at column $SMART_PROBE_COLUMN \"${smart?.let(::escaped)}\"",
+                )
+            }
 
             val found = LinkedHashMap<String, Int>()
             for (case in CASES) {
                 for (row in 0 until ROWS_TRIED) {
-                    val stream = controller.activeStream.value ?: failWith("the stream went away")
-                    val config = stream.config ?: failWith("no config")
-                    val cell = config.cellGeometry ?: failWith("the config has no cell geometry")
-                    val liveTop = stream.liveTop ?: failWith("no live top yet")
-                    // The picture at fit, screen px = image px, no history: the live band alone.
-                    val fit = FitRect(0f, 0f, config.pixelWidth.toFloat(), config.pixelHeight.toFloat())
-                    val layout = ScrollbackLayout(liveTop, liveTop, config.rows, config.rows, config.pixelHeight.toFloat() / config.rows, altScreen = false)
-                    val x = (cell.leftMargin + (case.column + 0.5) * cell.cellWidth).toFloat()
-                    val y = (cell.topMargin + (row + 0.5) * cell.cellHeight).toFloat()
-                    val point = selectionPointAt(x, y, ZoomState.FIT, fit, layout, config) ?: failWith("the tap maps to no cell")
+                    val point = pointAt(row, case.column)
+                    val columns = controller.activeStream.value?.config?.columns ?: 0
+                    val (text, span) = rows[row] ?: (null to null)
+                    val mapping = text?.let { indexAtCell(gridLine(it), point.column) }
+                    val local = text?.let { linkAtTap(it, point, span, columns) }
                     val link = lookup.lookup(session.guid, point)
                     val what = when {
                         link == null -> "no link"
                         link.url == case.url -> "the expected link (${case.label})"
-                        else -> "another link of ${link.url.length} chars"
+                        else -> "another link (${link.url})"
                     }
-                    report("link-tap: ${case.label}: row $row (line ${point.absLine}, column ${point.column}): $what")
+                    report("link-tap: ${case.label}: row $row (line ${point.absLine}, column ${point.column}, $columns columns): $what; cell to index $mapping; from the dumped line ${local ?: "none"}")
                     // Each lookup clears; wait for the Mac to report it before the next.
                     rig.poll { (controller.selection.value == null).takeIf { it } }
                     if (link?.url == case.url && !link.macLocal) {
@@ -148,7 +213,17 @@ class RealIterm2LinkTapTest {
         )
         val SETTLE = 3.seconds
 
-        /** After `clear` the three outputs are on the first rows, a row lower each if the prompt takes one. */
-        const val ROWS_TRIED = 5
+        /** After `clear`: each echo's command row and output row, for three links, and some slack. */
+        const val ROWS_TRIED = 9
+
+        /** The smart probe's column on each row (where the plain URL's host is). */
+        const val SMART_PROBE_COLUMN = 10
+        val PROBE_TIMEOUT = 5.seconds
+        val KEY_PAUSE = 500.milliseconds
+
+        /** [text] with every character outside printable ASCII as `\\uXXXX` (NULs, CR, LF, wide characters). */
+        fun escaped(text: String): String = buildString {
+            for (c in text) if (c.code in 0x20..0x7e && c != '\\') append(c) else append("\\u%04x".format(c.code))
+        }
     }
 }

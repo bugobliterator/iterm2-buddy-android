@@ -222,8 +222,11 @@ text; failing that, a `smart` selection, used only when it is a whole link (run 
 smart selection stops at the scheme's `:`, giving `example.com/path`); then `clearSelection`.
 `RealIterm2LinkTapTest` checks that on the runner, after the Fit to phone report, in its own step
 that continues on error. It streams the first terminal session in the app's `StreamController`,
-types `clear` and echoes a plain URL, `see (https://example.com/a_(b)). ok` and
-`www.example.com/w`, and for each taps the top rows in turn through the app's own mapping
+gets a clean prompt (Ctrl-C, Ctrl-U, `clear`, then waits until the rows below the first are
+empty), echoes a plain URL, `see (https://example.com/a_(b)). ok` and `www.example.com/w`, each
+with its own command, and dumps the first nine rows as the lookup sees them (the whole-line text
+escaped, the Mac's selection report, the links found with their positions, the smart selection
+at column 10; the content is the test's own). Then for each link it taps the top rows in turn through the app's own mapping
 (`selectionPointAt` at fit) and `LinkLookup` until the expected link is found. It asserts every
 link was found exactly, that the stream's selection report goes back to none, and that
 `copySelection` then answers `""` (nothing left selected). The report is `link-tap:` lines: rows,

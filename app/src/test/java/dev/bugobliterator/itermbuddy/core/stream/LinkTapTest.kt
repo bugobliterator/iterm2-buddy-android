@@ -216,7 +216,11 @@ class LinkTapTest {
     @Test
     fun theLinkUnderTheTappedColumnIsTaken() = runTest {
         val line = "see (https://example.com/a_(b)). ok and www.example.org/w too"
-        val cases = listOf(3 to null, 4 to "https://example.com/a_(b)", 5 to "https://example.com/a_(b)", 12 to "https://example.com/a_(b)", 30 to "https://example.com/a_(b)", 31 to null, 42 to "https://www.example.org/w", 58 to null)
+        val cases = listOf(
+            0 to null, 1 to null, 2 to "https://example.com/a_(b)", 4 to "https://example.com/a_(b)", 12 to "https://example.com/a_(b)",
+            30 to "https://example.com/a_(b)", 32 to "https://example.com/a_(b)", 33 to null, 34 to null,
+            42 to "https://www.example.org/w", 59 to "https://www.example.org/w", 60 to null,
+        )
         for ((column, want) in cases) {
             val rig = Rig(this)
             val point = SelectionPoint(120, column)
@@ -330,9 +334,33 @@ class LinkTapTest {
         assertEquals(3 to false, indexAtCell("日本 https://e.example/", 5))
         // Combining marks take none.
         assertEquals(3 to false, indexAtCell("e\u0301 x", 2))
-        assertEquals(2 to true, indexAtCell("ab", 7))
+        assertEquals(7 to true, indexAtCell("ab", 7))
         assertEquals(listOf(2, 1, 0, 2), listOf(cellWidth('日'.code), cellWidth('a'.code), cellWidth(0x0301), cellWidth(0x1F600)))
         assertNull(linkAtTap("no links", SelectionPoint(0, 0), null, 80))
+    }
+
+    @Test
+    fun promptsNulsAndLineEndsDoNotHideALink() {
+        val url = "https://example.com/path"
+        // After a shell prompt and the echo command (the URL from cell 25).
+        val prompt = "runner@Mac-mini ~ % echo $url"
+        assertEquals(listOf(url), linksInLine(prompt).map { it.url })
+        assertEquals(url, linkAtTap(prompt, SelectionPoint(166, 30), null, columns = 80))
+        assertNull("the prompt, far from it", linkAtTap(prompt, SelectionPoint(166, 3), null, columns = 80))
+        // Trailing NULs, spaces and CR LF; NUL cells before it keep their places.
+        assertEquals(url, linkAtTap("$url\u0000\u0000   \r\n", SelectionPoint(166, 10), null, columns = 80))
+        assertEquals(url, linkAtTap("\u0000\u0000$url\u0000", SelectionPoint(166, 3), null, columns = 80))
+        assertEquals("  x", gridLine("\u0000\u0000x\u0000 \r\n"))
+        // A line that only fits once trimmed is still one row: sure.
+        assertNull(linkAtTap("$url${" ".repeat(100)}", SelectionPoint(166, 60), null, columns = 80))
+        // A report whose start column is the grid's width (a whole line's reversed start) changes nothing.
+        val reversed = SelectionSpan(SelectionPoint(166, 80), SelectionPoint(166, 0))
+        assertEquals(url, linkAtTap(url, SelectionPoint(166, 10), reversed, columns = 80))
+        // Up to three cells past either end.
+        assertEquals(url, linkAtTap("ab  $url", SelectionPoint(166, 1), null, columns = 80))
+        assertNull(linkAtTap("ab  $url", SelectionPoint(166, 0), null, columns = 80))
+        assertEquals(url, linkAtTap("$url   more", SelectionPoint(166, 26), null, columns = 80))
+        assertNull(linkAtTap("$url   more", SelectionPoint(166, 27), null, columns = 80))
     }
 
     @Test

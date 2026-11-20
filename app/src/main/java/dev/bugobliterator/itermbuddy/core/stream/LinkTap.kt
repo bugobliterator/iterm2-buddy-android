@@ -202,7 +202,7 @@ internal fun cellWidth(codePoint: Int): Int {
     return if (wide) 2 else 1
 }
 
-/** Where cell [cell] of [line] falls: its string index ([line]'s length past the end), and whether every width was plain (1). */
+/** Where cell [cell] of [line] falls: its string index (past the end, the length plus the blank cells beyond), and whether every width before it was plain (1). */
 internal fun indexAtCell(line: String, cell: Int): Pair<Int, Boolean> {
     var cells = 0
     var i = 0
@@ -215,7 +215,8 @@ internal fun indexAtCell(line: String, cell: Int): Pair<Int, Boolean> {
         cells += width
         i += Character.charCount(codePoint)
     }
-    return line.length to plain
+    // Past the end: one index per blank cell beyond it, so a tap far right of a link is far from it.
+    return line.length + (cell - cells) to plain
 }
 
 /** [line]'s width in cells ([cellWidth]). */
@@ -231,33 +232,42 @@ internal fun cellsOf(line: String): Int {
 }
 
 /**
- * The link under the tap at [point] in [line], the Mac's whole (soft-wrapped, logical) line there.
- * The tapped cell's offset into the line is its rows below the line's first row (from [span], the
- * Mac's report of that selection, when it covers [point]) times [columns], plus its column; with
- * no usable span the line is taken to start on the tapped row when it fits in one. The offset
- * becomes a string index through [indexAtCell]. When that mapping is sure (a span or one row, and
- * only plain-width characters before the tap) the link must cover the index, give or take one
- * cell; when it is not, the nearest link on the line is taken. Null when there is none.
+ * [text] as a grid line: each NUL (a cell never written) becomes a space, so cells keep their
+ * places, and trailing whitespace (spaces, `\r`, `\n`) is dropped.
  */
-fun linkAtTap(line: String, point: SelectionPoint, span: SelectionSpan?, columns: Int): String? {
+internal fun gridLine(text: String): String = text.replace('\u0000', ' ').trimEnd()
+
+/**
+ * The link under the tap at [point] in [text], the Mac's whole (soft-wrapped, logical) line there
+ * ([gridLine] first). The tapped cell's offset into the line is its rows below the line's first
+ * row (from [span], the Mac's report of that selection, when it covers [point]) times [columns],
+ * plus its column (a whole line starts at column 0, whatever column the report gives); with no
+ * usable span the line is taken to start on the tapped row. The offset becomes a string index
+ * through [indexAtCell]. When that mapping is sure (a span, or a line that fits in one row, and
+ * only plain-width characters before the tap) the nearest link is taken when it is within
+ * [SURE_SLACK_CELLS] of the index; when it is not sure (wide or combining characters, a long line
+ * with no report, an offset before the line), the nearest link on the line. Null when none.
+ */
+fun linkAtTap(text: String, point: SelectionPoint, span: SelectionSpan?, columns: Int): String? {
+    val line = gridLine(text)
     val links = linksInLine(line)
     if (links.isEmpty()) return null
-    val usableSpan = span?.takeIf { point.absLine in it.start.absLine..it.end.absLine }
-    val fitsOneRow = columns > 0 && cellsOf(line.trimEnd('\n', '\r')) <= columns
-    val cell = when {
-        usableSpan != null && columns > 0 -> (point.absLine - usableSpan.start.absLine) * columns + point.column - usableSpan.start.column
-        else -> point.column.toLong()
-    }
+    val usableSpan = span?.takeIf { point.absLine in it.start.absLine..it.end.absLine && columns > 0 }
+    val fitsOneRow = columns > 0 && cellsOf(line) <= columns
+    val cell = if (usableSpan != null) (point.absLine - usableSpan.start.absLine) * columns + point.column else point.column.toLong()
     val (index, plain) = indexAtCell(line, cell.coerceIn(0, Int.MAX_VALUE.toLong()).toInt())
-    val sure = plain && (usableSpan != null || fitsOneRow)
+    val sure = plain && cell >= 0 && (usableSpan != null || fitsOneRow)
     fun distance(link: LineLink): Int = when {
         index < link.start -> link.start - index
         index >= link.end -> index - link.end + 1
         else -> 0
     }
     val nearest = links.minBy(::distance)
-    return if (!sure || distance(nearest) <= 1) nearest.url else null
+    return if (!sure || distance(nearest) <= SURE_SLACK_CELLS) nearest.url else null
 }
+
+/** How far off a sure tap may land and still take a link: rounding, a cell's edge, a wrap's seam. */
+const val SURE_SLACK_CELLS = 3
 
 /**
  * Finds the link under a tap on a terminal stream with the Mac's help (the phone has video, no
