@@ -48,4 +48,33 @@ class KeyTraceTest {
         trace.log { "off" }
         assertEquals(listOf("on"), lines)
     }
+
+    private fun sinkLines(adb: () -> Boolean): Pair<List<String>, List<String>> {
+        val logcat = mutableListOf<String>()
+        val dir = java.nio.file.Files.createTempDirectory("keytrace").toFile()
+        try {
+            val file = LogFileSink(dir, wallMillis = { 0L }, zone = { java.time.ZoneOffset.UTC })
+            val logger = AppLogger({ _, tag, message, _ -> logcat += "$tag $message" }, file, wallMillis = { 0L })
+            keyTraceSink(adb) { logger }("key U+002F[/]")
+            val text = java.io.ByteArrayOutputStream().also(file::copyTo).toString(Charsets.UTF_8)
+            return logcat to text.lines().filter { it.isNotEmpty() }
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun withOnlyTheSwitchTraceLinesGoToTheFileOnly() {
+        val (logcat, file) = sinkLines { false }
+        assertEquals(emptyList<String>(), logcat)
+        assertEquals(listOf("1970-01-01T00:00:00.000Z | V | IB.Input | key U+002F[/]"), file)
+        assertEquals(emptyList<String>(), sinkLines { throw RuntimeException("Method not mocked") }.first)
+    }
+
+    @Test
+    fun withTheAdbPropertyTraceLinesGoToLogcatAndTheFile() {
+        val (logcat, file) = sinkLines { true }
+        assertEquals(listOf("IB.Input key U+002F[/]"), logcat)
+        assertEquals(1, file.size)
+    }
 }

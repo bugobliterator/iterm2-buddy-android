@@ -1,6 +1,7 @@
 package dev.bugobliterator.itermbuddy.core
 
 import dev.bugobliterator.itermbuddy.applog.AppLog
+import dev.bugobliterator.itermbuddy.applog.logSummary
 import dev.bugobliterator.itermbuddy.core.chat.ChatInput
 import dev.bugobliterator.itermbuddy.core.chat.ChatSink
 import dev.bugobliterator.itermbuddy.core.noise.DEFAULT_MAX_MESSAGE_BYTES
@@ -541,8 +542,8 @@ class CompanionClient internal constructor(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    log("connect flow failed: $e")
-                    setState(ClientState.Failed("Something went wrong: ${e.message}", rescanNeeded = false))
+                    log("connect flow failed: ${logSummary(e)}")
+                    setState(ClientState.Failed("Something went wrong (${e.javaClass.simpleName})", rescanNeeded = false))
                 } finally {
                     if (!cancelPrevious) {
                         withContext(NonCancellable) {
@@ -1000,7 +1001,7 @@ class CompanionClient internal constructor(
                 log("connection closed during the handshake")
                 Shake.Failed(null)
             } catch (e: IOException) {
-                log("handshake failed: $e")
+                log("handshake failed: ${logSummary(e)}")
                 Shake.Failed(null)
             } catch (e: NoiseException) {
                 log("handshake failed: ${e.message}")

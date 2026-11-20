@@ -32,6 +32,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import dev.bugobliterator.itermbuddy.applog.KEY_TRACE_CLEAR_NOW
+import dev.bugobliterator.itermbuddy.applog.KEY_TRACE_KEEP
+import dev.bugobliterator.itermbuddy.applog.KEY_TRACE_OFF_PROMPT
 import dev.bugobliterator.itermbuddy.applog.KEY_TRACE_SUMMARY
 import dev.bugobliterator.itermbuddy.applog.KEY_TRACE_TITLE
 import dev.bugobliterator.itermbuddy.core.ClientState
@@ -76,7 +79,8 @@ internal const val DECODER_LOW_LATENCY_SUMMARY =
  * and "Decoder low-latency keys" ([decoderLowLatency], [DECODER_LOW_LATENCY_TITLE]): off rebuilds
  * the decoder with the earlier minimal format, to compare the overlay's decoder latency.
  * Diagnostics: Share log ([onShareLog], Android's share sheet), Clear log ([onClearLog],
- * confirmed first) and the "Include typed-key trace" switch ([keyTrace], [KEY_TRACE_TITLE]).
+ * confirmed first) and the "Include typed-key trace" switch ([keyTrace], [KEY_TRACE_TITLE]);
+ * turning it off offers to clear the log, which keeps the traced keys until cleared.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -106,6 +110,7 @@ fun SettingsScreen(
 ) {
     var confirming by rememberSaveable { mutableStateOf(false) }
     var confirmingClear by rememberSaveable { mutableStateOf(false) }
+    var offeringTraceClear by rememberSaveable { mutableStateOf(false) }
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
@@ -145,8 +150,24 @@ fun SettingsScreen(
                 OutlinedButton(onClick = onShareLog) { Text("Share log") }
                 OutlinedButton(onClick = { confirmingClear = true }) { Text("Clear log") }
             }
-            SwitchRow(KEY_TRACE_TITLE, KEY_TRACE_SUMMARY, keyTrace, onKeyTraceChange)
+            SwitchRow(KEY_TRACE_TITLE, KEY_TRACE_SUMMARY, keyTrace) { on ->
+                onKeyTraceChange(on)
+                if (!on) offeringTraceClear = true
+            }
         }
+    }
+    if (offeringTraceClear) {
+        AlertDialog(
+            onDismissRequest = { offeringTraceClear = false },
+            text = { Text(KEY_TRACE_OFF_PROMPT) },
+            confirmButton = {
+                TextButton(onClick = {
+                    offeringTraceClear = false
+                    onClearLog()
+                }) { Text(KEY_TRACE_CLEAR_NOW) }
+            },
+            dismissButton = { TextButton(onClick = { offeringTraceClear = false }) { Text(KEY_TRACE_KEEP) } },
+        )
     }
     if (confirmingClear) {
         AlertDialog(

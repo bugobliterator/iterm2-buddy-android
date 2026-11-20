@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy.applog
 
+import dev.bugobliterator.itermbuddy.core.input.InputTrace
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
@@ -12,6 +13,8 @@ import java.time.format.DateTimeFormatter
  *
  * @param macRevision the connected Mac's protocol revision; null when not connected.
  * @param paired whether a pairing is stored; null while the client has not looked yet.
+ * @param keyTraceLinesPresent whether the shared log holds any typed-key trace line (it keeps
+ *   them after the switch is off, until Clear log).
  */
 data class LogHeader(
     val createdAt: String,
@@ -29,6 +32,7 @@ data class LogHeader(
     val pasteKeys: Boolean,
     val scrollKeys: Boolean,
     val keyTrace: Boolean,
+    val keyTraceLinesPresent: Boolean,
 ) {
     fun render(): String = buildString {
         appendLine("iTerm Buddy log")
@@ -42,6 +46,7 @@ data class LogHeader(
         appendLine("Send / * + = as paste: ${onOff(pasteKeys)}")
         appendLine("Scroll web pages with keys: ${onOff(scrollKeys)}")
         appendLine("Include typed-key trace: ${onOff(keyTrace)}")
+        appendLine("Key-trace lines present: ${if (keyTraceLinesPresent) "yes" else "no"}")
         appendLine("Line format: local time | level | tag | message")
         appendLine(SEPARATOR)
     }
@@ -57,7 +62,8 @@ data class LogHeader(
  * Settings › Share log: one plain-text file in the app's cache, [SHARE_DIR] (the only directory
  * the FileProvider serves, `res/xml/log_share_paths.xml`), named [fileName]: the header, then
  * the rolling log oldest to newest. Earlier shares older than [KEEP_MILLIS] are deleted first, so
- * the cache never collects them, while one just handed to another app stays readable.
+ * the cache never collects them, while one just handed to another app stays readable; Clear log
+ * deletes them all ([clearShares]).
  */
 object LogShare {
     const val SHARE_DIR = "shared-logs"
@@ -67,26 +73,42 @@ object LogShare {
 
     const val KEEP_MILLIS = 60 * 60 * 1000L
 
-    private val FILE_TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
+    private val FILE_TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS")
 
     private val HEADER_TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSXXX")
 
-    /** `itermbuddy-log-20261120-140305.txt`, in local time. */
+    /** `itermbuddy-log-20261120-140305-123.txt`, in local time. */
     fun fileName(nowMillis: Long, zone: ZoneId): String = "itermbuddy-log-${FILE_TIME.format(Instant.ofEpochMilli(nowMillis).atZone(zone))}.txt"
 
     /** The header's Created time, as the log lines write theirs. */
     fun headerTime(nowMillis: Long, zone: ZoneId): String = HEADER_TIME.format(Instant.ofEpochMilli(nowMillis).atZone(zone))
 
-    /** Writes the share file under [cacheDir] and returns it. Disk I/O: never on the main thread. */
-    fun assemble(sink: LogFileSink, header: LogHeader, cacheDir: File, nowMillis: Long, zone: ZoneId): File {
+    /**
+     * Writes the share file under [cacheDir] and returns it: [header] (given whether the log
+     * holds key-trace lines), then the log, from one [LogFileSink.snapshot]. Throws if the file
+     * cannot be written whole (and deletes it). Disk I/O: never on the main thread.
+     */
+    fun assemble(sink: LogFileSink, header: (keyTraceLinesPresent: Boolean) -> LogHeader, cacheDir: File, nowMillis: Long, zone: ZoneId): File {
         val dir = File(cacheDir, SHARE_DIR)
         dir.mkdirs()
         dir.listFiles()?.forEach { if (nowMillis - it.lastModified() > KEEP_MILLIS) it.delete() }
         val file = File(dir, fileName(nowMillis, zone))
-        file.outputStream().buffered().use { out ->
-            out.write(header.render().toByteArray(Charsets.UTF_8))
-            sink.copyTo(out)
+        try {
+            file.outputStream().buffered().use { out ->
+                sink.snapshot { log ->
+                    out.write(header(log.hasLine(LogLevel.VERBOSE, InputTrace.TAG)).render().toByteArray(Charsets.UTF_8))
+                    log.copyTo(out)
+                }
+            }
+        } catch (e: Exception) {
+            file.delete()
+            throw e
         }
         return file
+    }
+
+    /** Clear log: deletes every share file. */
+    fun clearShares(cacheDir: File) {
+        File(cacheDir, SHARE_DIR).listFiles()?.forEach { it.delete() }
     }
 }

@@ -5,6 +5,7 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -12,8 +13,11 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
+import java.io.OutputStream
 import java.time.ZoneId
 import java.time.ZoneOffset
+import java.util.concurrent.CountDownLatch
 
 class LogFileSinkTest {
     @get:Rule
@@ -23,8 +27,13 @@ class LogFileSinkTest {
 
     private var now = 1_795_000_000_000L
 
-    private fun sink(dir: File = temp.newFolder("logs"), maxFileBytes: Long = 1L shl 20, capacity: Int = 1_000) =
-        LogFileSink(dir, maxFileBytes, capacity, wallMillis = { now }, zone = { zone })
+    private fun sink(
+        dir: File = temp.newFolder("logs"),
+        maxFileBytes: Long = 1L shl 20,
+        capacity: Int = 1_000,
+        zone: () -> ZoneId = { this.zone },
+        rename: (File, File) -> Boolean = { from, to -> from.renameTo(to) },
+    ) = LogFileSink(dir, maxFileBytes, capacity, wallMillis = { now }, zone = zone, rename = rename)
 
     private fun record(message: String, tag: String = "T", level: LogLevel = LogLevel.INFO) = LogRecord(now, level, tag, message)
 
@@ -173,6 +182,85 @@ class LogFileSinkTest {
         testScheduler.runCurrent()
         assertEquals(listOf("one", "two"), messages(File(dir, LogFileSink.CURRENT).readText()))
         writer.cancel()
+    }
+
+    @Test
+    fun aFailedRenameTruncatesInsteadOfGrowing() {
+        val dir = temp.newFolder("logs")
+        val sink = sink(dir, maxFileBytes = 1_000, rename = { _, _ -> false })
+        repeat(200) {
+            sink.offer(record("line $it " + "q".repeat(40)))
+            sink.drain()
+        }
+        val current = File(dir, LogFileSink.CURRENT)
+        assertTrue(current.length() <= 1_000)
+        assertFalse(File(dir, LogFileSink.PREVIOUS).exists())
+        assertEquals("line 199", messages(sink.text()).last().substringBefore(" q"))
+    }
+
+    @Test
+    fun aBatchThatThrowsAnErrorDoesNotStopTheWriter() {
+        var fail = true
+        val sink = sink(zone = { if (fail) throw AssertionError("boom") else zone })
+        sink.offer(record("lost"))
+        sink.drainSafely()
+        fail = false
+        sink.offer(record("kept"))
+        sink.drainSafely()
+        assertEquals(listOf("kept"), messages(sink.text()))
+    }
+
+    @Test(expected = kotlinx.coroutines.CancellationException::class)
+    fun aCancelledBatchIsNotSwallowed() {
+        val sink = sink(zone = { throw kotlinx.coroutines.CancellationException("cancelled") })
+        sink.offer(record("x"))
+        sink.drainSafely()
+    }
+
+    @Test
+    fun drainWithinGivesUpWhileTheLogIsBusy() {
+        val sink = sink()
+        sink.offer(record("queued"))
+        val holding = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val holder = Thread { sink.snapshot { holding.countDown(); release.await() } }
+        holder.start()
+        holding.await()
+        val started = System.nanoTime()
+        assertFalse(sink.drainWithin(50))
+        assertTrue(System.nanoTime() - started < 5_000_000_000L)
+        release.countDown()
+        holder.join()
+        sink.offer(record("later"))
+        assertTrue(sink.drainWithin(1_000))
+        assertEquals(listOf("queued", "later"), messages(sink.text()))
+    }
+
+    @Test
+    fun aCopyLeavesOutUnreadableFilesButFailsOnAWriteError() {
+        val dir = temp.newFolder("logs")
+        val sink = sink(dir)
+        sink.offer(record("kept"))
+        sink.drain()
+        // The previous file is unreadable (a directory): left out, the rest still copied.
+        File(dir, LogFileSink.PREVIOUS).mkdirs()
+        assertEquals(listOf("kept"), messages(sink.text()))
+        val broken = object : OutputStream() {
+            override fun write(b: Int) = throw IOException("disk full")
+            override fun write(b: ByteArray, off: Int, len: Int) = throw IOException("disk full")
+        }
+        assertThrows(IOException::class.java) { sink.copyTo(broken) }
+    }
+
+    @Test
+    fun aSnapshotFindsLinesByLevelAndTag() {
+        val sink = sink()
+        sink.offer(record("ordinary"))
+        assertFalse(sink.snapshot { it.hasLine(LogLevel.VERBOSE, "IB.Input") })
+        sink.offer(record("key U+0061[a]", tag = "IB.Input", level = LogLevel.VERBOSE))
+        assertTrue(sink.snapshot { it.hasLine(LogLevel.VERBOSE, "IB.Input") })
+        sink.clear()
+        assertFalse(sink.snapshot { it.hasLine(LogLevel.VERBOSE, "IB.Input") })
     }
 
     private companion object {

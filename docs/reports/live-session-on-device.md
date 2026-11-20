@@ -252,8 +252,11 @@ The main path needs no computer: the trace and Share log are in the app's Settin
    Files, email, chat). It starts with a header (app version and build, Android version, device,
    protocol revision, Mac revision if connected, whether a pairing is stored, and the paste,
    scroll-keys and key-trace switches), then the log oldest first, one line per entry:
-   `local time with ms | level | tag | message`. The trace lines are tag `IB.Input`.
-4. Turn the switch off afterwards. **Clear log** (confirmed) deletes the log.
+   `local time with ms | level | tag | message`. The trace lines are tag `IB.Input`; with only
+   the switch on they go to this log and not to logcat.
+4. Turn the switch off afterwards. Turning it off offers **Clear now** or **Keep**: traced keys
+   stay in the log until it is cleared, and a shared log's header says `Key-trace lines present:
+   yes/no`. **Clear log** (confirmed) deletes the log and any earlier share files.
 
 The app always keeps a rolling log on the device (`filesDir/logs`, two files of about 1 MB,
 oldest lines dropped first), so a problem that already happened is in a shared log. It holds
@@ -261,7 +264,8 @@ what logcat shows from the app (no terminal or chat content, keys, codes or secr
 counts, IDs and timings only; crash stack traces without exception messages). The typed-key
 trace is the only exception, and only while it is on. Unpair keeps the log.
 
-With adb (still works; either this or the switch turns the trace on):
+With adb (still works; either this or the switch turns the trace on; with the property set the
+trace lines go to logcat as well as the log):
 
     adb shell setprop log.tag.IB.Input VERBOSE     # on, within a second
     adb logcat -c
