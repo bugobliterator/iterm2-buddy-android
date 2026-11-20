@@ -170,8 +170,9 @@ class LiveVideoSource(
  * its sides cropped. That is the base zoom: the first view, and the one a kept zoom left at the
  * base follows when the base changes (rotation, the bars measured); a zoom the owner chose (pinched
  * out to fit, or in) is kept and clamped, as a terminal's. At the base a horizontal drag pans to the
- * sides and vertical travel scrolls the page ([browserGestureStep]), a release flings
- * ([browserFlings]), and taps and scroll density use the zoom as shown. Pinching out reaches fit
+ * sides and vertical travel scrolls the page ([browserGestureStep]), a release flings vertically
+ * only ([browserFlings], [browserFlingVelocity]), the keyboard covers the page's bottom without
+ * lifting it ([shownZoom]), and taps and scroll density use the zoom as shown. Pinching out reaches fit
  * (the whole page). The zoom key resets as for a terminal (another session or image size).
  */
 @Composable
@@ -290,7 +291,8 @@ fun VideoCanvas(
                             val shown = shownZoom(kept, g, currentInset())
                             val density = browserImagePxPerViewPx(currentImage.width, g.fit)
                             if (density != null && browserFlings(shown.scale, sawPinch, g.base?.scale ?: 1f)) {
-                                page.fling(velocity.x, velocity.y, density, shown.scale, at.first, at.second)
+                                val (flingX, flingY) = browserFlingVelocity(velocity.x, velocity.y, shown.scale)
+                                page.fling(flingX, flingY, density, shown.scale, at.first, at.second)
                             }
                         }
                     },

@@ -417,6 +417,71 @@ class CanvasZoomTest {
     }
 
     @Test
+    fun aFlingAboveFitNeverScrollsThePageSideways() {
+        assertEquals(120f to -900f, browserFlingVelocity(120f, -900f, 1f))
+        assertEquals(0f to -900f, browserFlingVelocity(120f, -900f, 1.2f))
+        assertEquals(0f to 400f, browserFlingVelocity(-300f, 400f, 2f))
+    }
+
+    @Test
+    fun theKeyboardDoesNotLiftThePageAtTheFill() {
+        val start = KeptZoom(ZoomState.FIT, null, atBase = true)
+        // A 300 px keyboard: the page stays where it was, its bottom covered.
+        val typing = shownZoom(start, filled, 300f)
+        assertEquals(fill.scale, typing.scale, eps)
+        assertEquals(fill.offsetX, typing.offsetX, eps)
+        assertEquals(fill.offsetY, typing.offsetY, eps)
+        // A drag up pans to the covered bottom first (the page now overflows what is left visible).
+        val up = browserGestureStep(start, filled, 300f, 500f, 300f, 0f, -50f, 1f, 1, false)
+        assertEquals(0f, up.scrollY, eps)
+        assertEquals(-70f, shownZoom(up.kept, filled, 300f).offsetY, eps)
+        assertTrue(up.kept.atBase)
+        // At the bottom edge (-320) the rest scrolls the page.
+        val further = browserGestureStep(up.kept, filled, 300f, 500f, 300f, 0f, -400f, 1f, 1, false)
+        assertEquals(-150f, further.scrollY, eps)
+        // The keyboard gone, the page is back at the fill exactly.
+        assertEquals(fill.offsetY, shownZoom(further.kept, filled, 0f).offsetY, eps)
+        // A zoom the owner chose still lifts as a terminal's does.
+        val zoomed = KeptZoom(ZoomState(2f, -500f, -500f), 0f)
+        assertEquals(-800f, shownZoom(zoomed, filled, 300f).offsetY, eps)
+    }
+
+    @Test
+    fun theTerminalGestureStepKeepsTheBase() {
+        // Browser input unavailable (view only): the canvas falls back to gestureStep.
+        val start = KeptZoom(ZoomState.FIT, null, atBase = true)
+        val panned = gestureStep(start, filled, 0f, 500f, 400f, 30f, 0f, 1f, 1, false, null)
+        assertTrue(panned.kept.atBase)
+        assertEquals(-70f, panned.kept.state.offsetX, eps)
+        val pinched = gestureStep(start, filled, 0f, 500f, 400f, 0f, 0f, 0.5f, 2, false, null)
+        assertFalse(pinched.kept.atBase)
+    }
+
+    @Test
+    fun aPageTallerThanTheScreenFillsTheWidthAndPansBeforeScrolling() {
+        // A 500×1000 page: fit 300×600 at (350, 100); the fill is scale 10/3, the width exact, 2000 px tall.
+        val tallFit = visibleFitRect(500, 1000, 1000f, 700f, topInset = 100f, bottomInset = 0f)
+        val tallBase = browserFillZoom(tallFit, 1000f, 700f, topInset = 100f, bottomInset = 0f)!!
+        val tall = GestureGeometry(tallFit, 1000f, 700f, 4f * 500f / 300f, 100f, 0f, 0f, 0f, 0f, tallBase)
+        val start = KeptZoom(ZoomState.FIT, null, atBase = true)
+        // Sideways: the width fits exactly, so nothing pans and the page does not scroll.
+        val sideways = browserGestureStep(start, tall, 0f, 500f, 400f, 80f, 0f, 1f, 1, false)
+        assertEquals(tallBase.offsetX, sideways.kept.state.offsetX, eps)
+        assertEquals(0f, sideways.scrollX, eps)
+        assertEquals(0f, sideways.scrollY, eps)
+        // Up: it pans down the overflowing picture first...
+        val up = browserGestureStep(start, tall, 0f, 500f, 400f, 0f, -100f, 1f, 1, false)
+        assertEquals(tallBase.offsetY - 100f, up.kept.state.offsetY, eps)
+        assertEquals(0f, up.scrollY, eps)
+        assertTrue(up.kept.atBase)
+        // ...and only past its bottom edge scrolls the page.
+        val bottom = 700f - tallBase.scale * (tallFit.top + tallFit.height)
+        val atEdge = browserGestureStep(KeptZoom(ZoomState(tallBase.scale, tallBase.offsetX, bottom), 0f, atBase = true), tall, 0f, 500f, 400f, 0f, -60f, 1f, 1, false)
+        assertEquals(-60f, atEdge.scrollY, eps)
+        assertTrue(browserFlings(atEdge.kept.state.scale, sawPinch = false, baseScale = tallBase.scale))
+    }
+
+    @Test
     fun withoutADoubleTapWindowEveryTapIsImmediate() {
         // A browser has no double-tap zoom (iOS LiveCanvas has none): a click is sent at the lift.
         val arbiter = PressArbiter(holdMillis = 300, doubleTapMillis = 0, slop = 8f)
