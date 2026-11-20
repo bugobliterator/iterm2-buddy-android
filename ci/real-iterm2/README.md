@@ -202,20 +202,34 @@ error.
 `install-browser-plugin.sh` sets it up before launch. iTerm2 3.7.7 offers browser profiles only
 when NSWorkspace finds its Browser Plugin (`com.googlecode.iterm2.iTermBrowserPlugin`) signed by
 team `H7V7XYVQ7D` (iTermBrowserGateway.swift); without it a browser Dynamic Profile is skipped
-(iTermDynamicProfileManager.m:563-565). The script reads the zip's link from
-`https://iterm2.com/browser-plugin.html` (the page iTerm2 offers), prints the zip's sha256 (not
-pinned), checks the app against iTerm2's own requirement
-(`anchor apple generic and certificate leaf[subject.OU] = "H7V7XYVQ7D"`), installs it in
-`~/Applications`, registers it and looks it up with NSWorkspace. Then it writes the Dynamic Profile
-`buddy-ci-browser`: `"Custom Command": "Browser"` and `"Initial URL": "http://127.0.0.1:8793/"`.
+(iTermDynamicProfileManager.m:563-565). The script downloads
+`https://iterm2.com/downloads/browser-plugin/iTermBrowserPlugin-1.0.zip` (https only, the link
+`iterm2.com/browser-plugin.html` gives), checks its pinned sha256 and that no entry leaves the
+archive, checks the app against the Developer ID requirement for team `H7V7XYVQ7D` (which implies
+iTerm2's own check), installs it in `~/Applications`, registers it and looks it up with
+NSWorkspace. Then it writes the Dynamic Profile `buddy-ci-browser`: `"Custom Command": "Browser"`
+(what makes a profile a browser in 3.7.7, `profileIsBrowser`, NSDictionary+iTerm.m:73-75) and
+`"Initial URL": "http://127.0.0.1:8793/"`.
 
 The test serves its own synthetic page from the JVM on `127.0.0.1:8793`: a document 8000 CSS px
 tall, or one that scrolls in a full-window `overflow: auto` element instead (as many web apps
 do). Its script beacons back on load (viewport, devicePixelRatio), on every scroll, click (where
 WebKit placed it), wheel event (where WebKit placed it, its deltas and target) and keydown, and
-every 250 ms with its scroll offsets. The test types `it2 window new --profile buddy-ci-browser`
-into the first terminal session (the API's createTab by profile name), waits for a browser
-session in the session tree and the page's load, streams it through the app's `StreamController`
+every 250 ms with its scroll offsets. The test opens a window of the profile (the API's createTab
+by profile name), trying in turn until the session tree shows a browser session:
+
+1. the bundled it2 run from the test JVM, `it2 window new --profile buddy-ci-browser`. "Allow all
+   apps to connect" (the `disable-automation-auth` file `seed-claude-status.sh` writes) lets it
+   in; a placeholder `ITERM2_COOKIE` only stops it2 asking for a cookie over AppleScript;
+2. the same typed into the first terminal session after Ctrl-C and Ctrl-U, its stdout, stderr and
+   exit status written to `diagnostics/browser-it2-output.txt`, which the test reads;
+3. `osascript` `create window with profile` (needs the Automation permission; its error is
+   recorded).
+
+Each attempt's output and the session tree after it (window, tab and session counts, browser
+sessions, distinct GUIDs; titles by length only) are printed, and `it2 window list --json` before
+and after (window IDs and frames). With no browser session after all three it prints
+`it2 profile list`'s count of the profile and fails. Then it waits for the page's load, streams it through the app's `StreamController`
 and drives it through the app's `BrowserDriver` and `InputSender`. Each step loads a fresh page
 (`browserLoad`), so it starts at the top:
 
@@ -235,8 +249,9 @@ It prints `browser:` lines: the stream's size, scale and the Mac's revision; eac
 (and the points the Mac makes of them) with the page's scroll offset before and after; and the
 wheel events WebKit delivered, with where it placed the first against where the phone aimed. It
 ends with a summary. It fails when the rig broke (no browser session, no stream, a tap that
-clicks nothing) and when no raw `browserScroll` moved either page. At the end it closes the
-browser session with `it2 session close`.
+clicks nothing) and when no raw `browserScroll` moved either page. At the end it closes every
+window that appeared since it began (`it2 window close --force`, twice if needed), also when the
+open timed out (after a short wait, in case the window came up late), and checks the session tree.
 
 ## Stage 3: Agent Chat on a fake model
 
@@ -303,7 +318,7 @@ what was typed.
 | Seed AI | `seed-ai.sh` | Writes the root-owned `EnableAI` secure setting and the AI defaults (`UseRecommendedAIModel` off, one `AIManualModelConfigurations` entry for the fake model, `AiModel` naming it, the token budget `AiMaxTokens`/`AiResponseMaxTokens`), answers iTerm2's one-time AI prompts (model catalog updates, automatic terminal sharing, the safety-check migration), and reads them back typed. |
 | Seed the status profile | `seed-claude-status.sh` | Installs the `buddy-ci-status` Dynamic Profile (Subtitle `\(status)`) and makes it the default, turns on `EnableAPIServer` and `SetCookie`, writes the root-owned `disable-automation-auth` file, and checks the bundled it2. It continues on error: a failure here fails only `RealIterm2ClaudeStatusTest`. |
 | Install Claude Code | `install-claude-code.sh` | Writes the key-bytes probe's `probe.env`, installs the pinned Claude Code with pnpm and seeds `~/.claude.json`. It runs after the status probe and continues on error: without Claude Code the probe still runs its capture modes. |
-| Install the browser plugin | `install-browser-plugin.sh` | Installs iTerm2's Browser Plugin (the zip linked from `iterm2.com/browser-plugin.html`, its sha256 printed, the app checked against iTerm2's team requirement, registered and looked up with NSWorkspace) and writes the `buddy-ci-browser` Dynamic Profile. It continues on error: a failure here fails only `RealIterm2BrowserTest`. |
+| Install the browser plugin | `install-browser-plugin.sh` | Installs iTerm2's Browser Plugin (`iTermBrowserPlugin-1.0.zip`, pinned by sha256, its entries checked to stay inside the archive, the app checked against the Developer ID requirement for iTerm2's team, registered and looked up with NSWorkspace) and writes the `buddy-ci-browser` Dynamic Profile. It continues on error: a failure here fails only `RealIterm2BrowserTest`. |
 | Start the relay | `start-relay.sh` | Fetches the relay at `b8aa2f9` the way `scripts/relay-it.sh` does and makes a throwaway CA and a `localhost` certificate. It trusts the CA system-wide and starts the relay on `127.0.0.1:8787` (open mode, `RELAY_ORIGIN=https://localhost:8443`). Then it starts `tls-proxy.mjs` on `localhost:8443`. |
 | Start the fake model | `start-fake-model.sh` | Starts `fake-model.mjs` on `127.0.0.1:8790` and waits for `/health`. |
 | Launch iTerm2 | `launch-iterm2.sh` | Runs `open -a iTerm`, then waits for the relay to log `hello role=mac` (iTerm2 parked) and takes a screenshot. |
@@ -354,15 +369,19 @@ never runs them. `RealIterm2Rig` holds the setup they share.
   with iTerm2's embedded AI plugin key.
 - The `session_execute_command` schema: not pinned yet. The first run that reaches the trigger
   prints its sha256 (fake model log and test output); set `FAKE_MODEL_TOOL_SCHEMA_SHA256` to it.
+- Browser plugin: `https://iterm2.com/downloads/browser-plugin/iTermBrowserPlugin-1.0.zip`, sha256
+  `6d41bd32…8fbd` (printed by run 18). A different zip fails the setup step (which continues on
+  error, so only the browser probe fails).
 - Relay: `gnachman/iterm2-companion-relay` at `b8aa2f90d2bc8b617d1b9c97043aa0b171885310`.
 - Actions: pinned by commit SHA, the same as `android-build.yml`.
 
 ## Known risks
 
 - **The browser probe.** It needs `iterm2.com/browser-plugin.html` to link the plugin's zip; if
-  the page changes, the setup step prints the links it found. A missing plugin drops the browser
-  profile, and the test's it2 stderr (`browser-it2-stderr.txt` in the diagnostics) then names an
-  invalid profile name. The page server takes port 8793 on the runner.
+  The plugin zip is pinned by sha256 (`BROWSER_PLUGIN_ZIP_SHA256`); if iterm2.com replaces it,
+  the setup step fails until the new zip is checked and pinned. A missing plugin drops the
+  browser profile, and it2 then reports an invalid profile name (status 2) in the probe's
+  `browser:` lines. The page server takes port 8793 on the runner.
 
 - **The status probe.** The failure message says which part broke. it2's stderr (in the
   diagnostics, `claude-status-it2-stderr.txt`) names a connection or authentication error when
