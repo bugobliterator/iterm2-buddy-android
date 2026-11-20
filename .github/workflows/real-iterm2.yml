@@ -101,6 +101,7 @@ jobs:
       # before launch. When it fails, RealIterm2BrowserTest fails instead (no browser session).
       - name: Install the browser plugin
         continue-on-error: true
+        timeout-minutes: 10
         run: bash ci/real-iterm2/install-browser-plugin.sh
 
       - name: Start the relay and the TLS proxy

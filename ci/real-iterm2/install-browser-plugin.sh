@@ -7,13 +7,16 @@
 #    with bundle ID com.googlecode.iterm2.iTermBrowserPlugin and its code signature satisfies
 #    `anchor apple generic and certificate leaf[subject.OU] = "H7V7XYVQ7D"`
 #    (iTermBrowserGateway.swift:43-45, 85-99, 165-232). Without it a browser Dynamic Profile is
-#    skipped when the profiles load (iTermDynamicProfileManager.m:563-565). The download link is
-#    read from https://iterm2.com/browser-plugin.html, the page iTerm2 itself opens to offer it
-#    (iTermBrowserGateway.swift:116, PTYSession.m:3814). The zip is not pinned: its sha256 is
-#    printed. The app is checked with iTerm2's own requirement, installed in ~/Applications,
-#    registered with LaunchServices and looked up with NSWorkspace, as iTerm2 looks it up.
-# 2. The Dynamic Profile buddy-ci-browser: "Custom Command" Browser (a browser profile,
-#    kProfilePreferenceCommandTypeBrowserValue, ITAddressBookMgr.m:70) whose "Initial URL" is the
+#    skipped when the profiles load (iTermDynamicProfileManager.m:563-565). The zip is the one
+#    https://iterm2.com/browser-plugin.html links (the page iTerm2 opens to offer it,
+#    iTermBrowserGateway.swift:116), pinned by sha256; its entries are checked to stay inside the
+#    archive before extraction. The app is checked against the Developer ID requirement for
+#    iTerm2's team, installed in ~/Applications, registered with LaunchServices and looked up with
+#    NSWorkspace, as iTerm2 looks it up.
+# 2. The Dynamic Profile buddy-ci-browser: "Custom Command" Browser, which is what makes a profile
+#    a browser in 3.7.7 (profileIsBrowser, NSDictionary+iTerm.m:73-75, compares KEY_CUSTOM_COMMAND
+#    with kProfilePreferenceCommandTypeBrowserValue, ITAddressBookMgr.m:70; "Profile Type
+#    (Phony)" is synthetic and never stored, ITAddressBookMgr.h:51), whose "Initial URL" is the
 #    test's page server on 127.0.0.1:$BROWSER_PAGE_PORT. The test opens it with
 #    `it2 window new --profile buddy-ci-browser` (the API's createTab by profile name,
 #    iTermAPIHelper.m:2564-2590; the session factory makes a browser session from the profile,
@@ -24,7 +27,7 @@
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 source "$REAL_ITERM2_SCRIPTS/plugins.sh"
 require_macos
-require_tools curl ditto codesign osascript plutil pgrep /usr/libexec/PlistBuddy
+require_tools curl ditto unzip codesign osascript plutil pgrep /usr/libexec/PlistBuddy
 [[ -x "$LSREGISTER" ]] || die "lsregister is not at $LSREGISTER"
 
 if pgrep -x iTerm2 >/dev/null; then
@@ -33,19 +36,13 @@ fi
 
 # --- 1. The Browser Plugin ----------------------------------------------------------------------
 
-page="$DOWNLOADS_DIR/browser-plugin.html"
-download "$BROWSER_PLUGIN_PAGE_URL" "$page"
-link="$(grep -Eo 'href="[^"]+\.zip"' "$page" | head -n 1 | sed -e 's/^href="//' -e 's/"$//')" || true
-[[ -n "$link" ]] || die "no .zip link on $BROWSER_PLUGIN_PAGE_URL; links there: $(grep -Eo 'href="[^"]+"' "$page" | head -n 20 | tr '\n' ' ')"
-case "$link" in
-    http://* | https://*) zip_url="$link" ;;
-    /*) zip_url="https://iterm2.com$link" ;;
-    *) zip_url="https://iterm2.com/$link" ;;
-esac
-log "the plugin page links $zip_url"
 zip="$DOWNLOADS_DIR/browser-plugin.zip"
-download "$zip_url" "$zip"
-warn "the browser plugin zip is not pinned; its sha256 is $(sha256_of "$zip") ($zip_url)"
+download "$BROWSER_PLUGIN_ZIP_URL" "$zip"
+actual="$(sha256_of "$zip")"
+[[ "$actual" == "$BROWSER_PLUGIN_ZIP_SHA256" ]] ||
+    die "browser plugin zip sha256 is $actual, expected the pinned $BROWSER_PLUGIN_ZIP_SHA256; if iterm2.com replaced it on purpose, check it and update the pin in ci/real-iterm2/common.sh"
+log "browser plugin zip matches the pinned sha256"
+check_zip_entries "$zip"
 
 unpacked="$DOWNLOADS_DIR/browser-plugin-unpacked"
 rm -rf "$unpacked"
@@ -58,10 +55,12 @@ found_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Content
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null || echo unknown)"
 log "found $(basename "$app") ($found_id, version $version)"
 
-requirement="anchor apple generic and certificate leaf[subject.OU] = \"$ITERM2_TEAM_ID\""
-codesign --verify --strict -R="$requirement" "$app" ||
-    die "the browser plugin does not satisfy iTerm2's requirement ($requirement); iTerm2 would refuse browser profiles"
-log "the browser plugin satisfies $requirement"
+# iTerm2 asks for `anchor apple generic and certificate leaf[subject.OU] = "H7V7XYVQ7D"`; the
+# Developer ID form (as install-iterm2.sh checks iTerm2) implies it.
+requirement="$(developer_id_requirement "$ITERM2_TEAM_ID")"
+codesign --verify --deep --strict -R="$requirement" "$app" ||
+    die "the browser plugin does not satisfy the Developer ID requirement for team $ITERM2_TEAM_ID; iTerm2 would refuse browser profiles"
+log "the browser plugin is signed with a Developer ID certificate of team $ITERM2_TEAM_ID"
 
 applications="$HOME/Applications"
 destination="$applications/$(basename "$app")"
@@ -70,7 +69,7 @@ rm -rf "$destination"
 ditto "$app" "$destination"
 xattr -dr com.apple.quarantine "$destination" 2>/dev/null || true
 "$LSREGISTER" -f "$destination" || die "lsregister could not register $destination"
-codesign --verify --strict -R="$requirement" "$destination" || die "the installed copy at $destination no longer verifies"
+codesign --verify --deep --strict -R="$requirement" "$destination" || die "the installed copy at $destination no longer verifies"
 resolved=""
 deadline=$((SECONDS + 60))
 until resolved="$(plugin_resolved_path "$BROWSER_PLUGIN_BUNDLE_ID")" && [[ -n "$resolved" ]]; do

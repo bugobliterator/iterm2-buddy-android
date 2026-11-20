@@ -39,10 +39,12 @@ AI_PLUGIN_ZIP_SHA256="6e5547505909df1b1e9355e61f97c4ddc575373d8ef24074c320788426
 AI_PLUGIN_SIGNING_KEY="fYLUx58QwucuPJRYxBjp7M//uVM0vTfgUo7d6u4TQR8="
 AI_PLUGIN_BUNDLE_ID="com.googlecode.iterm2.iTermAI"
 
-# The Browser Plugin browser sessions need (iTermBrowserGateway.swift:43-45): the page iTerm2
-# opens to offer it, which links the zip. Not pinned: install-browser-plugin.sh prints its sha256
-# and checks the app against iTerm2's own code-signing requirement instead.
-BROWSER_PLUGIN_PAGE_URL="https://iterm2.com/browser-plugin.html"
+# The Browser Plugin browser sessions need (iTermBrowserGateway.swift:43-45), as linked from
+# https://iterm2.com/browser-plugin.html (the page iTerm2 opens to offer it). Pinned from run 18,
+# the first to install it; a different zip fails the step. The app is also checked against the
+# Developer ID requirement for iTerm2's team.
+BROWSER_PLUGIN_ZIP_URL="https://iterm2.com/downloads/browser-plugin/iTermBrowserPlugin-1.0.zip"
+BROWSER_PLUGIN_ZIP_SHA256="6d41bd32fd1022cf935d3fdf92bc530f90c4d17666b981137efdfcfe42128fbd"
 BROWSER_PLUGIN_BUNDLE_ID="com.googlecode.iterm2.iTermBrowserPlugin"
 
 # The relay scripts/relay-it.sh tests against, fetched the same way.
@@ -139,13 +141,31 @@ sha256_of() {
     shasum -a 256 "$1" | awk '{ print $1 }'
 }
 
-# Downloads $1 to $2 with retries, failing on an HTTP error.
+# Downloads $1 to $2 with retries, failing on an HTTP error; https only, redirects included, and
+# each attempt bounded by DOWNLOAD_MAX_SECONDS.
+DOWNLOAD_MAX_SECONDS=600
 download() {
     local url="$1" destination="$2"
     log "downloading $url"
     curl --fail --location --silent --show-error --retry 4 --retry-delay 5 --retry-all-errors \
+        --proto =https --proto-redir =https --max-time "$DOWNLOAD_MAX_SECONDS" \
         --output "$destination" "$url" || die "could not download $url"
     log "downloaded $(wc -c < "$destination" | tr -d ' ') bytes, sha256 $(sha256_of "$destination")"
+}
+
+# Fails unless every entry of zip $1 is a relative path inside the archive (no absolute path, no
+# `..` component), before anything is extracted from it.
+check_zip_entries() {
+    local zip="$1" entries bad
+    entries="$(unzip -Z1 "$zip")" || die "could not list $zip"
+    bad="$(grep -E '^/|(^|/)\.\.(/|$)' <<<"$entries" || true)"
+    [[ -z "$bad" ]] || die "$zip has entries outside the archive: $(head -n 5 <<<"$bad" | tr '\n' ' ')"
+    log "$zip: $(wc -l <<<"$entries" | tr -d ' ') entries, all inside the archive"
+}
+
+# The Developer ID requirement for team $1, as install-iterm2.sh checks iTerm2 itself.
+developer_id_requirement() {
+    printf 'anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = "%s"' "$1"
 }
 
 # Prints the value of KEY from the pairing file without sourcing it.
