@@ -181,6 +181,31 @@ off, outlined; greyed when it cannot fit the session shown. A long press explain
 
 **Result:**
 
+### Links
+
+A single tap on a URL in a terminal shows a small bubble by the tap with the URL (shortened in
+the middle when long), **Open link** and **Copy**. The phone has only video, so the tap asks the
+Mac for its smart selection at the tapped cell, copies it and clears it at once (you may see the
+URL highlight on the Mac for a moment); with no answer within a second nothing shows.
+
+- Run `echo https://example.com/path` and tap the URL once. Within about a second the bubble shows
+  it. **Open link** opens it in the phone's browser; **Copy** puts it on the clipboard.
+- Tap plain text (the prompt, a word): no bubble, and the tap raises the keyboard as before.
+- Tap a URL with the keyboard hidden: the keyboard comes up as before and the bubble shows too.
+- With the bubble shown, tap elsewhere: it goes, and that tap does nothing else. A drag, a pinch
+  or a long press also hides it.
+- Double-tap a URL: it only zooms (no bubble). Flick the scrollback and tap to stop it: it only
+  stops (no bubble). Long-press to select: the selection menu works as before.
+- A URL followed by a full stop or in brackets, `(https://example.com/a).`, opens without the
+  punctuation; `www.example.com` opens as `https://www.example.com`.
+- `python3 -m http.server 8000` on the Mac and tap `http://localhost:8000/` (or `127.0.0.1`): with a
+  Browser session open in iTerm2, the bubble says "Mac-only link" and **Open in …** opens the most
+  recently viewed Browser session on the phone and loads the page there. With no Browser session,
+  it says "Mac-only link — no Browser session open" and offers Copy only.
+- Share the log: the `link lookup` lines give lengths and yes/no only, never the URL.
+
+**Result:**
+
 ### Oversize window
 
 - Resize a normal (not full-screen) iTerm2 window to fill the largest display and record the
