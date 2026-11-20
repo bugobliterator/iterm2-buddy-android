@@ -3,7 +3,8 @@ name: Real iTerm2
 # Runs the app's own CompanionClient, as the phone, against a real iTerm2 3.7.7 on a macOS
 # runner, through a local relay behind TLS: pairing, the session tree, typing into a session, its
 # live HEVC stream, Claude Code's status in the session subtitle, the bytes keys deliver (a
-# probe), and Agent Chat against a local fake model (no model key, no secret). See ci/real-iterm2/README.md.
+# probe), live-session latency (a report), and Agent Chat against a local fake model (no model
+# key, no secret). See ci/real-iterm2/README.md.
 #
 # Manual only: it is slow and depends on iterm2.com, so it never runs on every push to main.
 on:
@@ -186,6 +187,22 @@ jobs:
           mkdir -p "$kept"
           cp -R app/build/test-results/realIterm2Test "$kept/test-results" 2>/dev/null || true
           cp -R app/build/reports/tests/realIterm2Test "$kept/reports" 2>/dev/null || true
+
+      # The latency report (RealIterm2LatencyTest): ping round trips, key-to-first-frame times and
+      # the frames received while output scrolls, with the phone's relay socket TCP_NODELAY on and
+      # then off. It reports in the log (latency: lines) and fails only when a round could not
+      # connect or stream. The relay is on localhost here, so network effects are small.
+      - name: Measure live-session latency
+        if: success() || failure()
+        continue-on-error: true
+        timeout-minutes: 8
+        env:
+          REAL_ITERM2: '1'
+          REAL_ITERM2_PAIRING_FILE: ${{ runner.temp }}/real-iterm2/pairing.env
+          REAL_ITERM2_RELAY_URL: ws://127.0.0.1:8787/
+          REAL_ITERM2_CONNECT_TIMEOUT_SECONDS: '180'
+          REAL_ITERM2_REQUEST_TIMEOUT_SECONDS: '30'
+        run: ./gradlew realIterm2Test --tests '*.RealIterm2LatencyTest'
 
       # Stage 3 (RealIterm2AgentChatTest), last and in its own step: an Agent Chat turn can leave
       # iTerm2's main thread blocked, which must not fail stages 1 and 2. It creates an
