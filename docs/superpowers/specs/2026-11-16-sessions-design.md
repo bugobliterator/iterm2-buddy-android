@@ -331,7 +331,10 @@ Stream state is keyed by `(linkId, streamID)`: stream IDs restart at 1 on every 
 ### Decode loop (held last frame)
 
 - Choose the decoder: hardware HEVC first, preferring one with `FEATURE_LowLatency`; configure with
-  `KEY_LOW_LATENCY = 1` when supported and `KEY_PRIORITY = 0` (real time).
+  `KEY_LOW_LATENCY = 1` (whether or not advertised), the vendor's low-latency keys (Exynos,
+  Qualcomm, MediaTek) and `KEY_PRIORITY = 0` (real time); a decoder that rejects that format is
+  configured once more with the earlier one (`KEY_LOW_LATENCY` only when advertised) and
+  remembered for the process (`DecoderFormat.kt`).
 - Async MediaCodec on its own `HandlerThread`. Input: access units in order; a frame waits only for a
   free input buffer. Output: `releaseOutputBuffer(index, render = true)` at once; no PTS scheduling.
 - **No idle drain, as iOS.** The last frame of a burst is expected out promptly from the
