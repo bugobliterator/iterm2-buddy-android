@@ -97,10 +97,16 @@ internal fun followBase(kept: KeptZoom, geometry: GestureGeometry): KeptZoom {
  * What is shown: [kept] at its base ([followBase]), moved with the document from its history height
  * to the current one ([followDocument]; normally [rebaseKept] has done that already), then lifted
  * from its inset to [inset] ([liftForKeyboard]), clamped for [geometry].
+ *
+ * A browser page at its fill base is not lifted: the keyboard covers its bottom and the page stays
+ * where it was, because lifting it would push the page's top (often where the field being typed in
+ * is) off the screen. With the keyboard up the page is taller than what is left visible, so a
+ * vertical drag first pans to its bottom ([browserGestureStep]); with the keyboard gone the clamp
+ * puts it back at the base exactly.
  */
 internal fun shownZoom(keptZoom: KeptZoom, geometry: GestureGeometry, inset: Float): ZoomState {
     val kept = followBase(keptZoom, geometry)
-    val keptInset = kept.inset ?: geometry.restBottom
+    val keptInset = if (kept.atBase && geometry.base != null) inset else kept.inset ?: geometry.restBottom
     val keptHistory = kept.history ?: geometry.history
     val followed = if (keptHistory == geometry.history) {
         kept.state
@@ -152,10 +158,10 @@ internal fun gestureStep(
     val latched = multiTouch || pointers > 1
     if (wheel != null && !latched) {
         val drag = wheelDrag(shown, panX, panY, g.docFit, g.viewW, g.viewH, inset, g.top, g.left, g.right)
-        return GestureStep(KeptZoom(drag.state, inset, g.history), wheel.drag(drag.pastEdgeY), latched)
+        return GestureStep(keptAfter(drag.state, inset, g), wheel.drag(drag.pastEdgeY), latched)
     }
     val next = applyGesture(shown, centroidX, centroidY, zoom, panX, panY, g.docFit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right)
-    return GestureStep(KeptZoom(next, inset, g.history), emptyList(), latched)
+    return GestureStep(keptAfter(next, inset, g), emptyList(), latched)
 }
 
 /**
@@ -213,6 +219,14 @@ internal fun browserGestureStep(
  */
 internal fun browserFlings(scale: Float, sawPinch: Boolean, baseScale: Float = 1f): Boolean =
     !sawPinch && (scale <= BROWSER_FIT_SCALE || isAtBase(scale, baseScale))
+
+/**
+ * The release velocity a fling coasts with, as ([velocityX], [velocityY]) view px/s: all of it at
+ * fit, where a drag scrolls the page both ways; only the vertical part above fit (the fill base),
+ * where a horizontal drag pans the view and never scrolls the page sideways.
+ */
+internal fun browserFlingVelocity(velocityX: Float, velocityY: Float, scale: Float): Pair<Float, Float> =
+    (if (scale <= BROWSER_FIT_SCALE) velocityX else 0f) to velocityY
 
 /** Encoded-image pixels per view pixel at fit (`imageW / fit.width`); null without an image or a fit. */
 internal fun browserImagePxPerViewPx(imageW: Int, fit: FitRect): Float? {
