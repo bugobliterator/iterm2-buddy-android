@@ -152,13 +152,33 @@ class BrowserCanvasDeviceTest {
         assertTrue("deltaY sum $sum", sum >= 0.5 * 0.5 * canvas.height * fitDensity())
     }
 
+    /**
+     * A slow swipe from [fromY] to [toY] (fractions of the height) over [millis], with the driver's
+     * clock kept in step (40 ms per move), so its ticker flushes as it would in real time; the
+     * scrolls sent while the finger was still down.
+     */
+    private fun slowSwipe(fromY: Float, toY: Float, millis: Long): List<PhoneMessage.BrowserScroll> {
+        rule.onNodeWithTag(TAG).performTouchInput { down(Offset(width / 2f, height * fromY)) }
+        val moves = (millis / 40).toInt()
+        for (i in 1..moves) {
+            rule.onNodeWithTag(TAG).performTouchInput { moveTo(Offset(width / 2f, height * (fromY + (toY - fromY) * i / moves)), delayMillis = 40) }
+            rule.waitForIdle()
+            scheduler.advanceTimeBy(40)
+            scheduler.runCurrent()
+        }
+        val during = link.sent.filterIsInstance<PhoneMessage.BrowserScroll>()
+        rule.onNodeWithTag(TAG).performTouchInput { up() }
+        return during
+    }
+
     @Test
     fun aSlowSwipeStillScrolls() {
         show(fill = false)
-        swipe(0.5f, 0.6f, 0.5f, 0.4f, 3_000)
-        val scrolls = scrolls()
-        val sum = scrolls.sumOf { it.deltaY }
-        assertTrue("${scrolls.size} scrolls, deltaY sum $sum", scrolls.size >= 5 && sum <= -0.5 * 0.2 * canvas.height * fitDensity())
+        // About 40 dp/s: the page follows the finger step by step, and the release is too slow to coast.
+        val during = slowSwipe(0.6f, 0.4f, 3_000)
+        val sum = scrolls().sumOf { it.deltaY }
+        assertTrue("${during.size} scrolls while dragging", during.size >= 5 && during.all { it.deltaY <= 0.0 })
+        assertTrue("deltaY sum $sum", sum <= -0.5 * 0.2 * canvas.height * fitDensity())
     }
 
     @Test

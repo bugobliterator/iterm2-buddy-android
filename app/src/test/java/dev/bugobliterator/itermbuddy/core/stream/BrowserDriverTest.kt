@@ -123,6 +123,31 @@ class BrowserDriverTest {
     }
 
     @Test
+    fun aSlowDragScrollsStepByStepAndASlowReleaseDoesNotCoast() = runTest {
+        // The device report's slow swipe: about 40 dp/s on a 2.625 density screen (105 px/s, a
+        // pointer event every 16 ms), at 2 image px per view px. Before the shared curve its release
+        // coasted for over 2 s at 0.998/ms; now it is under Android's 50 dp/s minimum fling.
+        val rig = Rig(this)
+        repeat(180) {
+            rig.driver.scroll(0f, -1.68f, 2f, 1f, 100f, 50f)
+            advanceTimeBy(16.milliseconds)
+        }
+        runCurrent()
+        val during = rig.scrolls()
+        assertTrue("${during.size} steps while dragging", during.size >= 60 && during.all { it.deltaY < 0 })
+        assertEquals(-180 * 1.68 * 2, during.sumOf { it.deltaY }, 1.0)
+        rig.driver.fling(0f, -105f, 2f, 1f, 100f, 50f, densityPxPerDp = 2.625f)
+        advanceTimeBy(5_000.milliseconds)
+        assertTrue("no coast after a release slower than 50 dp/s", rig.scrolls().size - during.size <= 1)
+        // Just above the minimum it coasts briefly, in steps that only shrink.
+        rig.driver.fling(0f, -400f, 2f, 1f, 100f, 50f, densityPxPerDp = 2.625f)
+        val before = rig.scrolls().size
+        advanceTimeBy(5_000.milliseconds)
+        val coast = rig.scrolls().drop(before)
+        assertTrue("$coast", coast.isNotEmpty() && coast.all { it.deltaY < 0 })
+    }
+
+    @Test
     fun tapStopsAFlingAndCancelDropsTravel() = runTest {
         val rig = Rig(this)
         rig.driver.fling(0f, 3000f, 1f, 1f, 0f, 0f)
