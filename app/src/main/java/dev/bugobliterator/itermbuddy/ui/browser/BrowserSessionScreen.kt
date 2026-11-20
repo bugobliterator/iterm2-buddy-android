@@ -113,7 +113,9 @@ internal fun browserInputTarget(session: SessionSummary, live: LiveViewState, ac
 /**
  * The browser session view (iOS's `LiveSessionView` with `BrowserControlsBar`,
  * `IOS/Screens/SessionView.swift:789-1214`), always dark ([LiveSessionTheme]): the page's video
- * fit below the [BrowserBar] and zoomable to four view pixels per page pixel, the state's
+ * below the [BrowserBar], resting zoomed to fill the screen (iTerm2 does not resize a browser to
+ * the phone's shape; pinch out for the whole page) and zoomable to four view pixels per page pixel
+ * (or the fill, if more), the state's
  * overlay, and the keyboard. Opened and closed only through the navigator, as the live view; the
  * screen is kept on by the home while it shows. No Fit, selection or history tiles.
  *
@@ -121,9 +123,11 @@ internal fun browserInputTarget(session: SessionSummary, live: LiveViewState, ac
  *   while loading, and Go in the [AddressField] loads its trimmed text (the Mac opens a URL or
  *   searches) and leaves the field, which then shows the page's URL again. Disabled unless
  *   [browserInputTarget] gives a target.
- * - **Page** ([VideoCanvas] with the [BrowserDriver]): a tap clicks the page (no double-tap zoom);
- *   any tap stops a fling; a drag scrolls it and flings at fit; a pinch zooms locally; zoomed in, a drag pans and only
- *   vertical travel past the pan edge scrolls the page. Leaving cancels a scroll under way.
+ * - **Page** ([VideoCanvas] with the [BrowserDriver] and `fillPage`): a tap clicks the page (no
+ *   double-tap zoom); any tap stops a fling; at the fill view a horizontal drag pans to the cropped
+ *   sides and a vertical one scrolls the page, flinging on release; pinched out to fit, a drag
+ *   scrolls both ways and flings; zoomed further in, a drag pans and only vertical travel past the
+ *   pan edge scrolls the page. Leaving cancels a scroll under way.
  * - **Keyboard**: typed keys go as `sendKey` to the page through the app's one ordered input
  *   sender, after any tap before them. It rises when the page reports editing and falls when that
  *   ends ([BrowserKeyboardRule]; again after a reconnect, never while the address field has
@@ -281,6 +285,7 @@ private fun BrowserSessionContent(
             rightInset = rightInset.toFloat(),
             doubleTapZoom = false,
             browser = browser.takeIf { offersInput },
+            fillPage = true,
         )
         Box(
             modifier = Modifier

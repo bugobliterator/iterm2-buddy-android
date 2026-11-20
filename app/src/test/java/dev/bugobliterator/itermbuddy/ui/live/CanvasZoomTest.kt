@@ -304,6 +304,118 @@ class CanvasZoomTest {
         assertNull(browserScrollPoint(0f, 0f, ZoomState.FIT, FitRect.EMPTY, 2000, 1000))
     }
 
+    /*
+     * Fill the screen: the same page (2000×1000 image, fit at (0, 100, 1000, 500) under the 100 px
+     * bar of a 1000×700 view) rests covering the 1000×600 visible area: scale 1.2, 1200 px wide
+     * centred (offset x −100, 100 px cropped each side), its top on the bar (offset y −20).
+     */
+    private val fill = browserFillZoom(pageFit, 1000f, 700f, topInset = 100f, bottomInset = 0f)!!
+    private val filled = GestureGeometry(pageFit, 1000f, 700f, 4f, 100f, 0f, 0f, 0f, 0f, fill)
+
+    private fun fillDrag(kept: KeptZoom, panX: Float, panY: Float, zoom: Float = 1f, pointers: Int = 1, sawPinch: Boolean = false) =
+        browserGestureStep(kept, filled, 0f, 500f, 400f, panX, panY, zoom, pointers, sawPinch)
+
+    @Test
+    fun fillCoversTheVisibleAreaWithNoBand() {
+        assertEquals(1.2f, fill.scale, eps)
+        assertEquals(-100f, fill.offsetX, eps)
+        assertEquals(-20f, fill.offsetY, eps)
+        // The page's edges on screen: the height fills top bar to bottom, the sides are cropped evenly.
+        assertEquals(100f, fill.offsetY + fill.scale * pageFit.top, eps)
+        assertEquals(700f, fill.offsetY + fill.scale * (pageFit.top + pageFit.height), eps)
+        assertEquals(-100f, fill.offsetX + fill.scale * pageFit.left, eps)
+        assertEquals(1100f, fill.offsetX + fill.scale * (pageFit.left + pageFit.width), eps)
+        // A page relatively taller than the area fills its width instead, top-aligned under the bar.
+        val tallFit = visibleFitRect(500, 1000, 1000f, 700f, topInset = 100f, bottomInset = 0f)
+        val tall = browserFillZoom(tallFit, 1000f, 700f, topInset = 100f, bottomInset = 0f)!!
+        assertEquals(1000f / 300f, tall.scale, eps)
+        assertEquals(0f, tall.offsetX + tall.scale * tallFit.left, eps)
+        assertEquals(1000f, tall.offsetX + tall.scale * (tallFit.left + tallFit.width), eps)
+        assertEquals(100f, tall.offsetY + tall.scale * tallFit.top, eps)
+        // A page of the area's own shape is already filled at fit; nothing to fill without a page.
+        val sameShape = visibleFitRect(2000, 1200, 1000f, 700f, topInset = 100f, bottomInset = 0f)
+        assertEquals(ZoomState.FIT, browserFillZoom(sameShape, 1000f, 700f, topInset = 100f, bottomInset = 0f))
+        assertNull(browserFillZoom(FitRect.EMPTY, 1000f, 700f, 100f, 0f))
+        assertNull(browserFillZoom(pageFit, 1000f, 100f, topInset = 100f, bottomInset = 0f))
+    }
+
+    @Test
+    fun aPageFirstShowsAtTheFillAndFollowsItsChanges() {
+        val first = KeptZoom(ZoomState.FIT, null, atBase = true)
+        assertEquals(fill, shownZoom(first, filled, 0f))
+        // A rotation, or the bar measured: the base changes and a kept zoom at the base follows it.
+        val landscapeFit = visibleFitRect(2000, 1000, 1600f, 500f, topInset = 100f, bottomInset = 0f)
+        val landscapeFill = browserFillZoom(landscapeFit, 1600f, 500f, topInset = 100f, bottomInset = 0f)!!
+        val landscape = GestureGeometry(landscapeFit, 1600f, 500f, 4f, 100f, 0f, 0f, 0f, 0f, landscapeFill)
+        val panned = fillDrag(first, 40f, 0f).kept
+        assertTrue(panned.atBase)
+        assertEquals(landscapeFill, shownZoom(panned, landscape, 0f))
+        // A zoom the owner chose (pinched out to the whole page) is kept, as a terminal's.
+        val whole = KeptZoom(ZoomState.FIT, 0f)
+        assertEquals(ZoomState.FIT, shownZoom(whole, landscape, 0f))
+        // A terminal has no base: nothing changes for it.
+        assertEquals(ZoomState.FIT, shownZoom(KeptZoom(ZoomState.FIT, null, atBase = true), page, 0f))
+    }
+
+    @Test
+    fun atTheFillHorizontalDragsPanAndVerticalOnesScrollThePage() {
+        val start = KeptZoom(ZoomState.FIT, null, atBase = true)
+        val sideways = fillDrag(start, 60f, 0f)
+        assertEquals(-40f, sideways.kept.state.offsetX, eps)
+        assertEquals(0f, sideways.scrollX, eps)
+        assertEquals(0f, sideways.scrollY, eps)
+        assertTrue("still at the base", sideways.kept.atBase)
+        // Past the cropped side it stops; the page never scrolls sideways at the fill.
+        val edge = fillDrag(sideways.kept, 500f, 0f)
+        assertEquals(0f, edge.kept.state.offsetX, eps)
+        assertEquals(0f, edge.scrollX, eps)
+        // The height fits exactly: all vertical travel goes to the page, none to panning.
+        val up = fillDrag(start, 0f, -30f)
+        assertEquals(-30f, up.scrollY, eps)
+        assertEquals(fill.offsetY, up.kept.state.offsetY, eps)
+        val down = fillDrag(start, 5f, 25f)
+        assertEquals(25f, down.scrollY, eps)
+        assertEquals(-95f, down.kept.state.offsetX, eps)
+    }
+
+    @Test
+    fun pinchingOutFromTheFillReachesTheWholePage() {
+        val pinch = fillDrag(KeptZoom(ZoomState.FIT, null, atBase = true), 0f, 0f, zoom = 0.5f, pointers = 2)
+        assertEquals(ZoomState.FIT, pinch.kept.state)
+        assertFalse(pinch.kept.atBase)
+        // At fit a drag scrolls the page both ways, and a release flings there.
+        val drag = fillDrag(pinch.kept, 10f, -20f)
+        assertEquals(10f, drag.scrollX, eps)
+        assertEquals(-20f, drag.scrollY, eps)
+        // Pinching back in to exactly the fill scale is the base again.
+        val back = fillDrag(pinch.kept, 0f, 0f, zoom = 1.2f, pointers = 2)
+        assertTrue(back.kept.atBase)
+    }
+
+    @Test
+    fun flingsCoastAtTheFillAndAtFitOnly() {
+        assertTrue(browserFlings(1.2f, sawPinch = false, baseScale = 1.2f))
+        assertTrue(browserFlings(1.2011f, sawPinch = false, baseScale = 1.2f))
+        assertTrue(browserFlings(1f, sawPinch = false, baseScale = 1.2f))
+        assertFalse(browserFlings(1.1f, sawPinch = false, baseScale = 1.2f))
+        assertFalse(browserFlings(1.5f, sawPinch = false, baseScale = 1.2f))
+        assertFalse(browserFlings(1.2f, sawPinch = true, baseScale = 1.2f))
+    }
+
+    @Test
+    fun tapsAndScrollPointsMapThroughTheFill() {
+        // The screen's centre (500, 400) is the page's centre pixel.
+        val tap = browserTapPoint(500f, 400f, fill, pageFit, 2000, 1000)!!
+        assertEquals(1000f, tap.first, eps)
+        assertEquals(500f, tap.second, eps)
+        // The top-left of the visible area is 100 cropped view px in: image x 100 × 2 / 1.2.
+        val corner = browserTapPoint(0f, 100f, fill, pageFit, 2000, 1000)!!
+        assertEquals(2000f * 100f / 1200f, corner.first, 0.01f)
+        assertEquals(0f, corner.second, eps)
+        // Scroll density at the fill: 2 image px per fit view px over a zoom of 1.2.
+        assertEquals(2f / 1.2f, browserImagePxPerViewPx(2000, pageFit)!! / fill.scale, eps)
+    }
+
     @Test
     fun withoutADoubleTapWindowEveryTapIsImmediate() {
         // A browser has no double-tap zoom (iOS LiveCanvas has none): a click is sent at the lift.

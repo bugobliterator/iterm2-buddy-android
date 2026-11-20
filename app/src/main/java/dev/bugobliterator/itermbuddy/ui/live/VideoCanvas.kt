@@ -164,6 +164,15 @@ class LiveVideoSource(
  * down ([browserScrollPoint]); a pinch zooms locally, cancels the scroll and makes the rest of the
  * gesture zoom and pan only; a release at fit with no pinch flings ([browserFlings]) with the
  * finger's velocity. Leaving composition cancels any scroll or fling under way (iOS `tearDown`).
+ *
+ * **Fill** ([fillPage], a browser page). The page rests at [browserFillZoom], covering the visible
+ * area (the resting insets) with no band: a page wider than the screen fills its height, centred,
+ * its sides cropped. That is the base zoom: the first view, and the one a kept zoom left at the
+ * base follows when the base changes (rotation, the bars measured); a zoom the owner chose (pinched
+ * out to fit, or in) is kept and clamped, as a terminal's. At the base a horizontal drag pans to the
+ * sides and vertical travel scrolls the page ([browserGestureStep]), a release flings
+ * ([browserFlings]), and taps and scroll density use the zoom as shown. Pinching out reaches fit
+ * (the whole page). The zoom key resets as for a terminal (another session or image size).
  */
 @Composable
 fun VideoCanvas(
@@ -189,6 +198,7 @@ fun VideoCanvas(
     selectionHoldMillis: Long = SELECTION_HOLD_MILLIS,
     doubleTapZoom: Boolean = true,
     browser: BrowserDriver? = null,
+    fillPage: Boolean = false,
 ) {
     var canvas by remember { mutableStateOf(IntSize.Zero) }
     val viewW = canvas.width.toFloat()
@@ -200,15 +210,17 @@ fun VideoCanvas(
     val fit = if (image == null) FitRect.EMPTY else visibleFitRect(image.width, image.height, viewW, viewH, topInset, restBottomInset, leftInset, rightInset)
     // No image size yet: the surface fills the visible area, so the decoder has one at once.
     val surfaceRect = if (fit.isEmpty) FitRect(leftInset, topInset, viewW - leftInset - rightInset, viewH - topInset - restBottomInset) else fit
-    val max = maxScale(image?.width ?: 0, fit)
+    // A browser page rests filling the screen; it can always zoom at least that far.
+    val base = if (fillPage) browserFillZoom(fit, viewW, viewH, topInset, restBottomInset, leftInset, rightInset) else null
+    val max = maxOf(maxScale(image?.width ?: 0, fit), base?.scale ?: 1f)
     val history = if (fit.isEmpty || !historyHeightPx.isFinite()) 0f else maxOf(0f, historyHeightPx)
     // Read in the layer and the gesture handlers only (see bottomInset).
-    var kept by remember(zoomKey) { mutableStateOf(KeptZoom(ZoomState.FIT, null)) }
+    var kept by remember(zoomKey) { mutableStateOf(KeptZoom(ZoomState.FIT, null, atBase = fillPage)) }
     val visible by remember(source, sessionGuid) { source.visibility(sessionGuid) }
         .collectAsStateWithLifecycle(initialValue = source.visible(sessionGuid))
     val density = LocalDensity.current
     val currentOnTap by rememberUpdatedState(onTap)
-    val geometry by rememberUpdatedState(GestureGeometry(fit, viewW, viewH, max, topInset, restBottomInset, leftInset, rightInset, history))
+    val geometry by rememberUpdatedState(GestureGeometry(fit, viewW, viewH, max, topInset, restBottomInset, leftInset, rightInset, history, base))
     val currentInset by rememberUpdatedState(bottomInset)
     val wheel = remember(wheelStepPx) { wheelStepPx?.let { ScrollWheelAccumulator(it) } }
     val currentWheel by rememberUpdatedState(wheel)
@@ -277,7 +289,7 @@ fun VideoCanvas(
                             val g = geometry
                             val shown = shownZoom(kept, g, currentInset())
                             val density = browserImagePxPerViewPx(currentImage.width, g.fit)
-                            if (density != null && browserFlings(shown.scale, sawPinch)) {
+                            if (density != null && browserFlings(shown.scale, sawPinch, g.base?.scale ?: 1f)) {
                                 page.fling(velocity.x, velocity.y, density, shown.scale, at.first, at.second)
                             }
                         }
@@ -329,7 +341,7 @@ fun VideoCanvas(
                             } else {
                                 toggleZoom(shown, action.x, action.y, g.docFit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right)
                             }
-                            kept = KeptZoom(next, inset, g.history)
+                            kept = keptAfter(next, inset, g)
                         }
                         is PressAction.SelectBegin -> {
                             gestureSelect = currentOnSelect
