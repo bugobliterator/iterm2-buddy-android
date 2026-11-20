@@ -6,6 +6,7 @@ import dev.bugobliterator.itermbuddy.core.input.InputTarget
 import dev.bugobliterator.itermbuddy.core.input.Key
 import dev.bugobliterator.itermbuddy.core.input.KeyEvent
 import dev.bugobliterator.itermbuddy.core.input.KeyModifiers
+import dev.bugobliterator.itermbuddy.core.input.PASTED_KEYS
 import dev.bugobliterator.itermbuddy.core.input.SpecialKey
 import dev.bugobliterator.itermbuddy.realiterm2.RealIterm2Rig.Companion.failWith
 import dev.bugobliterator.itermbuddy.realiterm2.RealIterm2Rig.Companion.report
@@ -52,8 +53,15 @@ import org.junit.Test
  * most capture modes, every printable ASCII character and space ([ALL_ASCII]) under kitty flags
  * 5, and [CLAUDE_CHARS] in Claude Code; then `pasteText` of [PASTE] (slash, star). For Claude
  * Code, `/` is first sent alone on the empty prompt (to see the slash-command menu) by `sendKey`
- * and `pasteText`, and `*` by `pasteText`, each erased with Backspace; the run ends with Return,
- * then Ctrl-C twice. (A System Events key press baseline was tried and removed: on the runner it
+ * and `pasteText`, and `*` by `pasteText`, each erased with Backspace; then [WORKAROUND_TEXT]
+ * (`a/b*c+d=e`) is typed as one key event through a second [InputSender] with the app's "Send
+ * / * + = as paste" setting on (so `/ * + =` go as one-character pastes, the rest as keys), and
+ * the report says whether Claude drew the whole text and each of the four in place; it is erased
+ * with Backspace. The run ends with Return, then Ctrl-C twice.
+ *
+ * Before typing each probe command the test sends Ctrl-C, so the shell starts from an empty line
+ * whatever an earlier mode left on it. A capture program that exits before the test stops it (its
+ * own timeout) is reported: the keys sent after that reached the shell instead. (A System Events key press baseline was tried and removed: on the runner it
  * delivered nothing, with iTerm2 frontmost.)
  *
  * The report (stdout and `diagnostics/key-bytes-report.txt`) gives, per mode and character, the
@@ -95,8 +103,16 @@ class RealIterm2KeyBytesTest {
             isCurrent = { target -> target.linkId == rig.linkId.value && client.state.value is ClientState.Connected },
             log = { line -> senderLog += line },
         )
+        // The app's "Send / * + = as paste" setting on, for the Claude Code step that checks it.
+        val pastingSender = InputSender(
+            link = client,
+            scope = rig.scope,
+            isCurrent = { target -> target.linkId == rig.linkId.value && client.state.value is ClientState.Connected },
+            log = { line -> senderLog += line },
+            pasteKeys = { true },
+        )
         val target = InputTarget(linkId, watchEpoch = 0, sessionGuid = session.guid)
-        val probe = Probe(sender, target, "bash ${quoted(probeScript.path)} ${quoted(envFile.path)}")
+        val probe = Probe(sender, pastingSender, target, "bash ${quoted(probeScript.path)} ${quoted(envFile.path)}")
 
         line("Claude Code ${env["KEY_BYTES_CLAUDE_VERSION"] ?: "not installed"}; iTerm2 session ${session.guid}")
         reportInputSource()
@@ -127,9 +143,19 @@ class RealIterm2KeyBytesTest {
         val decodeKitty: Boolean = false,
     )
 
-    /** Types probe commands into the session and sends the probe keys, through the app's own sender. */
-    private class Probe(val sender: InputSender, val target: InputTarget, val command: String) {
-        fun type(arguments: String) = sender.typeThenReturn(target, "$command $arguments")
+    /**
+     * Types probe commands into the session and sends the probe keys, through the app's own
+     * sender; [pastingSender] has the "Send / * + = as paste" setting on.
+     */
+    private class Probe(val sender: InputSender, val pastingSender: InputSender, val target: InputTarget, val command: String) {
+        /** Ctrl-C first: an empty shell line (no leftover keys, no continuation prompt), then the command. */
+        suspend fun type(arguments: String) {
+            key("c", KeyModifiers(control = true))
+            delay(FRESH_LINE_GAP)
+            sender.typeThenReturn(target, "$command $arguments")
+        }
+
+        fun keyWithPasteSetting(text: String) = pastingSender.key(target, KeyEvent(Key.Text(text)))
         fun key(text: String, modifiers: KeyModifiers = KeyModifiers()) = sender.key(target, KeyEvent(Key.Text(text), modifiers))
         fun special(key: SpecialKey) = sender.key(target, KeyEvent(Key.Special(key)))
         fun paste(text: String) = sender.paste(target, text)
@@ -167,6 +193,7 @@ class RealIterm2KeyBytesTest {
         }
         if (mode.decodeKitty) line("  WRONG (${wrong.size} of ${mode.chars.size}): ${wrong.joinToString(" ").ifEmpty { "none" }}")
         line("  ${"/*".padEnd(LABEL_WIDTH)} pasteText ${captureArrival(capture) { probe.paste(PASTE) }.text}")
+        dir.resolve("exited").takeIf { it.isFile }?.let { line("  key-capture.mjs exited before the test stopped it (${tail(it)}): later keys went to the shell") }
         stopCapture(dir)
         return true
     }
@@ -247,6 +274,9 @@ class RealIterm2KeyBytesTest {
             claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE) }
             line("  ${"*".padEnd(LABEL_WIDTH)} pasteText ${claudeArrival(recording, "*") { probe.paste("*") }}")
             claudeArrival(recording, null) { probe.special(SpecialKey.BACKSPACE) }
+            line("  -- $WORKAROUND_TEXT as one key event, \"Send / * + = as paste\" on (the four pasted, the rest keys)")
+            line("  ${"".padEnd(LABEL_WIDTH)} ${claudeWorkaround(probe, recording)}")
+            claudeArrival(recording, null) { repeat(WORKAROUND_TEXT.length) { probe.special(SpecialKey.BACKSPACE) } }
             line("  -- one at a time into the prompt")
             for (char in CLAUDE_CHARS) {
                 line("  ${char.padEnd(LABEL_WIDTH)} sendKey   ${claudeArrival(recording, char) { probe.key(char) }}")
@@ -291,6 +321,36 @@ class RealIterm2KeyBytesTest {
             ""
         }
         return "$input | $shown$slashMenu"
+    }
+
+    /**
+     * Types [WORKAROUND_TEXT] with the paste setting on and returns what reached Claude Code's tty
+     * and what it drew: the whole text, and for each of `/ * + =` whether it was drawn between its
+     * neighbours (`a/b`), only somewhere, or not at all. Waits up to [CLAUDE_WORKAROUND_SETTLE]
+     * for the whole text to be drawn. A report, not an assertion.
+     */
+    private suspend fun claudeWorkaround(probe: Probe, recording: File): String {
+        val before = records(recording).size
+        val sentAt = System.nanoTime()
+        probe.keyWithPasteSetting(WORKAROUND_TEXT)
+        val whole = rig.poll(CLAUDE_WORKAROUND_SETTLE) {
+            WORKAROUND_TEXT.takeIf { it in screenText(records(recording).drop(before).output()) }
+        }
+        val waited = (System.nanoTime() - sentAt) / 1_000_000
+        delay(if (whole == null) CLAUDE_KEY_SETTLE else SETTLE)
+        val after = records(recording).drop(before)
+        val drawn = screenText(after.output())
+        val perChar = WORKAROUND_TEXT.withIndex().filter { (_, c) -> c in PASTED_KEYS }.joinToString(", ") { (i, c) ->
+            val context = WORKAROUND_TEXT.substring(i - 1, i + 2)
+            "$c " + when {
+                context in drawn -> "shown"
+                c in drawn -> "drawn but not as $context"
+                else -> "NOT shown"
+            }
+        }
+        val input = if (after.none { it.direction == 'i' }) "nothing arrived" else describe(after.input())
+        val shown = if (whole != null) "yes (within $waited ms)" else "NO (drew: ${drawn.takeLast(DRAWN_CHARS).ifEmpty { "nothing" }})"
+        return "$input | whole text shown: $shown; $perChar"
     }
 
     private suspend fun stopClaude(probe: Probe, dir: File) {
@@ -435,6 +495,7 @@ class RealIterm2KeyBytesTest {
     private companion object {
         const val REPORT_FILE = "key-bytes-report.txt"
         const val PASTE = "/*"
+        const val WORKAROUND_TEXT = "a/b*c+d=e"
         const val LABEL_WIDTH = 6
         const val RECORD_HEADER = 24
         const val HEADER_DUMP = 48
@@ -494,6 +555,8 @@ class RealIterm2KeyBytesTest {
         val SETTLE = 250.milliseconds
         val CLAUDE_SETTLE = 1.seconds
         val CLAUDE_KEY_SETTLE = 700.milliseconds
+        val CLAUDE_WORKAROUND_SETTLE = 5.seconds
+        val FRESH_LINE_GAP = 500.milliseconds
         val CLAUDE_RETURN_SETTLE = 3.seconds
         val CTRL_C_GAP = 500.milliseconds
         val STOP_TIMEOUT = 8.seconds
