@@ -74,9 +74,16 @@ iTerm2 3.7.7 places a `browserScroll`'s wheel event off by the browser window's 
 arrow and Page Up/Down keys instead. Move the iTerm2 browser window to the middle of the Mac's
 screen first.
 
-- Switch on: a slow drag scrolls the page a line or so at a time, a long drag or a fling by
-  pages, and the page stops soon after the finger lifts. A tap stops it. A horizontal drag still
-  pans at the fill.
+- Switch on: a slow drag scrolls the page a line or so at a time and keeps up with the finger
+  (the page moves as far as the finger, within half a line; not twice as far). Keys go out
+  evenly, not in bursts. A long drag or a fling goes by pages, then lines that thin out as it
+  slows, and the page stops soon after the finger lifts. A tap stops it, and so does putting the
+  finger down to flick back the other way: the page turns at once, with no Page Downs left over.
+  A horizontal drag still pans at the fill; at fit, a vertical swipe with a sideways wobble does
+  not scroll sideways.
+- Tap a text field and swipe straight away: the caret does not move (the swipe scrolls with
+  scroll events until the page has answered the tap).
+- Settings' summary says arrow keys go to the focused control and an inner panel may need a tap.
 - With a text field focused on the page (the keyboard up), a drag scrolls without moving the
   caret (it falls back to scroll events).
 - On a page that scrolls inside a panel, tap the panel first; then drags scroll it.
@@ -87,7 +94,9 @@ screen first.
 
 ### Scroll and fling (switch off)
 
-At fit, a drag scrolls the page and a fling coasts and slows. A tap stops the fling. Pinch in: no
+At fit, a drag scrolls the page and a fling coasts and slows smoothly, with the same feel as an
+Android list (and as a flick on a terminal's scrollback). A tap, or the finger coming down, stops
+the fling. Pinch in: no
 fling follows the pinch. Zoomed in past the fill, a horizontal drag only pans; a vertical drag
 pans, then scrolls the page once the view reaches its top or bottom edge. Leaving the view
 mid-fling stops it.

@@ -73,6 +73,15 @@ class ScrollbackControl {
     fun jumpToLive() {
         jumps++
     }
+
+    /** Bumped by [stopCoast]; the canvas stops a coasting fling on each change. */
+    internal var coastStops: Int by mutableIntStateOf(0)
+        private set
+
+    /** Stops a coasting fling (a key was typed). */
+    fun stopCoast() {
+        coastStops++
+    }
 }
 
 /**
@@ -102,6 +111,10 @@ class ScrollbackControl {
  * **Wheel.** With `altScreen && scrollWheelReporting` there is no history and a one-finger drag
  * sends notches through [onWheel] (see [VideoCanvas]), one step per displayed line (24 dp before
  * any layout).
+ *
+ * **Momentum.** A flick coasts (see [VideoCanvas]); the lines between the view and where a
+ * scrollback coast will rest are asked for at once ([prefetchLines]). [control]'s
+ * [ScrollbackControl.stopCoast] and a change of stream stop a coast.
  *
  * **Selection** ([onSelection] non-null, a terminal with cell geometry and the store's geometry
  * for it). A long press (see [VideoCanvas]) maps each phase's screen point to a terminal point
@@ -160,6 +173,8 @@ fun ScrollbackCanvas(
     val drawnSignal = holder.drawn.collectAsStateWithLifecycle()
     // What is shown, written per frame while scrolling and read only by the flow and the derived slots below.
     var view by remember { mutableStateOf<DocumentView?>(null) }
+    // Where a coasting fling will rest, while one coasts.
+    var coastTo by remember { mutableStateOf<DocumentView?>(null) }
     val currentLayout by rememberUpdatedState(layout)
     val currentTiles by rememberUpdatedState(tiles)
     val currentGeometry by rememberUpdatedState(geometry)
@@ -179,11 +194,13 @@ fun ScrollbackCanvas(
         }
     }
     LaunchedEffect(holder) {
-        snapshotFlow { currentLayout?.takeIf { it.historyLines > 0 }?.let { shown -> view?.let { wantedLines(shown, it) } } }
+        snapshotFlow {
+            currentLayout?.takeIf { it.historyLines > 0 }?.let { shown -> view?.let { wantedLines(shown, it) to prefetchLines(shown, it, coastTo) } }
+        }
             .combine(snapshotFlow { currentTiles to currentGeometry }) { wanted, (tiles, geometry) -> Triple(wanted, tiles, geometry) }
             .collect { (wanted, tiles, geometry) ->
-                if (wanted != null) store.want(wanted.first, wanted.last)
-                holder.update(tiles, geometry, wanted ?: LongRange.EMPTY)
+                if (wanted != null) store.want(wanted.second.first, wanted.second.last)
+                holder.update(tiles, geometry, wanted?.first ?: LongRange.EMPTY)
             }
     }
     LaunchedEffect(holder) {
@@ -225,6 +242,8 @@ fun ScrollbackCanvas(
         jumpToLive = control.jumps,
         wheelStepPx = wheelStep,
         onWheel = onWheel,
+        onCoastTarget = { coastTo = it },
+        stopCoast = { control.coastStops to currentTerminal?.streamID },
         onSelect = if (!selectable) {
             null
         } else {

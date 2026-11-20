@@ -117,7 +117,7 @@ Notes from that task:
   the page.
 - **Owner decision: "Drags send keys, via a switch", on by default.** Settings' "Scroll web pages
   with keys" (`ScrollKeysSetting`). While it is on and the page is not editing text,
-  `BrowserDriver` turns vertical drag and fling travel into arrows (40 CSS px a line) and
+  `BrowserDriver` turns vertical drag and fling travel into arrows (36 CSS px a line since run 21) and
   Page Up/Down (the view less 40 px), at most one every 120 ms, with at most two pages of backlog.
   Horizontal travel still goes as `browserScroll`.
 - **Calibration:** the real-Mac probe's `calibrate:` and `key drag` lines measure the step sizes
@@ -150,6 +150,38 @@ Notes from that task:
   screen for 1080×2200, landscape, and a split pane.
 - **Open:** the on-device check (Fit to phone in `docs/reports/live-session-on-device.md`), and
   the first real-Mac `fit:` lines.
+
+## Fluid scrolling (2026-11-20)
+
+- **Owner request:** more fluid, phone-like scrolling, in the scrollback, in full-screen apps and
+  on web pages.
+- **One decay:** `FlingCurve`/`FlingStepper` (`core/stream/FlingDecay.kt`), a pure port of
+  Android's spline fling (Compose's `splineBasedDecay`, `OverScroller`), at the screen's density,
+  tested once (`FlingDecayTest`). Releases under 50 dp/s do not coast; the canvas caps the speed
+  at the platform's maximum fling velocity.
+- **Scrollback and zoomed pans:** a one-finger release coasts frame by frame (`CanvasCoast`, run by
+  `VideoCanvas` with `withFrameMillis`), clamped as a drag is, so it stops at the history's top
+  and the live bottom with no bounce (no overscroll stretch). Any touch, a key typed
+  (`ScrollbackControl.stopCoast`, from the key translator), another stream, the wheel step
+  changing and ↓ Live stop it. `ScrollbackCanvas` asks the store for the lines up to where the
+  coast will rest (`prefetchLines`) as it starts.
+- **Wheel mode (vim, less, htop, Claude Code):** the coast feeds the same `ScrollWheelAccumulator`
+  (the drag's remainder carries into it), one `reportScrollWheel(lines = k)` per frame, at most 3
+  notches a frame and 120 a coast (`WheelCoastBudget`). The drag itself was already one message
+  per pointer event with the notch count. iOS has no wheel momentum (`SessionView.swift:2398-2448`).
+- **Browser:** the fling follows the same curve (scaled to image px), still flushed at 25 Hz (the
+  picture comes back as video at most at that rate and queued steps merge, so per-frame raw steps
+  would add messages, not smoothness). With keys: a line is 36 CSS px (run 21); arrows fire at
+  half a line and the signed overshoot is carried (clamped just inside half a line), pages fire at
+  a page less half a line, so a slow drag scrolls as far as the finger; a touch-down drops a
+  fling's keys, travel against owed keys drops them, each gesture locks to its dominant axis,
+  and after a tap drags use `browserScroll` until `browserEditingChanged` or 300 ms; keys go as
+  stream input and are withdrawn at dequeue if the page is editing by then.
+- **Tests:** unit (virtual time) and device: `CanvasMomentumDeviceTest`, new cases in
+  `BrowserCanvasDeviceTest`. The real-Mac probe adds a `slow key drag` line.
+- **Open:** the on-device checks (Flick the scrollback, Full-screen apps in
+  `history-and-selection-on-device.md`; Scroll with keys, Scroll and fling in
+  `browser-sessions-on-device.md`) and the first real-Mac `slow key drag` line.
 
 ## Plan deviations already ruled on
 

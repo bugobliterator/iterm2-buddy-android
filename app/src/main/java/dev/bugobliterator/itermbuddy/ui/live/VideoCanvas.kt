@@ -20,9 +20,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
@@ -46,6 +48,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.Velocity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.bugobliterator.itermbuddy.core.stream.BrowserDriver
+import dev.bugobliterator.itermbuddy.core.stream.FlingCurve
 import dev.bugobliterator.itermbuddy.core.stream.FitNotice
 import dev.bugobliterator.itermbuddy.core.stream.HistoryTileStore
 import dev.bugobliterator.itermbuddy.core.stream.LatencyMeter
@@ -55,11 +58,14 @@ import dev.bugobliterator.itermbuddy.core.stream.SelectionDriver
 import dev.bugobliterator.itermbuddy.core.wire.SelectionPhase
 import dev.bugobliterator.itermbuddy.ui.settings.decoderRowText
 import dev.bugobliterator.itermbuddy.video.HevcVideoOutput
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -178,6 +184,15 @@ class LiveVideoSource(
  * only ([browserFlings], [browserFlingVelocity]), the keyboard covers the page's bottom without
  * lifting it ([shownZoom]), and taps and scroll density use the zoom as shown. Pinching out reaches fit
  * (the whole page). The zoom key resets as for a terminal (another session or image size).
+ *
+ * **Momentum** (a terminal: no [browser]). A one-finger drag released fast enough coasts with
+ * Android's fling decay ([CanvasCoast], [FlingCurve]), one step per frame: the history and a
+ * zoomed picture pan on and stop at the top or the live bottom without a bounce, and in wheel
+ * mode the coast keeps sending decaying notches through [onWheel] (one count per frame, capped).
+ * [onCoastTarget] hears where a scrollback coast will rest (null when it ends), so its tiles are
+ * fetched ahead. Any touch stops it, as do a change of the zoom key, of what [stopCoast] reads
+ * (snapshot state, read outside composition: a key typed, another stream), of the wheel step, and
+ * [jumpToLive]. A browser page coasts in its driver.
  */
 @Composable
 fun VideoCanvas(
@@ -204,6 +219,8 @@ fun VideoCanvas(
     doubleTapZoom: Boolean = true,
     browser: BrowserDriver? = null,
     fillPage: Boolean = false,
+    onCoastTarget: (DocumentView?) -> Unit = {},
+    stopCoast: () -> Any? = { null },
 ) {
     var canvas by remember { mutableStateOf(IntSize.Zero) }
     val viewW = canvas.width.toFloat()
@@ -236,6 +253,35 @@ fun VideoCanvas(
     val currentImage by rememberUpdatedState(IntSize(maxOf(0, imageWidth), maxOf(0, imageHeight)))
     DisposableEffect(browser) {
         onDispose { browser?.cancelScroll() }
+    }
+    // Momentum (see the KDoc): the coast under way, run per frame on the UI thread.
+    val coastScope = rememberCoroutineScope()
+    val coastJob = remember { arrayOfNulls<Job>(1) }
+    val currentOnCoastTarget by rememberUpdatedState(onCoastTarget)
+    val stopCoasting = remember { { coastJob[0]?.cancel(); coastJob[0] = null } }
+    DisposableEffect(zoomKey, wheel, jumpToLive) {
+        onDispose { stopCoasting() }
+    }
+    val currentStopCoast by rememberUpdatedState(stopCoast)
+    LaunchedEffect(zoomKey) {
+        // Read outside composition, so a key typed does not recompose the canvas.
+        snapshotFlow { currentStopCoast() }.drop(1).collect { stopCoasting() }
+    }
+    val startCoast = { coast: CanvasCoast ->
+        stopCoasting()
+        currentOnCoastTarget(coast.target(kept, geometry, currentInset()))
+        coastJob[0] = coastScope.launch {
+            try {
+                coast.start(withFrameMillis { it })
+                do {
+                    val frame = coast.step(kept, geometry, currentInset(), withFrameMillis { it })
+                    kept = frame.kept
+                    if (frame.notches > 0) currentOnWheel(frame.up, frame.notches)
+                } while (!frame.finished)
+            } finally {
+                currentOnCoastTarget(null)
+            }
+        }
     }
     LaunchedEffect(zoomKey) {
         snapshotFlow {
@@ -275,6 +321,10 @@ fun VideoCanvas(
                 var sawPinch = false
                 var scrollAt: Pair<Float, Float>? = null
                 detectZoomPan(
+                    onDown = {
+                        stopCoasting()
+                        currentBrowser?.touchDown()
+                    },
                     onStart = { down ->
                         multiTouch = false
                         sawPinch = false
@@ -287,7 +337,13 @@ fun VideoCanvas(
                         }
                     },
                     onEnd = { velocity, completed ->
-                        currentWheel?.reset()
+                        val coast = if (pageGesture || !completed || multiTouch) {
+                            null
+                        } else {
+                            CanvasCoast.of(velocity.x, velocity.y, density.density, viewConfiguration.maximumFlingVelocity, currentWheel)
+                        }
+                        // A coast carries the wheel's remainder on; otherwise it is dropped.
+                        if (coast == null) currentWheel?.reset() else startCoast(coast)
                         val page = currentBrowser
                         val at = scrollAt
                         if (pageGesture && completed && page != null && at != null) {
@@ -296,7 +352,7 @@ fun VideoCanvas(
                             val density = browserImagePxPerViewPx(currentImage.width, g.fit)
                             if (density != null && browserFlings(shown.scale, sawPinch, g.base?.scale ?: 1f)) {
                                 val (flingX, flingY) = browserFlingVelocity(velocity.x, velocity.y, shown.scale)
-                                page.fling(flingX, flingY, density, shown.scale, at.first, at.second)
+                                page.fling(flingX, flingY, density, shown.scale, at.first, at.second, this@pointerInput.density)
                             }
                         }
                     },
@@ -483,10 +539,12 @@ internal suspend fun PointerInputScope.detectPresses(holdMillis: Long, doubleTap
 /**
  * Pinch and drag, as `detectTransformGestures` (touch slop, then centroid, pan and zoom per event,
  * no rotation), also giving how many pointers are down and when a gesture past the slop starts
- * (with where its first finger went down) and ends (the wheel's accumulator resets then), with the
- * first finger's velocity in px/s and whether it ended with every finger lifted (not cancelled).
+ * (with where its first finger went down) and ends (the wheel's accumulator resets then, unless
+ * it coasts), with the first finger's velocity in px/s and whether it ended with every finger
+ * lifted (not cancelled); [onDown] hears every first finger down (it stops a coast).
  */
 private suspend fun PointerInputScope.detectZoomPan(
+    onDown: () -> Unit,
     onStart: (down: Offset) -> Unit,
     onEnd: (velocity: Velocity, completed: Boolean) -> Unit,
     onGesture: (centroid: Offset, pan: Offset, zoom: Float, pointers: Int) -> Unit,
@@ -498,6 +556,7 @@ private suspend fun PointerInputScope.detectZoomPan(
         var completed = false
         val touchSlop = viewConfiguration.touchSlop
         val down = awaitFirstDown(requireUnconsumed = false)
+        onDown()
         val velocity = VelocityTracker()
         velocity.addPointerInputChange(down)
         try {

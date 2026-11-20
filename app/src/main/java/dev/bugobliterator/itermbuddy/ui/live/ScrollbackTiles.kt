@@ -29,6 +29,18 @@ fun wantedLines(layout: ScrollbackLayout, view: DocumentView): LongRange {
     return (first - viewport)..(last + viewport)
 }
 
+/**
+ * The lines to fetch while the view shows [view] and a fling is coasting to [coastTo] (null: none):
+ * [wantedLines] of both and everything between, which the coast will pass, so the tiles it will
+ * reach are asked for ahead of it rather than as it arrives.
+ */
+fun prefetchLines(layout: ScrollbackLayout, view: DocumentView, coastTo: DocumentView?): LongRange {
+    val now = wantedLines(layout, view)
+    if (coastTo == null) return now
+    val then = wantedLines(layout, coastTo)
+    return minOf(now.first, then.first)..maxOf(now.last, then.last)
+}
+
 /** The [slots] (50-line history slots) with a line in [view]'s span of [layout]. */
 internal fun visibleSlots(layout: ScrollbackLayout, view: DocumentView, slots: Collection<Long>): Set<Long> {
     val first = layout.absLineAt(minOf(view.topPx, view.bottomPx))
