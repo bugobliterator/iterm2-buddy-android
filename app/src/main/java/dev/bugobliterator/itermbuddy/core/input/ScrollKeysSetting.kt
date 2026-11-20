@@ -10,7 +10,8 @@ const val SCROLL_KEYS_TITLE = "Scroll web pages with keys"
 /** The Settings switch's summary for [ScrollKeysSetting]. */
 const val SCROLL_KEYS_SUMMARY =
     "iTerm2 misplaces scroll events when the browser window isn't at the screen's top-left. " +
-        "Keys scroll reliably, in coarser steps, and go to the focused part of the page."
+        "Keys scroll reliably, in coarser steps. Arrow keys go to the focused control, " +
+        "so to scroll an inner panel, tap it first."
 
 /** Where [ScrollKeysSetting] keeps the switch. */
 interface ScrollKeysStore : SwitchStore

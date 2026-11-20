@@ -26,6 +26,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.math.abs
 import kotlin.time.Duration.Companion.milliseconds
 
 /** The browser driver through a real [InputSender] against a [ScriptedStreamLink], in virtual time. */
@@ -107,14 +108,16 @@ class BrowserDriverTest {
     @Test
     fun flingCoastsAndStops() = runTest {
         val rig = Rig(this)
-        rig.driver.fling(0f, -3000f, imagePxPerViewPx = 1f, zoom = 1f, atX = 10f, atY = 20f)
+        rig.driver.fling(0f, -3000f, imagePxPerViewPx = 1f, zoom = 1f, atX = 10f, atY = 20f, densityPxPerDp = 1f)
         advanceTimeBy(3_000.milliseconds)
         runCurrent()
         val scrolls = rig.scrolls()
-        // About 2.3 s of coasting at 25 Hz: velocity added before each tick's decay, as iOS.
-        assertEquals(58, scrolls.size)
+        // The shared spline: 1309 px over 1246 ms, sent at 25 Hz in steps that shrink as it slows.
+        val curve = FlingCurve(3000f, 1f)
+        assertTrue("${scrolls.size} steps", scrolls.size in 20..33)
         assertTrue(scrolls.all { it.deltaY < 0 && it.deltaX == 0.0 && it.x == 10.0 && it.y == 20.0 })
-        assertTrue("total ${scrolls.sumOf { it.deltaY }}", scrolls.sumOf { it.deltaY } in -1545.0..-1540.0)
+        assertEquals(-curve.distancePx.toDouble(), scrolls.sumOf { it.deltaY }, 1.0)
+        assertTrue(scrolls.first().deltaY < 4 * scrolls.last().deltaY)
         advanceTimeBy(10_000.milliseconds)
         assertEquals(scrolls.size, rig.scrolls().size)
     }
@@ -373,8 +376,8 @@ class BrowserDriverTest {
     }
 
     /*
-     * Scrolling with keys: a 1000 px tall page at scale 2, so a line is 80 px and a page 920 px
-     * (1000 less a 40 CSS px overlap). Drags at 1 image px per view px.
+     * Scrolling with keys: a 1000 px tall page at scale 2, so a line is 72 px (36 CSS px) and a
+     * page 920 px (1000 less a 40 CSS px overlap). Drags at 1 image px per view px.
      */
     private fun keysRig(test: TestScope): Rig {
         val rig = Rig(test, scrollKeys = MutableStateFlow(true))
@@ -384,21 +387,51 @@ class BrowserDriverTest {
 
     private fun Rig.keys(): List<SpecialKey> = sent().mapNotNull { ((it as? PhoneMessage.SendKey)?.event?.key as? Key.Special)?.key }
 
+    /** How far [keys] scroll the keys rig's page, encoded px (positive: content down, as a drag's deltaY). */
+    private fun travelOf(keys: List<SpecialKey>): Double = keys.sumOf {
+        when (it) {
+            SpecialKey.UP -> 72.0
+            SpecialKey.DOWN -> -72.0
+            SpecialKey.PAGE_UP -> 920.0
+            SpecialKey.PAGE_DOWN -> -920.0
+            else -> 0.0
+        }
+    }
+
     @Test
     fun withKeysADragSendsArrowsNotScrolls() = runTest {
         val rig = keysRig(this)
-        // 50 px of content moving up: more than half a line, so one Down.
+        // 50 px of content moving up: more than half a line, so one Down (22 px ahead of the finger).
         rig.driver.scroll(0f, -50f, 1f, 1f, 10f, 20f)
         advanceTimeBy(1_000.milliseconds)
         assertEquals(listOf(SpecialKey.DOWN), rig.keys())
         assertTrue(rig.scrolls().isEmpty())
         assertEquals("sent to the page's session", listOf("guid-browser"), rig.sent().map { (it as PhoneMessage.SendKey).sessionGuid })
-        // Up the other way (10 px left over); 20 px more is still under half a line, so nothing.
-        rig.driver.scroll(0f, 90f, 1f, 1f, 10f, 20f)
+        // 10 px more the same way is paid out of the overshoot: nothing.
+        rig.driver.scroll(0f, -10f, 1f, 1f, 10f, 20f)
         advanceTimeBy(1_000.milliseconds)
-        rig.driver.scroll(0f, 20f, 1f, 1f, 10f, 20f)
+        assertEquals(listOf(SpecialKey.DOWN), rig.keys())
+        // 30 px back up: 42 px owed up, so one Up; the finger is 30 px down, the page 0, within half a line.
+        rig.driver.scroll(0f, 30f, 1f, 1f, 10f, 20f)
         advanceTimeBy(1_000.milliseconds)
         assertEquals(listOf(SpecialKey.DOWN, SpecialKey.UP), rig.keys())
+    }
+
+    @Test
+    fun withKeysASlowDragScrollsAsFarAsTheFinger() = runTest {
+        val rig = keysRig(this)
+        // 1500 px in 3 px steps every 16 ms (about 190 px/s: slower than the keys can go).
+        repeat(500) {
+            rig.driver.scroll(0f, -3f, 1f, 1f, 10f, 20f)
+            advanceTimeBy(16.milliseconds)
+            val behind = -3.0 * (it + 1) - travelOf(rig.keys())
+            assertTrue("after ${3 * (it + 1)} px the keys are ${-behind} px off", abs(behind) <= 36.0 + 3.0 * 8)
+        }
+        advanceTimeBy(2_000.milliseconds)
+        val keys = rig.keys()
+        assertTrue("$keys", keys.all { it == SpecialKey.DOWN })
+        // Within half a line of the finger, never twice as far (the old half-line floor sent 2x).
+        assertEquals(-1500.0, travelOf(keys), 36.0)
     }
 
     @Test
@@ -421,29 +454,146 @@ class BrowserDriverTest {
     }
 
     @Test
-    fun withKeysAFlingCoastsInKeysAndStops() = runTest {
+    fun withKeysAFlingCoastsInKeysThatThinOutAndStops() = runTest {
         val rig = keysRig(this)
-        rig.driver.fling(0f, -3000f, 1f, 1f, 10f, 20f)
-        advanceTimeBy(10_000.milliseconds)
+        rig.driver.fling(0f, -3000f, 1f, 1f, 10f, 20f, densityPxPerDp = 1f)
+        // When each key went out, sampled every tick.
+        val times = mutableListOf<Long>()
+        repeat(100) {
+            advanceTimeBy(40.milliseconds)
+            runCurrent()
+            while (times.size < rig.keys().size) times += currentTime
+        }
         val keys = rig.keys()
         assertTrue("$keys", keys.isNotEmpty() && keys.all { it == SpecialKey.PAGE_DOWN || it == SpecialKey.DOWN })
-        // About 1540 px of coasting: a page or two, then a few lines.
-        assertTrue("$keys", keys.count { it == SpecialKey.PAGE_DOWN } in 1..2)
+        // The curve's 1309 px, within half a line.
+        assertEquals(-FlingCurve(3000f, 1f).distancePx.toDouble(), travelOf(keys), 36.0)
+        // Evenly paced, never a burst: 120 ms apart while travel is owed, further apart (never closer) as it slows.
+        val gaps = times.zipWithNext { a, b -> b - a }
+        assertTrue("$gaps", gaps.all { it >= DEFAULT_KEY_INTERVAL_MILLIS })
+        assertTrue("$gaps", gaps.zipWithNext().all { (a, b) -> b >= a })
         advanceTimeBy(10_000.milliseconds)
         assertEquals(keys.size, rig.keys().size)
     }
 
     @Test
-    fun withKeysSidewaysTravelStillScrollsAndATapDropsTheBacklog() = runTest {
+    fun withKeysASidewaysGestureScrollsSidewaysAndAVerticalOneLocksToItsAxis() = runTest {
         val rig = keysRig(this)
-        rig.driver.scroll(-30f, -2000f, 1f, 1f, 10f, 20f)
+        // A sideways swipe locks to x: it scrolls sideways and sends no keys for its small dy.
+        rig.driver.touchDown()
+        rig.driver.scroll(-300f, 10f, 1f, 1f, 10f, 20f)
+        rig.driver.scroll(-300f, 60f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(1_000.milliseconds)
+        assertEquals(listOf(PhoneMessage.BrowserScroll(1, 10.0, 20.0, -600.0, 0.0)), rig.scrolls())
+        assertTrue(rig.keys().isEmpty())
+        // A vertical swipe with a sideways wobble: no misplaced sideways wheel event.
+        rig.driver.touchDown()
+        rig.driver.scroll(-3f, -100f, 1f, 1f, 10f, 20f)
+        rig.driver.scroll(-30f, -100f, 1f, 1f, 10f, 20f)
+        rig.driver.fling(-500f, -50f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(1_000.milliseconds)
+        assertEquals(1, rig.scrolls().size)
+        assertTrue(rig.keys().isNotEmpty())
+    }
+
+    @Test
+    fun withKeysATapDropsTheBacklog() = runTest {
+        val rig = keysRig(this)
+        rig.driver.scroll(0f, -2000f, 1f, 1f, 10f, 20f)
         advanceTimeBy(40.milliseconds)
         runCurrent()
-        assertEquals(listOf(PhoneMessage.BrowserScroll(1, 10.0, 20.0, -30.0, 0.0)), rig.scrolls())
         assertEquals(listOf(SpecialKey.PAGE_DOWN), rig.keys())
         rig.driver.tap(5.0, 5.0)
         advanceTimeBy(5_000.milliseconds)
         assertEquals("the second page was dropped", listOf(SpecialKey.PAGE_DOWN), rig.keys())
+    }
+
+    @Test
+    fun withKeysATouchDownStopsAFlingAndItsKeys() = runTest {
+        val rig = keysRig(this)
+        rig.driver.fling(0f, -8000f, 1f, 1f, 10f, 20f, densityPxPerDp = 1f)
+        advanceTimeBy(200.milliseconds)
+        runCurrent()
+        val before = rig.keys()
+        assertTrue(before.isNotEmpty())
+        // The finger comes down to flick back the other way: nothing more goes the old way.
+        rig.driver.touchDown()
+        rig.driver.scroll(0f, 200f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(5_000.milliseconds)
+        val after = rig.keys().drop(before.size)
+        assertTrue("after the touch: $after", after.isNotEmpty() && after.all { it == SpecialKey.UP || it == SpecialKey.PAGE_UP })
+        assertEquals(200.0, travelOf(after), 36.0)
+    }
+
+    @Test
+    fun withKeysATouchDownKeepsASmallRemainder() = runTest {
+        val rig = keysRig(this)
+        // 20 px: short of half a line, owed nothing; a new touch keeps it, so two slow strokes add up.
+        rig.driver.scroll(0f, -20f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(1_000.milliseconds)
+        rig.driver.touchDown()
+        rig.driver.scroll(0f, -20f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(1_000.milliseconds)
+        assertEquals(listOf(SpecialKey.DOWN), rig.keys())
+    }
+
+    @Test
+    fun afterATapDragsScrollRawUntilThePageAnswers() = runTest {
+        val rig = keysRig(this)
+        rig.driver.tap(500.0, 300.0)
+        // A swipe straight after the tap: raw scroll, not arrows into a field the tap may have focused.
+        rig.driver.touchDown()
+        rig.driver.scroll(0f, -100f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(80.milliseconds)
+        runCurrent()
+        assertEquals(listOf(PhoneMessage.BrowserScroll(1, 10.0, 20.0, 0.0, -100.0)), rig.scrolls())
+        assertTrue(rig.keys().isEmpty())
+        // The page says a field is editing: still raw.
+        rig.editing.value = true
+        runCurrent()
+        rig.driver.scroll(0f, -100f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(1_000.milliseconds)
+        assertEquals(2, rig.scrolls().size)
+        assertTrue(rig.keys().isEmpty())
+        // Tapped out of the field: keys at once, no wait.
+        rig.driver.tap(500.0, 900.0)
+        rig.editing.value = false
+        runCurrent()
+        rig.driver.touchDown()
+        rig.driver.scroll(0f, -100f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(40.milliseconds)
+        runCurrent()
+        assertEquals(listOf(SpecialKey.DOWN), rig.keys())
+        assertEquals(2, rig.scrolls().size)
+    }
+
+    @Test
+    fun afterATapThatChangesNothingKeysResumeAfterTheHold() = runTest {
+        val rig = keysRig(this)
+        rig.driver.tap(500.0, 300.0)
+        advanceTimeBy(DEFAULT_TAP_KEY_HOLD_MILLIS.milliseconds)
+        rig.driver.touchDown()
+        rig.driver.scroll(0f, -100f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(1_000.milliseconds)
+        assertEquals(listOf(SpecialKey.DOWN), rig.keys())
+        assertTrue(rig.scrolls().isEmpty())
+    }
+
+    @Test
+    fun aQueuedKeyIsWithdrawnWhenThePageStartsEditing() = runTest {
+        val rig = keysRig(this)
+        val gate = CompletableDeferred<Unit>()
+        rig.link.sendGate = gate
+        rig.driver.back()
+        runCurrent()
+        // A key queued behind the held back; then the page reports a field editing before it is sent.
+        rig.driver.scroll(0f, -100f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(40.milliseconds)
+        runCurrent()
+        rig.editing.value = true
+        gate.complete(Unit)
+        assertEquals(listOf(PhoneMessage.BrowserGoBack(1)), rig.sent())
+        assertTrue(rig.logs.any { it.contains("withdrew a scrolling key") && it.contains("editing") })
     }
 
     @Test

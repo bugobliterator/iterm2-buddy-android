@@ -13,17 +13,31 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 /** At most one scrolling key this often, so WebKit does not fold a burst of them into one step. */
 const val DEFAULT_KEY_INTERVAL_MILLIS = 120L
 
-/** WebKit's arrow-key step on macOS (`Scrollbar::pixelsPerLineStep`), CSS px. */
-const val DEFAULT_KEY_LINE_CSS_PX = 40.0
+/**
+ * How far one arrow key scrolls a page at the [DEFAULT_KEY_INTERVAL_MILLIS] cadence, CSS px:
+ * WebKit's line step is 40 px (`Scrollbar::pixelsPerLineStep`), but its animated key scroll is
+ * cut short by the next key. Real-Mac run 21: keys 120 ms apart moved 36 px each, 250 ms apart
+ * 39.8 px, and keys back to back coalesce.
+ */
+const val DEFAULT_KEY_LINE_CSS_PX = 36.0
 
-/** How much of the old view a Page Down keeps, CSS px (real-Mac run 19: 571 of a 611 px view). */
+/** How much of the old view a Page Down keeps, CSS px (real-Mac run 19: 571 of a 611 px view, kept in run 21). */
 const val DEFAULT_KEY_PAGE_OVERLAP_CSS_PX = 40.0
+
+/**
+ * After a tap, drags scroll with `browserScroll` rather than keys for this long, or until the
+ * page's editing state changes, so a swipe straight after tapping a text field never sends arrows
+ * into it (about one round trip for the Mac's `browserEditingChanged`).
+ */
+const val DEFAULT_TAP_KEY_HOLD_MILLIS = 300L
 
 /** The Mac revision that takes browser taps, scrolls and controls (upstream `browserInputRevision`). */
 const val BROWSER_INPUT_REVISION = 15
@@ -51,8 +65,14 @@ const val BROWSER_INPUT_REVISION = 15
  *   for a viewport), so a drag or fling scrolls whatever has focus on the page wherever iTerm2's
  *   window is (its wheel events land off by the window's origin on screen,
  *   `docs/reports/iterm2-companion-browser-scroll-offset.md`). A line is [keyLineCssPx] CSS px and a
- *   page the stream's height less [keyPageOverlapCssPx], at the config's scale. Horizontal travel
- *   still goes as `browserScroll` (no sideways keys). A tap or pinch drops the key backlog.
+ *   page the stream's height less [keyPageOverlapCssPx], at the config's scale. A key is queued as
+ *   stream input and withdrawn at dequeue if the page is editing by then. Horizontal travel still
+ *   goes as `browserScroll` (no sideways keys), but each gesture locks to its dominant axis (set
+ *   by its first travel, kept for its fling), so a vertical swipe's small sideways wobble sends no
+ *   misplaced wheel event. A tap or pinch drops the key backlog; so does a touch-down
+ *   ([touchDown]) while a fling or keys are still owed, and travel reversing owed keys.
+ * - **After a tap** drags use `browserScroll` for [tapKeyHoldMillis] or until [editing] changes,
+ *   whichever is first, so a swipe right after tapping a field does not send arrows into it.
  * - **Controls**: [back], [forward], [reload], [stop]; [load] trims the typed text (whitespace and
  *   newlines) and skips it when nothing is left (4706-4710), as `BrowserLoad` itself does not trim.
  * - **Ordered with typed keys.** Every message goes through [input], the one ordered path for
@@ -83,6 +103,7 @@ class BrowserDriver(
     private val keyIntervalMillis: Long = DEFAULT_KEY_INTERVAL_MILLIS,
     private val keyLineCssPx: Double = DEFAULT_KEY_LINE_CSS_PX,
     private val keyPageOverlapCssPx: Double = DEFAULT_KEY_PAGE_OVERLAP_CSS_PX,
+    private val tapKeyHoldMillis: Long = DEFAULT_TAP_KEY_HOLD_MILLIS,
     private val log: (String) -> Unit = {},
 ) {
     /** The stream input belongs to: its link, watch and session ([target]) and its stream ID. */
@@ -95,6 +116,14 @@ class BrowserDriver(
     /** When the last scrolling key went out; touched under [lock]. */
     private var lastKeyMillis = Long.MIN_VALUE / 2
 
+    /** Keys wait until then after a tap; touched under [lock]. */
+    private var keysHeldUntil = Long.MIN_VALUE
+
+    /** The gesture's axis while keys are on (null: not decided yet); touched under [lock]. */
+    private var axis: Axis? = null
+
+    private enum class Axis { X, Y }
+
     /** The stream [accumulator]'s travel belongs to; touched under [lock]. */
     private var scrollKey: StreamKey? = null
     private var ticker: Job? = null
@@ -106,11 +135,18 @@ class BrowserDriver(
     val inputActive: StateFlow<Boolean> = combine(active, macRevision) { stream, revision -> keyOf(stream, revision) != null }
         .stateIn(scope, SharingStarted.Eagerly, activeKey() != null)
 
-    /** Clicks the page at encoded-image pixel ([imageX], [imageY]); stops a fling. */
+    init {
+        // The page answered the tap (a field focused or left): keys need wait no longer.
+        scope.launch { editing.drop(1).collect { synchronized(lock) { keysHeldUntil = Long.MIN_VALUE } } }
+    }
+
+    /** Clicks the page at encoded-image pixel ([imageX], [imageY]); stops a fling and holds key scrolling briefly. */
     fun tap(imageX: Double, imageY: Double) {
         synchronized(lock) {
             accumulator.stopFling()
             keyScroll.cancel()
+            axis = null
+            keysHeldUntil = nowMillis() + tapKeyHoldMillis
         }
         if (!imageX.isFinite() || !imageY.isFinite()) return
         sendForActive { PhoneMessage.BrowserTap(it, imageX, imageY) }
@@ -124,16 +160,32 @@ class BrowserDriver(
     fun scroll(dxViewPx: Float, dyViewPx: Float, imagePxPerViewPx: Float, zoom: Float, atX: Float, atY: Float) {
         synchronized(lock) {
             if (!claimScroll()) return
-            accumulator.drag(dxViewPx, dyViewPx, imagePxPerViewPx, zoom, atX, atY)
+            val (dx, dy) = locked(dxViewPx, dyViewPx)
+            accumulator.drag(dx, dy, imagePxPerViewPx, zoom, atX, atY)
             startTicker()
+        }
+    }
+
+    /**
+     * A finger went down on the page: a fling stops (as touching a coasting list does), and keys
+     * still owed are dropped when it was coasting or a whole key is owed, so a reversal never
+     * keeps paging the old way; the next drag decides its own axis.
+     */
+    fun touchDown() {
+        synchronized(lock) {
+            val wasFlinging = accumulator.isFlinging
+            accumulator.stopFling()
+            val line = keySizes()?.first
+            if (wasFlinging || line == null || keyScroll.hasWork(line)) keyScroll.cancel()
+            axis = null
         }
     }
 
     /**
      * A release at ([velocityXViewPxPerSec], [velocityYViewPxPerSec]) view px/s over
      * encoded-image pixel ([atX], [atY]) coasts, with [imagePxPerViewPx] and [zoom] as in [scroll];
-     * see [BrowserScrollAccumulator.fling]. The caller flings only when it should coast (iOS: at
-     * zoom 1 and not after a pinch).
+     * see [BrowserScrollAccumulator.fling], on a screen of [densityPxPerDp] px per dp. The caller
+     * flings only when it should coast (iOS: at zoom 1 and not after a pinch).
      */
     fun fling(
         velocityXViewPxPerSec: Float,
@@ -142,12 +194,32 @@ class BrowserDriver(
         zoom: Float,
         atX: Float,
         atY: Float,
+        densityPxPerDp: Float = 1f,
     ) {
         synchronized(lock) {
             if (!claimScroll()) return
+            val (vx, vy) = locked(velocityXViewPxPerSec, velocityYViewPxPerSec)
             accumulator.at(atX, atY)
-            accumulator.fling(velocityXViewPxPerSec, velocityYViewPxPerSec, imagePxPerViewPx, zoom, nowMillis())
+            accumulator.fling(vx, vy, imagePxPerViewPx, zoom, nowMillis(), densityPxPerDp)
             startTicker()
+        }
+    }
+
+    /**
+     * ([dx], [dy]) with the gesture's minor axis dropped while keys may scroll (the switch on and
+     * the page not editing): the first travel of a gesture locks it to its dominant axis. Under [lock].
+     */
+    private fun locked(dx: Float, dy: Float): Pair<Float, Float> {
+        if (!scrollKeys() || editing.value) return dx to dy
+        val decided = axis ?: when {
+            !dx.isFinite() || !dy.isFinite() || (dx == 0f && dy == 0f) -> null
+            abs(dy) >= abs(dx) -> Axis.Y
+            else -> Axis.X
+        }.also { axis = it }
+        return when (decided) {
+            Axis.Y -> 0f to dy
+            Axis.X -> dx to 0f
+            null -> dx to dy
         }
     }
 
@@ -232,13 +304,13 @@ class BrowserDriver(
         } else {
             val (line, page) = sizes
             if (step != null) {
-                keyScroll.add(step.deltaY.toDouble(), page)
+                keyScroll.add(step.deltaY.toDouble(), line, page)
                 if (step.deltaX != 0) enqueue(key, PhoneMessage.BrowserScroll(key.streamID, step.x, step.y, step.deltaX.toDouble(), 0.0))
             }
             if (now - lastKeyMillis >= keyIntervalMillis) {
                 keyScroll.next(line, page)?.let { next ->
                     lastKeyMillis = now
-                    input.key(key.target, KeyEvent(Key.Special(next.special())), pasteKeys = false)
+                    enqueueKey(key, next)
                 }
             }
             if (keyScroll.hasWork(line)) return true
@@ -250,10 +322,11 @@ class BrowserDriver(
 
     /**
      * A key line and page in encoded px while drags scroll with keys ([scrollKeys], the page not
-     * editing text, a config with a height); null for `browserScroll`.
+     * editing text, no tap waiting for its answer, a config with a height); null for
+     * `browserScroll`. Under [lock].
      */
     private fun keySizes(): Pair<Double, Double>? {
-        if (!scrollKeys() || editing.value) return null
+        if (!scrollKeys() || editing.value || nowMillis() < keysHeldUntil) return null
         val config = active.value?.config ?: return null
         if (config.pixelHeight <= 0) return null
         val scale = config.scale.takeIf { it.isFinite() && it > 0 } ?: 1.0
@@ -271,6 +344,20 @@ class BrowserDriver(
     private fun sendForActive(message: (streamID: Long) -> PhoneMessage) {
         val key = activeKey() ?: return
         enqueue(key, message(key.streamID))
+    }
+
+    /**
+     * A scrolling key for the page, in order with everything else; withdrawn at dequeue when the
+     * stream is no longer active or the page is editing text by then (a tap focused a field).
+     */
+    private fun enqueueKey(key: StreamKey, scrollKey: ScrollKey) {
+        val message = PhoneMessage.SendKey(key.target.sessionGuid, KeyEvent(Key.Special(scrollKey.special())))
+        input.streamInput(key.target, message) {
+            val current = activeKey() == key
+            val editingNow = editing.value
+            if (!current || editingNow) log("withdrew a scrolling key for stream ${key.streamID}: ${if (current) "the page is editing" else "not active"}")
+            current && !editingNow
+        }
     }
 
     private fun enqueue(key: StreamKey, message: PhoneMessage) {

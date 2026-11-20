@@ -271,7 +271,11 @@ and drives it through the app's `BrowserDriver` and `InputSender`. Each step loa
 - **key drag**: right after **moved** (the window at (400, 300), where a raw scroll's wheel lands
   off target), the app's drag through `BrowserDriver` with "Scroll web pages with keys" on, on
   the document and on the inner-scroller page, first with no tap, then after a tap if nothing
-  moved. Then the window goes back to (0, 0).
+  moved.
+- **slow key drag**: at the same moved window, a slow phone drag (900 view px at about
+  190 view px/s) through the keys; the line reports the finger's travel in CSS px, the page's
+  scrollY change and their ratio (it should be close to 1: the keys follow the finger within half
+  a line), and the keydown count. Then the window goes back to (0, 0).
 - **calibrate**: one Down; five Downs at 0, 60, 120 and 250 ms gaps; Page Down once and three
   times 120 ms apart; Up; Page Up, each with the CSS px it moved. These set the key path's line
   size, page overlap and key interval (`DEFAULT_KEY_*` in `BrowserDriver.kt`).
