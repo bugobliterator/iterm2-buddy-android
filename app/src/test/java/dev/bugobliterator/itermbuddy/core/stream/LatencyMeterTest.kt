@@ -1,6 +1,7 @@
 package dev.bugobliterator.itermbuddy.core.stream
 
 import dev.bugobliterator.itermbuddy.core.CompanionRequestException
+import dev.bugobliterator.itermbuddy.core.relay.ArrivalStamping
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -22,7 +23,10 @@ import kotlin.time.Duration.Companion.seconds
 /** [LatencyMeter] in virtual time: its clock is the test scheduler's, in nanoseconds. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class LatencyMeterTest {
-    private fun TestScope.meter(window: Int = LatencyMeter.DEFAULT_WINDOW) = LatencyMeter(nowNanos = { nanos() }, window = window)
+    private val stamping = ArrivalStamping()
+
+    private fun TestScope.meter(window: Int = LatencyMeter.DEFAULT_WINDOW) =
+        LatencyMeter(nowNanos = { nanos() }, window = window, stamping = stamping)
 
     private fun TestScope.nanos(): Long = currentTime * MILLI
 
@@ -38,12 +42,15 @@ class LatencyMeterTest {
         meter.mediaSubmitted(nanos())
         assertEquals(LatencyStats(), meter.stats.value)
 
+        assertFalse(stamping.on)
         val job = measure(meter)
         runCurrent()
         assertTrue(meter.enabled)
+        assertTrue("relay arrivals are stamped while measuring", stamping.on)
         job.cancel()
         runCurrent()
         assertFalse(meter.enabled)
+        assertFalse(stamping.on)
     }
 
     @Test
@@ -161,7 +168,8 @@ class LatencyMeterTest {
     @Test
     fun framesPerSecondFallsToZeroAtTheNextPingOnceFramesStop() = runTest {
         val meter = meter()
-        backgroundScope.launch { meter.measure(interval = 2.seconds) { true } }
+        // The pings go unanswered (no stream): each attempt still updates the numbers.
+        backgroundScope.launch { meter.measure(interval = 2.seconds) { false } }
         runCurrent()
         repeat(5) {
             meter.mediaArrived(nanos())
@@ -171,6 +179,7 @@ class LatencyMeterTest {
         advanceTimeBy(2_000)
         runCurrent()
         assertEquals(0, meter.stats.value.framesPerSecond)
+        assertNull(meter.stats.value.pingLast)
     }
 
     @Test

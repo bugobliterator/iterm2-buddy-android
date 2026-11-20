@@ -2,6 +2,7 @@ package dev.bugobliterator.itermbuddy.core.input
 
 import dev.bugobliterator.itermbuddy.Fixtures
 import dev.bugobliterator.itermbuddy.core.CompanionRequestException
+import dev.bugobliterator.itermbuddy.core.relay.ArrivalStamping
 import dev.bugobliterator.itermbuddy.core.stream.ActiveStream
 import dev.bugobliterator.itermbuddy.core.stream.LatencyMeter
 import dev.bugobliterator.itermbuddy.core.stream.StreamLink
@@ -118,7 +119,7 @@ class InputSenderTest {
 
     @Test
     fun eachSentKeyIsTimedFromWhenItsSendReturned() = runTest {
-        val meter = LatencyMeter(nowNanos = { currentTime * 1_000_000 })
+        val meter = LatencyMeter(nowNanos = { currentTime * 1_000_000 }, stamping = ArrivalStamping())
         backgroundScope.launch { meter.measure { false } }
         val h = harness(latency = meter)
         // Each send takes 5 ms (handed to the socket at its end).

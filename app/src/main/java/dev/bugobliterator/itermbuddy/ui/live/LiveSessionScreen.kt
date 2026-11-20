@@ -78,7 +78,10 @@ import androidx.compose.ui.unit.constrainWidth
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.offset
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import dev.bugobliterator.itermbuddy.core.input.ImeTranslator
 import dev.bugobliterator.itermbuddy.core.input.InputTarget
 import dev.bugobliterator.itermbuddy.core.input.KeyEvent
@@ -839,7 +842,8 @@ internal fun actionLabel(action: OverlayAction): String = when (action) {
 
 /**
  * Debug builds: the decoder's counters and the latency numbers ([LatencyMeter]), collected only
- * while shown. While it shows, the meter records and pings every 2 s, off the main thread.
+ * while shown. While it shows and the screen is at least STARTED, the meter records and pings
+ * every 2 s, off the main thread; in the background it stops (no pings, no stamps).
  */
 @Composable
 internal fun VideoStatsOverlay(source: LiveVideoSource, modifier: Modifier) {
@@ -847,7 +851,12 @@ internal fun VideoStatsOverlay(source: LiveVideoSource, modifier: Modifier) {
     val meter = source.latency
     val latency = meter?.stats?.collectAsStateWithLifecycle()?.value
     if (meter != null) {
-        LaunchedEffect(meter) { withContext(Dispatchers.Default) { meter.measure(ping = source.ping) } }
+        val lifecycle = LocalLifecycleOwner.current.lifecycle
+        LaunchedEffect(meter, lifecycle) {
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                withContext(Dispatchers.Default) { meter.measure(ping = source.ping) }
+            }
+        }
     }
     Surface(modifier = modifier, color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), shape = MaterialTheme.shapes.small) {
         Text(

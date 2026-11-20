@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy.core.stream
 
+import dev.bugobliterator.itermbuddy.core.relay.ArrivalStamping
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import kotlinx.coroutines.CancellationException
@@ -20,7 +21,7 @@ import kotlin.time.Duration.Companion.seconds
  *   to the arrival of the first media frame of the active stream after it.
  * - [frameIntervalLast], [frameIntervalMedian]: between consecutive media frames' arrivals;
  *   [framesPerSecond] is how many arrived in the second before the latest update (each ping
- *   updates it too, so it falls to 0 once frames stop).
+ *   attempt, answered or not, updates it too, so it falls to 0 once frames stop).
  * - [receiveToSubmitLast], [receiveToSubmitMedian]: from a media frame's arrival from the relay
  *   to its submit to the decoder (the phone's own pipeline before the decoder).
  *
@@ -55,11 +56,14 @@ data class LatencyStats(
  * @param nowNanos a monotonic clock in nanoseconds; production `System::nanoTime`, the clock the
  *   relay queue stamps arrivals with.
  * @param window how many recent samples each median covers.
+ * @param stamping held while [measure] runs, so the relay queues stamp arrivals only then (the
+ *   process's by default).
  */
 class LatencyMeter(
     private val nowNanos: () -> Long = System::nanoTime,
     private val window: Int = DEFAULT_WINDOW,
     private val keyMatchWindow: Duration = 2.seconds,
+    private val stamping: ArrivalStamping = ArrivalStamping.PROCESS,
 ) {
     private val lock = Any()
     private val measuring = AtomicInteger()
@@ -124,10 +128,10 @@ class LatencyMeter(
         }
     }
 
-    /** One ping's round trip, measured by [measure]. */
-    private fun roundTrip(nanos: Long) {
+    /** One ping attempt by [measure]: its round trip when answered, null when not. Publishes either way. */
+    private fun pinged(roundTripNanos: Long?) {
         synchronized(lock) {
-            pings.add(nanos)
+            roundTripNanos?.let(pings::add)
             publish(nowNanos())
         }
     }
@@ -135,10 +139,12 @@ class LatencyMeter(
     /**
      * Records while it runs, until cancelled, and pings every [interval]: [ping] sends one and
      * returns whether a `pong` came back (false when there is nothing to ping, such as no live
-     * stream; a failure counts as false). Starting clears the numbers.
+     * stream; a failure counts as false). Starting clears the numbers. Every attempt publishes, so
+     * [LatencyStats.framesPerSecond] falls to 0 once frames stop. Holds [stamping] while it runs.
      */
     suspend fun measure(interval: Duration = DEFAULT_PING_INTERVAL, ping: suspend () -> Boolean) {
         if (measuring.getAndIncrement() == 0) reset()
+        stamping.acquire()
         try {
             while (true) {
                 val start = nowNanos()
@@ -149,10 +155,11 @@ class LatencyMeter(
                 } catch (_: Exception) {
                     false
                 }
-                if (answered) roundTrip(nowNanos() - start)
+                pinged(if (answered) nowNanos() - start else null)
                 delay(interval)
             }
         } finally {
+            stamping.release()
             measuring.decrementAndGet()
         }
     }

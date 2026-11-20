@@ -20,19 +20,35 @@ import java.util.concurrent.atomic.AtomicLong
  * [offer] never blocks, so OkHttp's single reader thread never stalls behind a slow consumer.
  * [incoming]'s select clauses are not supported: they could not release the budget.
  *
- * Each frame is stamped with [nanoTime] when it is offered; [lastReceivedAtNanos] is the stamp of
- * the frame the reader received last (the live diagnostics' receive-to-decoder time).
+ * While [stamping] is on, each frame is stamped with [nanoTime] when it is offered;
+ * [lastReceivedAtNanos] is the stamp of the frame the reader received last (the live diagnostics'
+ * receive-to-decoder time), [NO_ARRIVAL] for a frame offered while stamping was off. Off, an offer
+ * costs one volatile read and a counter.
  */
-internal class FrameQueue(private val maxQueuedBytes: Long, private val nanoTime: () -> Long = System::nanoTime) {
+internal class FrameQueue(
+    private val maxQueuedBytes: Long,
+    private val nanoTime: () -> Long = System::nanoTime,
+    private val stamping: ArrivalStamping = ArrivalStamping.PROCESS,
+) {
     private val frames = Channel<ByteArray>(Channel.UNLIMITED)
     private val queuedBytes = AtomicLong()
 
-    /** When each queued frame was offered, in queue order: pushed before its frame, polled as it is received. */
-    private val arrivals = ConcurrentLinkedQueue<Long>()
+    /** A stamped frame: the [sequence]th offered, at [atNanos]. */
+    private class Stamp(val sequence: Long, val atNanos: Long)
+
+    /** Stamps of queued frames, in queue order: pushed before their frame, matched by sequence as frames are received. */
+    private val arrivals = ConcurrentLinkedQueue<Stamp>()
+
+    /** Frames offered so far; the writer's only (offers are serialised). */
+    private var offered = 0L
+
+    /** Frames received so far; the reader's only. */
+    private var received = 0L
 
     /**
      * When the frame the reader received last was offered ([nanoTime]); [NO_ARRIVAL] before the
-     * first. Read it right after a receive, on the reader's side.
+     * first, and for a frame offered while [stamping] was off. Read it right after a receive, on
+     * the reader's side.
      */
     @Volatile
     var lastReceivedAtNanos: Long = NO_ARRIVAL
@@ -56,7 +72,8 @@ internal class FrameQueue(private val maxQueuedBytes: Long, private val nanoTime
             return false
         }
         queuedBytes.addAndGet(frame.size.toLong())
-        arrivals.add(nanoTime())
+        val sequence = offered++
+        if (stamping.on) arrivals.add(Stamp(sequence, nanoTime()))
         return frames.trySend(frame).isSuccess
     }
 
@@ -67,7 +84,19 @@ internal class FrameQueue(private val maxQueuedBytes: Long, private val nanoTime
 
     private fun release(frame: ByteArray) {
         queuedBytes.addAndGet(-frame.size.toLong())
-        arrivals.poll()?.let { lastReceivedAtNanos = it }
+        val sequence = received++
+        // Stamps of earlier frames are gone already; a later frame's stamp stays for it.
+        var stamp = arrivals.peek()
+        while (stamp != null && stamp.sequence < sequence) {
+            arrivals.poll()
+            stamp = arrivals.peek()
+        }
+        lastReceivedAtNanos = if (stamp != null && stamp.sequence == sequence) {
+            arrivals.poll()
+            stamp.atNanos
+        } else {
+            NO_ARRIVAL
+        }
     }
 
     private inner class Counted : ReceiveChannel<ByteArray> by frames {

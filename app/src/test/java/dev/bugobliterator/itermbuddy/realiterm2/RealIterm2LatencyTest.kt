@@ -4,6 +4,7 @@ import dev.bugobliterator.itermbuddy.core.CompanionClient
 import dev.bugobliterator.itermbuddy.core.input.Key
 import dev.bugobliterator.itermbuddy.core.input.KeyEvent
 import dev.bugobliterator.itermbuddy.core.input.KeyModifiers
+import dev.bugobliterator.itermbuddy.core.relay.ArrivalStamping
 import dev.bugobliterator.itermbuddy.core.stream.FakeVideoOutput
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.stream.MediaFrameException
@@ -54,7 +55,8 @@ import org.junit.Test
  *   rate and bitrate the Mac derives from the frame size (its own formulas, recomputed here: the
  *   wire does not carry them).
  *
- * Arrival times are the relay queue's stamps ([StreamInput.Media.receivedAtNanos]). The relay
+ * Arrival times are the relay queue's stamps ([StreamInput.Media.receivedAtNanos]), on for the test
+ * ([ArrivalStamping.PROCESS]). The relay
  * runs on the runner, on localhost, so the network adds almost nothing here: these numbers are
  * the Mac's and the phone's own share, and Nagle's effect is a lower bound of what a real link
  * shows. It reports and does not judge; it fails only when a round could not connect or stream.
@@ -68,19 +70,25 @@ class RealIterm2LatencyTest {
     fun reportsLiveSessionLatency() = runBlocking {
         val summaries = mutableListOf<String>()
         val failures = mutableListOf<String>()
-        for (noDelay in listOf(true, false)) {
-            val label = "TCP_NODELAY ${if (noDelay) "on" else "off"}"
-            line("=== round: phone relay socket $label ===")
-            try {
-                RealIterm2Rig(tcpNoDelay = noDelay).use { rig -> summaries += measureRound(rig, label) }
-            } catch (e: AssertionError) {
-                failures += "$label: ${e.message}"
-                line("round $label failed: ${e.message}")
-            } catch (e: Exception) {
-                // A request that failed or timed out: its class only (a message may quote what it carried).
-                failures += "$label: ${e.javaClass.simpleName}"
-                line("round $label failed: ${e.javaClass.simpleName}")
+        // The relay queue stamps arrivals only while someone measures (the overlay's meter in the app).
+        ArrivalStamping.PROCESS.acquire()
+        try {
+            for (noDelay in listOf(true, false)) {
+                val label = "TCP_NODELAY ${if (noDelay) "on" else "off"}"
+                line("=== round: phone relay socket $label ===")
+                try {
+                    RealIterm2Rig(tcpNoDelay = noDelay).use { rig -> summaries += measureRound(rig, label) }
+                } catch (e: AssertionError) {
+                    failures += "$label: ${e.message}"
+                    line("round $label failed: ${e.message}")
+                } catch (e: Exception) {
+                    // A request that failed or timed out: its class only (a message may quote what it carried).
+                    failures += "$label: ${e.javaClass.simpleName}"
+                    line("round $label failed: ${e.javaClass.simpleName}")
+                }
             }
+        } finally {
+            ArrivalStamping.PROCESS.release()
         }
         line("=== summary (relay on localhost: network effects are small here) ===")
         summaries.forEach { block -> block.lines().forEach(::line) }

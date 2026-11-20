@@ -7,6 +7,7 @@ import dev.bugobliterator.itermbuddy.core.CompanionClient
 import dev.bugobliterator.itermbuddy.core.noise.newStaticKeyPair
 import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
 import dev.bugobliterator.itermbuddy.core.pairing.roomName
+import dev.bugobliterator.itermbuddy.core.relay.ArrivalStamping
 import dev.bugobliterator.itermbuddy.core.relay.JoinSigner
 import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
@@ -94,9 +95,10 @@ class StreamControllerTest {
         clientTimeouts: ClientTimeouts = ClientTimeouts(),
         budgets: StreamBudgets = StreamBudgets(),
         latency: LatencyMeter? = null,
+        stamping: ArrivalStamping = ArrivalStamping(),
     ) {
         val store = InMemoryPairingStore()
-        val relay = FakeRelay(ORIGIN, nanoTime = { test.currentTime * NANOS_PER_MILLI })
+        val relay = FakeRelay(ORIGIN, nanoTime = { test.currentTime * NANOS_PER_MILLI }, stamping = stamping)
         val logs = CopyOnWriteArrayList<String>()
         val video = FakeVideoOutput { test.currentTime }
         val sink = CountingSink { test.currentTime }
@@ -1050,8 +1052,9 @@ class StreamControllerTest {
 
     @Test
     fun latencyMeterTimesTheActiveStreamsFramesFromTheirRelayArrival() = runTest {
-        val meter = LatencyMeter(nowNanos = { currentTime * NANOS_PER_MILLI })
-        val h = Harness(this, latency = meter)
+        val stamping = ArrivalStamping()
+        val meter = LatencyMeter(nowNanos = { currentTime * NANOS_PER_MILLI }, stamping = stamping)
+        val h = Harness(this, latency = meter, stamping = stamping)
         h.openLive()
         backgroundScope.launch { meter.measure { false } }
         runCurrent()
