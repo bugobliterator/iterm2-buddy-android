@@ -4,6 +4,7 @@ import dev.bugobliterator.itermbuddy.core.input.InputSender
 import dev.bugobliterator.itermbuddy.core.input.InputTarget
 import dev.bugobliterator.itermbuddy.core.input.Key
 import dev.bugobliterator.itermbuddy.core.input.KeyEvent
+import dev.bugobliterator.itermbuddy.core.input.SpecialKey
 import dev.bugobliterator.itermbuddy.core.input.isInputTarget
 import dev.bugobliterator.itermbuddy.core.wire.BrowserNavigationState
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
@@ -30,7 +31,7 @@ import kotlin.time.Duration.Companion.milliseconds
 /** The browser driver through a real [InputSender] against a [ScriptedStreamLink], in virtual time. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class BrowserDriverTest {
-    private class Rig(val test: TestScope, revision: Int = 15) {
+    private class Rig(val test: TestScope, revision: Int = 15, val scrollKeys: MutableStateFlow<Boolean> = MutableStateFlow(false)) {
         val link = ScriptedStreamLink()
         val active = MutableStateFlow<ActiveStream?>(browserStream(linkId = 1, streamID = 1))
         val editing = MutableStateFlow(false)
@@ -46,6 +47,7 @@ class BrowserDriverTest {
             macRevision = macRevision,
             scope = test.backgroundScope,
             nowMillis = { test.testScheduler.currentTime },
+            scrollKeys = { scrollKeys.value },
             log = { logs += it },
         )
 
@@ -368,6 +370,95 @@ class BrowserDriverTest {
         rig.driver.load("example")
         advanceTimeBy(1_000.milliseconds)
         runCurrent()
+    }
+
+    /*
+     * Scrolling with keys: a 1000 px tall page at scale 2, so a line is 80 px and a page 920 px
+     * (1000 less a 40 CSS px overlap). Drags at 1 image px per view px.
+     */
+    private fun keysRig(test: TestScope): Rig {
+        val rig = Rig(test, scrollKeys = MutableStateFlow(true))
+        rig.active.value = browserStream(1, 1).let { it.copy(config = it.config!!.copy(pixelHeight = 1000, scale = 2.0)) }
+        return rig
+    }
+
+    private fun Rig.keys(): List<SpecialKey> = sent().mapNotNull { ((it as? PhoneMessage.SendKey)?.event?.key as? Key.Special)?.key }
+
+    @Test
+    fun withKeysADragSendsArrowsNotScrolls() = runTest {
+        val rig = keysRig(this)
+        // 50 px of content moving up: more than half a line, so one Down.
+        rig.driver.scroll(0f, -50f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(1_000.milliseconds)
+        assertEquals(listOf(SpecialKey.DOWN), rig.keys())
+        assertTrue(rig.scrolls().isEmpty())
+        assertEquals("sent to the page's session", listOf("guid-browser"), rig.sent().map { (it as PhoneMessage.SendKey).sessionGuid })
+        // Up the other way (10 px left over); 20 px more is still under half a line, so nothing.
+        rig.driver.scroll(0f, 90f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(1_000.milliseconds)
+        rig.driver.scroll(0f, 20f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(1_000.milliseconds)
+        assertEquals(listOf(SpecialKey.DOWN, SpecialKey.UP), rig.keys())
+    }
+
+    @Test
+    fun withKeysALongDragPagesAtMostOneKeyPerInterval() = runTest {
+        val rig = keysRig(this)
+        // 2000 px down at once: capped at two pages, sent as two Page Downs 120 ms apart, and nothing after.
+        rig.driver.scroll(0f, -2000f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(40.milliseconds)
+        runCurrent()
+        assertEquals(listOf(SpecialKey.PAGE_DOWN), rig.keys())
+        advanceTimeBy(80.milliseconds)
+        runCurrent()
+        assertEquals("not before the interval", 1, rig.keys().size)
+        advanceTimeBy(40.milliseconds)
+        runCurrent()
+        assertEquals(listOf(SpecialKey.PAGE_DOWN, SpecialKey.PAGE_DOWN), rig.keys())
+        advanceTimeBy(5_000.milliseconds)
+        assertEquals(2, rig.keys().size)
+        assertTrue(rig.scrolls().isEmpty())
+    }
+
+    @Test
+    fun withKeysAFlingCoastsInKeysAndStops() = runTest {
+        val rig = keysRig(this)
+        rig.driver.fling(0f, -3000f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(10_000.milliseconds)
+        val keys = rig.keys()
+        assertTrue("$keys", keys.isNotEmpty() && keys.all { it == SpecialKey.PAGE_DOWN || it == SpecialKey.DOWN })
+        // About 1540 px of coasting: a page or two, then a few lines.
+        assertTrue("$keys", keys.count { it == SpecialKey.PAGE_DOWN } in 1..2)
+        advanceTimeBy(10_000.milliseconds)
+        assertEquals(keys.size, rig.keys().size)
+    }
+
+    @Test
+    fun withKeysSidewaysTravelStillScrollsAndATapDropsTheBacklog() = runTest {
+        val rig = keysRig(this)
+        rig.driver.scroll(-30f, -2000f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(40.milliseconds)
+        runCurrent()
+        assertEquals(listOf(PhoneMessage.BrowserScroll(1, 10.0, 20.0, -30.0, 0.0)), rig.scrolls())
+        assertEquals(listOf(SpecialKey.PAGE_DOWN), rig.keys())
+        rig.driver.tap(5.0, 5.0)
+        advanceTimeBy(5_000.milliseconds)
+        assertEquals("the second page was dropped", listOf(SpecialKey.PAGE_DOWN), rig.keys())
+    }
+
+    @Test
+    fun whileEditingOrSwitchedOffADragScrollsAsBefore() = runTest {
+        val rig = keysRig(this)
+        rig.editing.value = true
+        rig.driver.scroll(0f, -50f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(1_000.milliseconds)
+        assertEquals(listOf(PhoneMessage.BrowserScroll(1, 10.0, 20.0, 0.0, -50.0)), rig.scrolls())
+        rig.editing.value = false
+        rig.scrollKeys.value = false
+        rig.driver.scroll(0f, -50f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(1_000.milliseconds)
+        assertEquals(2, rig.scrolls().size)
+        assertTrue(rig.keys().isEmpty())
     }
 
     private companion object {

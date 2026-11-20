@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy.core.stream
 
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.pow
 import kotlin.math.truncate
@@ -128,5 +129,58 @@ class BrowserScrollAccumulator {
 
         /** The longest step one flush counts, as iOS caps its display-link step at 0.1 s. */
         const val MAX_STEP_MILLIS = 100L
+    }
+}
+
+/** A key that scrolls a browser page: an arrow (one line) or Page Up/Down (one viewport). */
+enum class ScrollKey { LINE_UP, LINE_DOWN, PAGE_UP, PAGE_DOWN }
+
+/**
+ * Vertical page travel in encoded-image pixels, handed over as scrolling keys, for iTerm2's
+ * misplaced wheel events (`docs/reports/iterm2-companion-browser-scroll-offset.md`): the key path
+ * scrolls whatever has focus on the page, wherever the window is.
+ *
+ * Travel uses the [ScrollStep] sign (positive moves the content down: the page scrolls up, so
+ * the keys go up). [next] hands over at most one key: Page Up/Down once at least half a page
+ * ([pagePx]) is pending, else an arrow once at least half a line ([linePx]) is; each takes its
+ * size off the pending travel but never past zero, so rounding never sends a key back the other
+ * way. The backlog is capped at [MAX_BACKLOG_PAGES] pages, so a long fling does not keep paging
+ * long after the finger has gone. Not thread-safe; the caller serialises calls.
+ */
+class KeyScrollAccumulator {
+    private var pending = 0.0
+
+    /** Adds [deltaPx] encoded px of vertical travel; [pagePx] bounds the backlog. */
+    fun add(deltaPx: Double, pagePx: Double) {
+        if (!deltaPx.isFinite()) return
+        val cap = if (pagePx.isFinite() && pagePx > 0) pagePx * MAX_BACKLOG_PAGES else Double.MAX_VALUE
+        pending = (pending + deltaPx).coerceIn(-cap, cap)
+    }
+
+    /** Whether a key is still owed for lines of [linePx]. */
+    fun hasWork(linePx: Double): Boolean = linePx > 0 && abs(pending) >= linePx / 2
+
+    /** The next key for lines of [linePx] and pages of [pagePx], or null when less than half a line is pending. */
+    fun next(linePx: Double, pagePx: Double): ScrollKey? {
+        if (!(linePx > 0) || !(pagePx > 0)) return null
+        val up = pending > 0
+        val size = abs(pending)
+        val (key, step) = when {
+            size >= pagePx / 2 -> (if (up) ScrollKey.PAGE_UP else ScrollKey.PAGE_DOWN) to pagePx
+            size >= linePx / 2 -> (if (up) ScrollKey.LINE_UP else ScrollKey.LINE_DOWN) to linePx
+            else -> return null
+        }
+        val left = maxOf(0.0, size - step)
+        pending = if (up) left else -left
+        return key
+    }
+
+    /** Drops the pending travel. */
+    fun cancel() {
+        pending = 0.0
+    }
+
+    private companion object {
+        const val MAX_BACKLOG_PAGES = 2.0
     }
 }
