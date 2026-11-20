@@ -192,6 +192,52 @@ Mac's and the phone's own share, and the `TCP_NODELAY` difference is a lower bou
 link shows. The report is `latency:` lines in the job log, ending with a summary per round. It
 prints numbers only.
 
+## The browser probe
+
+The owner's report: on a browser session (a local web app shown in iTerm2's built-in browser), a
+drag on the phone moves nothing while taps click. `RealIterm2BrowserTest` finds out on the real
+Mac what scrolls a page. It runs after the latency report, in its own step that continues on
+error.
+
+`install-browser-plugin.sh` sets it up before launch. iTerm2 3.7.7 offers browser profiles only
+when NSWorkspace finds its Browser Plugin (`com.googlecode.iterm2.iTermBrowserPlugin`) signed by
+team `H7V7XYVQ7D` (iTermBrowserGateway.swift); without it a browser Dynamic Profile is skipped
+(iTermDynamicProfileManager.m:563-565). The script reads the zip's link from
+`https://iterm2.com/browser-plugin.html` (the page iTerm2 offers), prints the zip's sha256 (not
+pinned), checks the app against iTerm2's own requirement
+(`anchor apple generic and certificate leaf[subject.OU] = "H7V7XYVQ7D"`), installs it in
+`~/Applications`, registers it and looks it up with NSWorkspace. Then it writes the Dynamic Profile
+`buddy-ci-browser`: `"Custom Command": "Browser"` and `"Initial URL": "http://127.0.0.1:8793/"`.
+
+The test serves its own synthetic page from the JVM on `127.0.0.1:8793`: a document 8000 CSS px
+tall, or one that scrolls in a full-window `overflow: auto` element instead (as many web apps
+do). Its script beacons back on load (viewport, devicePixelRatio), on every scroll, click (where
+WebKit placed it), wheel event (where WebKit placed it, its deltas and target) and keydown, and
+every 250 ms with its scroll offsets. The test types `it2 window new --profile buddy-ci-browser`
+into the first terminal session (the API's createTab by profile name), waits for a browser
+session in the session tree and the page's load, streams it through the app's `StreamController`
+and drives it through the app's `BrowserDriver` and `InputSender`. Each step loads a fresh page
+(`browserLoad`), so it starts at the top:
+
+- **tap**: `BrowserDriver.tap` at a known image pixel. The click proves the rig and gives the frame
+  scale (image px per CSS px).
+- **raw**: one `browserScroll` straight to the link, deltaY −300, then −1200, then +600 encoded px
+  (negative moves the content up, so the page scrolls down).
+- **drag**: `BrowserDriver.scroll` as a phone drag makes it (one event every 16 ms at a 1080 px
+  phone's fit density, flushed every 40 ms), then a fling.
+- **small**: 20 steps each of 1, 2, 3 and 4 px, for the Mac's rounding (iTerm2 divides by the
+  frame scale and rounds to whole points, dropping a step of 0).
+- **inner**: a raw scroll at the centre of the inner-scroller page.
+- **keys**: Page Down, Down ×5 and Space through `sendKey` (the browser key path), on both pages,
+  after a tap: the fallback if synthetic scrolls are dead.
+
+It prints `browser:` lines: the stream's size, scale and the Mac's revision; each step's deltas
+(and the points the Mac makes of them) with the page's scroll offset before and after; and the
+wheel events WebKit delivered, with where it placed the first against where the phone aimed. It
+ends with a summary. It fails when the rig broke (no browser session, no stream, a tap that
+clicks nothing) and when no raw `browserScroll` moved either page. At the end it closes the
+browser session with `it2 session close`.
+
 ## Stage 3: Agent Chat on a fake model
 
 iTerm2's AI runs on `fake-model.mjs`, a local OpenAI Chat Completions server (Node built-ins only)
@@ -257,10 +303,11 @@ what was typed.
 | Seed AI | `seed-ai.sh` | Writes the root-owned `EnableAI` secure setting and the AI defaults (`UseRecommendedAIModel` off, one `AIManualModelConfigurations` entry for the fake model, `AiModel` naming it, the token budget `AiMaxTokens`/`AiResponseMaxTokens`), answers iTerm2's one-time AI prompts (model catalog updates, automatic terminal sharing, the safety-check migration), and reads them back typed. |
 | Seed the status profile | `seed-claude-status.sh` | Installs the `buddy-ci-status` Dynamic Profile (Subtitle `\(status)`) and makes it the default, turns on `EnableAPIServer` and `SetCookie`, writes the root-owned `disable-automation-auth` file, and checks the bundled it2. It continues on error: a failure here fails only `RealIterm2ClaudeStatusTest`. |
 | Install Claude Code | `install-claude-code.sh` | Writes the key-bytes probe's `probe.env`, installs the pinned Claude Code with pnpm and seeds `~/.claude.json`. It runs after the status probe and continues on error: without Claude Code the probe still runs its capture modes. |
+| Install the browser plugin | `install-browser-plugin.sh` | Installs iTerm2's Browser Plugin (the zip linked from `iterm2.com/browser-plugin.html`, its sha256 printed, the app checked against iTerm2's team requirement, registered and looked up with NSWorkspace) and writes the `buddy-ci-browser` Dynamic Profile. It continues on error: a failure here fails only `RealIterm2BrowserTest`. |
 | Start the relay | `start-relay.sh` | Fetches the relay at `b8aa2f9` the way `scripts/relay-it.sh` does and makes a throwaway CA and a `localhost` certificate. It trusts the CA system-wide and starts the relay on `127.0.0.1:8787` (open mode, `RELAY_ORIGIN=https://localhost:8443`). Then it starts `tls-proxy.mjs` on `localhost:8443`. |
 | Start the fake model | `start-fake-model.sh` | Starts `fake-model.mjs` on `127.0.0.1:8790` and waits for `/health`. |
 | Launch iTerm2 | `launch-iterm2.sh` | Runs `open -a iTerm`, then waits for the relay to log `hello role=mac` (iTerm2 parked) and takes a screenshot. |
-| Test | `./gradlew realIterm2Test --tests …` | Runs stages 1 and 2, then, each in its own step that runs even when the ones before fail, the Claude Code status probe, the key-bytes probe and the latency report (both continue on error) and stage 3, so a main thread that Agent Chat leaves blocked cannot fail the others. The phone connects to the relay directly at `ws://127.0.0.1:8787/` and signs for `https://localhost:8443`. |
+| Test | `./gradlew realIterm2Test --tests …` | Runs stages 1 and 2, then, each in its own step that runs even when the ones before fail, the Claude Code status probe, the key-bytes probe, the latency report and the browser probe (the last three continue on error) and stage 3, so a main thread that Agent Chat leaves blocked cannot fail the others. The phone connects to the relay directly at `ws://127.0.0.1:8787/` and signs for `https://localhost:8443`. |
 | Diagnostics | `collect-diagnostics.sh` | Always runs. It collects screenshots, the relay, proxy and fake model logs, the companion and AI defaults, both secure settings, the status probe's defaults and files (the profile, `disable-automation-auth`, the API socket, it2), which seeded keychain items were migrated, both plugin lookups, the fake model's counts and captured request shape, iTerm2's unified log and crash reports. They are uploaded with the test reports as `real-iterm2-<run>-<attempt>`. |
 
 `dump-iterm2-state.sh <label>` prints, as text in the job log, what a screenshot would show:
@@ -311,6 +358,11 @@ never runs them. `RealIterm2Rig` holds the setup they share.
 - Actions: pinned by commit SHA, the same as `android-build.yml`.
 
 ## Known risks
+
+- **The browser probe.** It needs `iterm2.com/browser-plugin.html` to link the plugin's zip; if
+  the page changes, the setup step prints the links it found. A missing plugin drops the browser
+  profile, and the test's it2 stderr (`browser-it2-stderr.txt` in the diagnostics) then names an
+  invalid profile name. The page server takes port 8793 on the runner.
 
 - **The status probe.** The failure message says which part broke. it2's stderr (in the
   diagnostics, `claude-status-it2-stderr.txt`) names a connection or authentication error when

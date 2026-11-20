@@ -39,6 +39,12 @@ AI_PLUGIN_ZIP_SHA256="6e5547505909df1b1e9355e61f97c4ddc575373d8ef24074c320788426
 AI_PLUGIN_SIGNING_KEY="fYLUx58QwucuPJRYxBjp7M//uVM0vTfgUo7d6u4TQR8="
 AI_PLUGIN_BUNDLE_ID="com.googlecode.iterm2.iTermAI"
 
+# The Browser Plugin browser sessions need (iTermBrowserGateway.swift:43-45): the page iTerm2
+# opens to offer it, which links the zip. Not pinned: install-browser-plugin.sh prints its sha256
+# and checks the app against iTerm2's own code-signing requirement instead.
+BROWSER_PLUGIN_PAGE_URL="https://iterm2.com/browser-plugin.html"
+BROWSER_PLUGIN_BUNDLE_ID="com.googlecode.iterm2.iTermBrowserPlugin"
+
 # The relay scripts/relay-it.sh tests against, fetched the same way.
 RELAY_REPO="https://github.com/gnachman/iterm2-companion-relay.git"
 RELAY_COMMIT="b8aa2f90d2bc8b617d1b9c97043aa0b171885310"
@@ -74,6 +80,12 @@ ITERM2_APP_SUPPORT="$HOME/Library/Application Support/iTerm2"
 STATUS_PROFILE_GUID="buddy-ci-status"
 STATUS_PROFILE_FILE="$ITERM2_APP_SUPPORT/DynamicProfiles/buddy-ci-status.json"
 ITERM2_IT2="$ITERM2_APP/Contents/Resources/utilities/it2"
+# The browser probe (install-browser-plugin.sh, RealIterm2BrowserTest): a browser Dynamic Profile
+# whose Initial URL is the test's own page server. The test names the same port and profile.
+BROWSER_PAGE_PORT="8793"
+BROWSER_PAGE_URL="http://127.0.0.1:${BROWSER_PAGE_PORT}/"
+BROWSER_PROFILE_NAME="buddy-ci-browser"
+BROWSER_PROFILE_FILE="$ITERM2_APP_SUPPORT/DynamicProfiles/buddy-ci-browser.json"
 # "Allow all apps to connect": the fixed UUID in the root-owned disable-automation-auth file
 # (iTermAPIHelperDisableApplescriptAuthMagic, iTermAPIHelper.m:70).
 API_NOAUTH_MAGIC="61DF88DC-3423-4823-B725-22570E01C027"
