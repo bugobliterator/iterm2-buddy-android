@@ -29,7 +29,13 @@ import dev.bugobliterator.itermbuddy.core.input.SharedPrefsPasteKeysStore
 import dev.bugobliterator.itermbuddy.core.input.SharedPrefsScrollKeysStore
 import dev.bugobliterator.itermbuddy.core.input.isInputTarget
 import dev.bugobliterator.itermbuddy.core.relay.relayHttpClient
+import dev.bugobliterator.itermbuddy.core.stream.BROWSER_INPUT_REVISION
 import dev.bugobliterator.itermbuddy.core.stream.BrowserDriver
+import dev.bugobliterator.itermbuddy.core.stream.BrowserLinkOpener
+import dev.bugobliterator.itermbuddy.core.stream.LinkLookup
+import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
+import dev.bugobliterator.itermbuddy.core.sessions.TreeState
+import dev.bugobliterator.itermbuddy.ui.HomeDestination
 import dev.bugobliterator.itermbuddy.core.stream.LatencyMeter
 import dev.bugobliterator.itermbuddy.core.stream.SelectionDriver
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
@@ -91,6 +97,9 @@ import kotlin.time.Duration.Companion.seconds
  *
  * [selection] drives the live view's terminal selection and copy on the controller's active
  * stream, app-scoped like [input] so a drag's end is still sent across activity recreation.
+ * [links] finds the link under a tap through it (the Mac's smart selection); [browserLinks] opens
+ * a Mac-local one in the most recently viewed Browser session (each one the navigator shows is
+ * recorded), sending its `browserLoad` through [browser] once that session's stream takes input.
  *
  * [video] is never closed: it lives as long as the process. An Application has no reliable end
  * (`onTerminate` never runs on a device), and process death takes the codec and the decoder
@@ -147,6 +156,14 @@ class CompanionApp : Application() {
 
     /** Taps, scrolls and the browser controls for a browser session; see the class comment. */
     lateinit var browser: BrowserDriver
+        private set
+
+    /** The link under a tap on a terminal, through [selection]; see the class comment. */
+    lateinit var links: LinkLookup
+        private set
+
+    /** Mac-local links into a Browser session; see the class comment. */
+    lateinit var browserLinks: BrowserLinkOpener
         private set
 
     /** Fit to phone while the live bar's toggle is on; see the class comment. */
@@ -296,6 +313,24 @@ class CompanionApp : Application() {
             scrollKeys = { home.scrollKeys.enabled.value },
             log = { AppLog.i(BROWSER_TAG, it) },
         )
+        links = LinkLookup(
+            selection = selection,
+            active = home.controller.activeStream,
+            // Lengths and yes/no only, never the link.
+            log = { AppLog.i(SELECTION_TAG, it) },
+        )
+        browserLinks = BrowserLinkOpener(
+            active = home.controller.activeStream,
+            inputActive = browser.inputActive,
+            load = browser::load,
+            scope = scope,
+            log = { AppLog.i(BROWSER_TAG, it) },
+        )
+        scope.launch {
+            home.navigator.state.collect { nav ->
+                (nav.destination as? HomeDestination.BrowserSession)?.let { browserLinks.shown(it.session.guid) }
+            }
+        }
         autoFit = AutoFitter(
             link = home.client,
             enabled = home.fitToPhone.enabled,
@@ -325,6 +360,22 @@ class CompanionApp : Application() {
                 }
             },
         )
+    }
+
+    /**
+     * The Browser session a Mac-local link opens in now ([BrowserLinkOpener.target] of the session
+     * tree), or null when there is none or the Mac takes no browser input (below revision 15).
+     */
+    fun linkBrowserSession(): SessionSummary? {
+        if (macRevisionOf(client.state.value) < BROWSER_INPUT_REVISION) return null
+        val tree = (home.repository.state.value as? TreeState.Loaded)?.tree ?: return null
+        return browserLinks.target(tree.sessions())
+    }
+
+    /** Opens [session]'s browser view and loads [url] there once its stream takes input. */
+    fun openLinkInBrowserSession(session: SessionSummary, url: String) {
+        browserLinks.open(session.guid, url)
+        home.navigator.openSession(session, session.name)
     }
 
     /** Calls [CompanionClient.start] once per process, however often the activity is recreated. */

@@ -89,12 +89,12 @@ internal fun SelectionMenu(
 private val MENU_GAP = 24.dp
 
 /**
- * Puts [text] on the clipboard as [SELECTION_CLIP_LABEL], marked sensitive
+ * Puts [text] on the clipboard as [label], marked sensitive
  * ([ClipDescription.EXTRA_IS_SENSITIVE]) so the system's confirmation and keyboard suggestions
  * do not show it. Never logged.
  */
-internal fun copyToClipboard(context: Context, text: String) {
-    val clip = ClipData.newPlainText(SELECTION_CLIP_LABEL, text)
+internal fun copyToClipboard(context: Context, text: String, label: String = SELECTION_CLIP_LABEL) {
+    val clip = ClipData.newPlainText(label, text)
     clip.description.extras = PersistableBundle().apply { putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true) }
     context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(clip)
 }

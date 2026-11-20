@@ -123,6 +123,10 @@ class ScrollbackControl {
  * history in the tile's own space (tiles have no margins), clamped to the document. The point is
  * null only when nothing can be mapped (no layout yet).
  *
+ * **Taps** ([onTapAt]): a single tap (see [VideoCanvas]; never one that stopped a coast) is also
+ * given with the terminal point under it, mapped as a selection's ([selectionPointAt]; null when
+ * nothing can be mapped), for the link lookup. [onPanStart] hears every drag or pinch.
+ *
  * The geometry is used only while it is [config]'s stream. Never logs tile content.
  */
 @Composable
@@ -136,6 +140,8 @@ fun ScrollbackCanvas(
     onWheel: (up: Boolean, lines: Int) -> Unit,
     modifier: Modifier = Modifier,
     onTap: () -> Unit = {},
+    onTapAt: ((point: SelectionPoint?, x: Float, y: Float) -> Unit)? = null,
+    onPanStart: () -> Unit = {},
     topInset: Float = 0f,
     restBottomInset: Float = 0f,
     bottomInset: () -> Float = { restBottomInset },
@@ -181,6 +187,7 @@ fun ScrollbackCanvas(
     val currentGeometry by rememberUpdatedState(geometry)
     val currentTerminal by rememberUpdatedState(terminal)
     val currentOnSelection by rememberUpdatedState(onSelection)
+    val currentOnTapAt by rememberUpdatedState(onTapAt)
     val selectable = onSelection != null && terminal?.cellGeometry != null
     // The slots on screen: the draw is invalidated only when this set changes, not per frame.
     val visibleSlots by remember {
@@ -221,6 +228,17 @@ fun ScrollbackCanvas(
         },
         modifier = modifier,
         onTap = onTap,
+        onTapAt = if (onTapAt == null) {
+            null
+        } else {
+            { x, y, shown, bandFit ->
+                val shownLayout = currentLayout
+                val shownConfig = currentTerminal
+                val point = if (shownLayout == null || shownConfig == null) null else selectionPointAt(x, y, shown, bandFit, shownLayout, shownConfig)
+                currentOnTapAt?.invoke(point, x, y)
+            }
+        },
+        onPanStart = onPanStart,
         topInset = topInset,
         restBottomInset = restBottomInset,
         bottomInset = bottomInset,

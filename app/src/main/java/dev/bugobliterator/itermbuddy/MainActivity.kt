@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy
 
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Intent
 import android.content.pm.ApplicationInfo
@@ -11,6 +12,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.getValue
 import androidx.core.content.FileProvider
+import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.mlkit.common.MlKitException
@@ -107,6 +109,12 @@ class MainActivity : ComponentActivity() {
 
         override fun inputMemory(sessionGuid: String) = app.inputMemories.of(sessionGuid)
 
+        override fun openLink(url: String) = openInPhoneBrowser(url)
+
+        override fun linkBrowserSession(): SessionSummary? = app.linkBrowserSession()
+
+        override fun openLinkInBrowserSession(session: SessionSummary, url: String) = app.openLinkInBrowserSession(session, url)
+
         override fun setSearchQuery(query: String) = app.home.search.set(query)
 
         override fun refresh() = app.home.repository.refresh()
@@ -152,6 +160,7 @@ class MainActivity : ComponentActivity() {
             latency = app.latency,
             ping = { pingActiveLink(sessions.client, sessions.controller.activeStream.value) },
             fitNotices = app.autoFit.notices,
+            links = app.links,
         )
         val debugBuild = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         // The live view reads the stream's session and config; liveTop moves with the output, so
@@ -248,6 +257,20 @@ class MainActivity : ComponentActivity() {
                 AppLog.w(TAG, "could not share the log: ${logSummary(e)}")
                 Toast.makeText(this@MainActivity, "Could not share the log: ${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
             }
+        }
+    }
+
+    /**
+     * A tapped terminal link in the phone's browser (`ACTION_VIEW`, a browsable app). With no app
+     * that can open it, a brief notice; the URL is never logged.
+     */
+    private fun openInPhoneBrowser(url: String) {
+        val view = Intent(Intent.ACTION_VIEW, url.toUri()).addCategory(Intent.CATEGORY_BROWSABLE)
+        try {
+            startActivity(view)
+        } catch (e: ActivityNotFoundException) {
+            AppLog.i(TAG, "no app opens a link of ${url.length} chars (${logSummary(e)})")
+            Toast.makeText(this, "No app can open this link", Toast.LENGTH_SHORT).show()
         }
     }
 
