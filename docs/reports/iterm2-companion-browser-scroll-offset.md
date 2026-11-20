@@ -49,9 +49,21 @@ above.
 On a Mac where the window is not at the bottom-left corner of the main screen, the error is the
 window's whole origin. That can be hundreds of points in both x and y.
 
-The probe's `moved` step tests this. It moves the browser window to a few origins with
-`it2 window move` and sends one raw scroll at each. If the inference holds, the offset follows
-the window's origin.
+Run 20 tested this. The browser window was moved with `it2 window move` and one raw scroll was
+sent at the same image point each time. The aim was CSS (512, 306):
+
+| Window origin asked for (`it2 window move x y`) | Where the wheel event landed (CSS px) | Offset |
+| --- | --- | --- |
+| (0, 0) | (512, 305) | none (y within a pixel) |
+| (200, 150) | (712, 246) | +200, −60 |
+| (400, 300) | (912, 246) | +400, −60 |
+| (where iTerm2 opened it, run 19) | (512, 246) | 0, −60 |
+
+The x offset is exactly the window's x origin. With the window at (0, 0) the event landed where
+it was aimed. y was off by the same 60 points at both other positions. That suggests macOS kept
+the window at the same height (for example, clamped below the menu bar), so its y origin did not
+change. The probe prints the window frames `it2 window list` reports, which can confirm this.
+Either way, the offset follows the window's place on screen, as inferred.
 
 ## Suggested fix
 
