@@ -4,7 +4,7 @@ Branch: `companion-browser-scroll-location` (bugobliterator/iTerm2), one commit 
 
 ## Problem
 
-Scrolling a web browser session from the companion does nothing unless the Mac window is at the screen's origin. The scroll lands somewhere other than the point the phone aimed at.
+Scrolling a web browser session from the companion does nothing unless the Mac window is at the bottom-left corner of the main display (Cocoa screen origin (0, 0)). The scroll lands somewhere other than the point the phone aimed at.
 
 Measured: aiming the wheel at CSS x = 512 in the page.
 
@@ -41,7 +41,7 @@ Release note added to `docs/notes-3.7.txt` (Bug Fixes).
 
 ## How to test
 
-1. Open a web browser session in iTerm2 and move its window away from the top-left of the screen.
+1. Open a web browser session in iTerm2 and move its window away from the bottom-left corner of the main display.
 2. Open the session on the phone and drag to scroll.
    - Before: nothing scrolls, or something to the right of / below the finger scrolls.
    - After: whatever is under the finger scrolls.

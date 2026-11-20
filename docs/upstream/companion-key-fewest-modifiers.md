@@ -42,12 +42,15 @@ The CSI u encoder then works out the key's base character from the arrow's key c
 
 ## Side effects to review
 
-When two keys with the same modifiers produce the same string, the lower key code now wins instead of the higher one. On US layouts that matters for:
+The new order changes the chosen keystroke wherever two keystrokes produce the same string. Printable ASCII changes only for the four broken characters. The other changes:
 
-- DEL (0x7F): it now maps to `kVK_Delete` (Backspace) instead of `kVK_ForwardDelete`. Under CSI u this reports Backspace, not Forward Delete, which seems more correct for a raw DEL.
-- U+0010: shared by all the F-keys.
-
-Printable ASCII is not otherwise affected.
+- **Non-ASCII characters produced by two keys.** On US, the ISO Section key (key code 10) produces `§` unmodified and `±` with Shift. These now beat Option+6 (`§`) and Shift+Option+= (`±`).
+  - Before, the Option keystroke won (the later entry). `CompanionKeyInjection.literalFallback` round-trips on Shift only (`sources/Companion/CompanionKeyInjection.swift:212`), so it sent these characters as literal text.
+  - Now they map to key 10 with no modifier or Shift, the round trip succeeds, and they are synthesized as key events on key 10 instead of written literally. Under CSI u they are now reported as the ISO Section key, even on an ANSI keyboard that doesn't physically have it. The legacy mapper still sends the same text.
+- **Other layouts.** Ties between two different keys with the same modifiers now go to the lower key code. Before, the later (higher) key code won. Ties between Shift and Option at the same modifier count now go to Shift.
+- **U+0010** (produced by every F-key): was F1 (key code 122, the highest), now F17 (key code 64, the lowest). Neither is meaningful. This matters only for a raw Ctrl-P byte sent as text, which wasn't reported correctly before either.
+- **DEL (0x7F)**: was Forward Delete (key code 117), now Delete/Backspace (key code 51). Under CSI u a raw DEL is now reported as Backspace instead of Forward Delete. I think that's more correct.
+- **Copy mode and other `VimKeyParser` users**: a literal `/` (and `*`, `+`, `=`) in a parsed key string is now the real key rather than Shift+Up Arrow (etc.). For example, copy mode's `/` search key no longer arrives as Shift+Up.
 
 ## Notes
 
