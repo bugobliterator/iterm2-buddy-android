@@ -10,19 +10,23 @@ import kotlinx.serialization.json.JsonPrimitive
 /**
  * The opt-in input trace, for debugging what the keyboard sends (owner request): one line per
  * InputConnection call, key event, translator emit, sender decision and sent `sendKey`/`pasteText`
- * envelope. Off by default in every build; the owner turns it on with
- * `adb shell setprop log.tag.IB.Input VERBOSE` and off with `... SUPPRESS`.
+ * envelope. Off by default in every build; the owner turns it on with Settings' "Include typed-key
+ * trace" switch (in memory only: off again when the process restarts), or with
+ * `adb shell setprop log.tag.IB.Input VERBOSE` (off with `... SUPPRESS`); either turns it on.
+ * Its lines go to logcat and to the app's log that Settings › Share log sends.
  *
  * Typed text is never written as text: every character is written as its code point
  * ([codePoints]: `U+002F[/]`, the character in brackets only for printable ASCII). Everything
  * else the app logs, and every `toString`, stays redacted as before.
  *
  * With the gate off, [log] builds no string: callers pass a lambda, which is not called. The gate
- * is re-read at most once a second ([GATE_RECHECK_MILLIS]). Lines are capped at [MAX_LINE] chars.
+ * is re-read at most once a second ([GATE_RECHECK_MILLIS]), or at the next line after [recheck].
+ * Lines are capped at [MAX_LINE] chars.
  *
- * @param gate whether tracing is on (production: `Log.isLoggable(TAG, Log.VERBOSE)`).
+ * @param gate whether tracing is on (production: the switch or `Log.isLoggable(TAG, Log.VERBOSE)`,
+ *   [dev.bugobliterator.itermbuddy.applog.keyTraceGate]).
  * @param nowMillis a monotonic clock in milliseconds.
- * @param sink writes one line (production: `Log.v(TAG, line)`).
+ * @param sink writes one line (production: `AppLog.v(TAG, line)`, logcat and the app's log).
  */
 class InputTrace(
     private val gate: () -> Boolean,
@@ -51,6 +55,11 @@ class InputTrace(
             return on
         }
 
+    /** Re-reads the gate at the next line instead of within a second (the in-app switch changed). */
+    fun recheck() {
+        checked = false
+    }
+
     /** Writes [line]'s result when tracing is on; otherwise does not call it. */
     fun log(line: () -> String) {
         if (!enabled) return
@@ -71,7 +80,7 @@ class InputTrace(
         /** Never on: the default until the app installs the real one, and in JVM tests. */
         val OFF = InputTrace({ false }, { 0L }, {})
 
-        /** The trace the input path writes to; `CompanionApp` installs the adb-gated one. */
+        /** The trace the input path writes to; `CompanionApp` installs the switch- and adb-gated one. */
         @Volatile
         var current: InputTrace = OFF
     }

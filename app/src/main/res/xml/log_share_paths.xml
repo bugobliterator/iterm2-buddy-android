@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+The FileProvider for Settings › Share log serves only the cache's shared-logs directory, where
+LogShare writes each share file. Nothing else in the app's storage is reachable through it.
+-->
+<paths>
+    <cache-path
+        name="shared_logs"
+        path="shared-logs/" />
+</paths>

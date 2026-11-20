@@ -1,9 +1,9 @@
 package dev.bugobliterator.itermbuddy.video
 
 import android.os.SystemClock
-import android.util.Log
 import android.view.Surface
 import androidx.annotation.VisibleForTesting
+import dev.bugobliterator.itermbuddy.applog.AppLog
 import dev.bugobliterator.itermbuddy.core.stream.HevcFramingException
 import dev.bugobliterator.itermbuddy.core.stream.MediaFrame
 import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
@@ -105,7 +105,7 @@ class HevcVideoOutput(
     private val nowMillis: () -> Long = SystemClock::uptimeMillis,
     private val decoderThread: DecoderThread = HandlerDecoderThread(),
     private val surfaceCallTimeoutMillis: Long = DEFAULT_SURFACE_CALL_TIMEOUT_MILLIS,
-    private val log: (String) -> Unit = { Log.i(TAG, it) },
+    private val log: (String) -> Unit = { AppLog.i(TAG, it) },
 ) : VideoOutput, AutoCloseable {
 
     /**

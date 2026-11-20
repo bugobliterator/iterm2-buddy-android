@@ -1,18 +1,24 @@
 package dev.bugobliterator.itermbuddy
 
+import android.content.ClipData
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.getValue
+import androidx.core.content.FileProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.mlkit.common.MlKitException
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import dev.bugobliterator.itermbuddy.applog.AppLog
+import dev.bugobliterator.itermbuddy.applog.LogShare
 import dev.bugobliterator.itermbuddy.core.input.InputTarget
 import dev.bugobliterator.itermbuddy.core.input.KeyEvent
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
@@ -27,8 +33,12 @@ import dev.bugobliterator.itermbuddy.ui.home.HomeModel
 import dev.bugobliterator.itermbuddy.ui.live.LiveVideoSource
 import dev.bugobliterator.itermbuddy.ui.scanFailureOutcome
 import dev.bugobliterator.itermbuddy.ui.scanOutcome
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.IOException
 
 class MainActivity : ComponentActivity() {
     private val app: CompanionApp get() = application as CompanionApp
@@ -100,6 +110,12 @@ class MainActivity : ComponentActivity() {
 
         override fun setScrollKeys(enabled: Boolean) = app.home.scrollKeys.set(enabled)
 
+        override fun shareLog() = shareAppLog()
+
+        override fun clearLog() = app.clearLog()
+
+        override fun setKeyTrace(enabled: Boolean) = app.keyTrace.set(enabled)
+
         override fun reconnect() {
             app.clearNotices()
             app.client.start()
@@ -153,13 +169,14 @@ class MainActivity : ComponentActivity() {
             val claudeTip by sessions.claudeTip.shown.collectAsStateWithLifecycle()
             val pasteKeys by sessions.pasteKeys.enabled.collectAsStateWithLifecycle()
             val scrollKeys by sessions.scrollKeys.enabled.collectAsStateWithLifecycle()
+            val keyTrace by app.keyTrace.enabled.collectAsStateWithLifecycle()
             AppTheme {
                 AppRoot(
                     paired = paired,
                     home = HomeModel(
                         state, nav.destination, tree, live, unpairing, unpairFailed, version, relayOrigin,
                         activeStream, video, debugBuild, videoStatsShown, query, macStatus, nav.tab, chatsAttention,
-                        nav.key, nav.stackKeys, claudeTip, pasteKeys, scrollKeys,
+                        nav.key, nav.stackKeys, claudeTip, pasteKeys, scrollKeys, keyTrace,
                     ),
                     homeActions = homeActions,
                     chats = sessions.chatsHome,
@@ -185,9 +202,37 @@ class MainActivity : ComponentActivity() {
             .addOnSuccessListener { barcode -> app.onScanOutcome(scanOutcome(barcode.rawValue)) }
             .addOnCanceledListener { app.onScanOutcome(ScanOutcome.Quiet) }
             .addOnFailureListener { error ->
-                Log.i(TAG, "scan failed: code ${(error as? MlKitException)?.errorCode}")
+                AppLog.i(TAG, "scan failed: code ${(error as? MlKitException)?.errorCode}")
                 app.onScanOutcome(scanFailureOutcome(error))
             }
+    }
+
+    /**
+     * Settings › Share log: the app writes the share file off the main thread, then Android's
+     * share sheet offers it as `text/plain` through the FileProvider (`<applicationId>.logs`,
+     * serving only the cache's [LogShare.SHARE_DIR]), with read access granted to the chosen app.
+     */
+    private fun shareAppLog() {
+        val app = app
+        lifecycleScope.launch {
+            val file = try {
+                withContext(Dispatchers.IO) { app.shareLogFile() }
+            } catch (e: IOException) {
+                AppLog.w(TAG, "could not prepare the log to share: ${e.javaClass.simpleName}")
+                Toast.makeText(this@MainActivity, "Could not prepare the log", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            val uri = FileProvider.getUriForFile(this@MainActivity, packageName + LogShare.AUTHORITY_SUFFIX, file)
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, file.name)
+                clipData = ClipData.newRawUri(file.name, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            AppLog.i(TAG, "sharing the log: ${file.length()} bytes")
+            startActivity(Intent.createChooser(send, "Share log"))
+        }
     }
 
     private fun appVersion(): String = try {

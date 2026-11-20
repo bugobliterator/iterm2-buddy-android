@@ -29,8 +29,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import dev.bugobliterator.itermbuddy.applog.KEY_TRACE_SUMMARY
+import dev.bugobliterator.itermbuddy.applog.KEY_TRACE_TITLE
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.input.PASTE_KEYS_SUMMARY
 import dev.bugobliterator.itermbuddy.core.input.PASTE_KEYS_TITLE
@@ -41,6 +44,8 @@ import dev.bugobliterator.itermbuddy.ui.connectionBanner
 import dev.bugobliterator.itermbuddy.video.VideoStats
 
 internal const val UNPAIR_CONFIRM = "Unpair this phone? You'll need to scan a new code on the Mac."
+
+internal const val CLEAR_LOG_CONFIRM = "Clear the app's log? Problems that already happened will no longer be in a shared log."
 
 /** The Mac row: what the pairing screen used to show once connected, with the Mac's revision. */
 internal fun macStatusText(state: ClientState): String = when (state) {
@@ -61,6 +66,8 @@ internal fun decoderRowText(stats: VideoStats): String = stats.decoderName ?: st
  * paste" switch ([pasteKeys], [PASTE_KEYS_TITLE]) sets how the live view sends those four keys;
  * "Scroll web pages with keys" ([scrollKeys], [SCROLL_KEYS_TITLE]) how a browser page scrolls.
  * Debug builds ([debugBuild]) also get the "Video stats" toggle for the live view's stats overlay.
+ * Diagnostics: Share log ([onShareLog], Android's share sheet), Clear log ([onClearLog],
+ * confirmed first) and the "Include typed-key trace" switch ([keyTrace], [KEY_TRACE_TITLE]).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -81,8 +88,13 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onUnpair: () -> Unit,
     modifier: Modifier = Modifier,
+    keyTrace: Boolean = false,
+    onKeyTraceChange: (Boolean) -> Unit = {},
+    onShareLog: () -> Unit = {},
+    onClearLog: () -> Unit = {},
 ) {
     var confirming by rememberSaveable { mutableStateOf(false) }
+    var confirmingClear by rememberSaveable { mutableStateOf(false) }
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
@@ -114,7 +126,26 @@ fun SettingsScreen(
             SwitchRow(PASTE_KEYS_TITLE, PASTE_KEYS_SUMMARY, pasteKeys, onPasteKeysChange)
             SwitchRow(SCROLL_KEYS_TITLE, SCROLL_KEYS_SUMMARY, scrollKeys, onScrollKeysChange)
             if (debugBuild) SwitchRow("Video stats", summary = null, videoStatsShown, onVideoStatsShownChange)
+            Text("Diagnostics", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                OutlinedButton(onClick = onShareLog) { Text("Share log") }
+                OutlinedButton(onClick = { confirmingClear = true }) { Text("Clear log") }
+            }
+            SwitchRow(KEY_TRACE_TITLE, KEY_TRACE_SUMMARY, keyTrace, onKeyTraceChange)
         }
+    }
+    if (confirmingClear) {
+        AlertDialog(
+            onDismissRequest = { confirmingClear = false },
+            text = { Text(CLEAR_LOG_CONFIRM) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmingClear = false
+                    onClearLog()
+                }) { Text("Clear") }
+            },
+            dismissButton = { TextButton(onClick = { confirmingClear = false }) { Text("Cancel") } },
+        )
     }
     if (confirming) {
         AlertDialog(

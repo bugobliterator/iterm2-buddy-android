@@ -1,6 +1,6 @@
 package dev.bugobliterator.itermbuddy.core.sessions
 
-import android.util.Log
+import dev.bugobliterator.itermbuddy.applog.AppLog
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.CompanionClient
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
@@ -67,7 +67,7 @@ class SessionTreeRepository(
     private val scope: CoroutineScope,
     private val fetchTimeout: Duration = DEFAULT_FETCH_TIMEOUT,
     events: Flow<MacMessage> = client.events,
-    private val log: (String) -> Unit = { Log.i(TAG, it) },
+    private val log: (String) -> Unit = { AppLog.i(TAG, it) },
 ) {
     private val lock = Any()
     private val stateFlow = MutableStateFlow<TreeState>(TreeState.Loading)
