@@ -29,8 +29,10 @@ rm -rf "$dir"
 mkdir -p "$dir"
 
 status=0
-# key-capture.mjs exits on its own after this long if the test never asks it to stop.
-export KEY_CAPTURE_TIMEOUT_SECONDS=60
+# key-capture.mjs exits on its own after this long if the test never asks it to stop. Well past
+# the longest mode (kitty5 sends 95 keys, about 75 s): at 60 s it exited mid-run, the rest of its
+# keys went to the shell's line, and the next probe command typed after them never ran.
+export KEY_CAPTURE_TIMEOUT_SECONDS=300
 case "$kind" in
     capture)
         "$KEY_BYTES_NODE" "$KEY_BYTES_REPO/ci/real-iterm2/key-capture.mjs" "$dir" "$@" 2>>"$dir/stderr.txt" || status=$?
