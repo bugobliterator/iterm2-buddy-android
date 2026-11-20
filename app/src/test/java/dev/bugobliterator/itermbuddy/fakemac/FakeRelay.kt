@@ -3,6 +3,7 @@ package dev.bugobliterator.itermbuddy.fakemac
 import dev.bugobliterator.itermbuddy.core.RelaySocket
 import dev.bugobliterator.itermbuddy.core.RelayTransport
 import dev.bugobliterator.itermbuddy.core.relay.AdmissionResult
+import dev.bugobliterator.itermbuddy.core.relay.ArrivalStamping
 import dev.bugobliterator.itermbuddy.core.relay.FrameQueue
 import dev.bugobliterator.itermbuddy.core.relay.JoinRole
 import dev.bugobliterator.itermbuddy.core.relay.Proof
@@ -47,6 +48,8 @@ internal class FakeRelay(
     private val phoneQueueBytes: Long = Long.MAX_VALUE,
     /** The clock the phone's queue stamps arrivals with (`RelaySocket.lastReceivedAtNanos`). */
     private val nanoTime: () -> Long = System::nanoTime,
+    /** Whether the phone's queue stamps arrivals: off unless a test passes one it turns on. */
+    private val stamping: ArrivalStamping = ArrivalStamping(),
 ) : RelayTransport, MacRelay {
     private class Room {
         var verifier: ByteArray? = null
@@ -181,7 +184,7 @@ internal class FakeRelay(
     }
 
     private inner class PhoneSide(private val signedOrigin: String, private val roomName: String) : RelaySocket {
-        private val frames = FrameQueue(phoneQueueBytes, nanoTime)
+        private val frames = FrameQueue(phoneQueueBytes, nanoTime, stamping)
         private var admitted = false
         private var closed = false
 

@@ -204,6 +204,14 @@ jobs:
           REAL_ITERM2_REQUEST_TIMEOUT_SECONDS: '30'
         run: ./gradlew realIterm2Test --tests '*.RealIterm2LatencyTest'
 
+      - name: Keep the latency results
+        if: success() || failure()
+        run: |
+          kept="$RUNNER_TEMP/real-iterm2/diagnostics/latency"
+          mkdir -p "$kept"
+          cp -R app/build/test-results/realIterm2Test "$kept/test-results" 2>/dev/null || true
+          cp -R app/build/reports/tests/realIterm2Test "$kept/reports" 2>/dev/null || true
+
       # Stage 3 (RealIterm2AgentChatTest), last and in its own step: an Agent Chat turn can leave
       # iTerm2's main thread blocked, which must not fail stages 1 and 2. It creates an
       # orchestrator chat, gets the fake model's streamed reply, then its tool call parked on
