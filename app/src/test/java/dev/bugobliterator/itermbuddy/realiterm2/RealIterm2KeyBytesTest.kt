@@ -16,6 +16,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -54,8 +55,9 @@ import org.junit.Test
  * 5, and [CLAUDE_CHARS] in Claude Code; then `pasteText` of [PASTE] (slash, star). For Claude
  * Code, `/` is first sent alone on the empty prompt (to see the slash-command menu) by `sendKey`
  * and `pasteText`, and `*` by `pasteText`, each erased with Backspace; then [WORKAROUND_TEXT]
- * (`a/b*c+d=e`) is typed as one key event through a second [InputSender] with the app's "Send
- * / * + = as paste" setting on (so `/ * + =` go as one-character pastes, the rest as keys), and
+ * (`a/b*c+d=e`) is typed as one key event through the same [InputSender] with the app's "Send
+ * / * + = as paste" setting turned on for it (so `/ * + =` go as one-character pastes, the rest
+ * as keys; one sender, so nothing sent later can interleave with its runs), and
  * the report says whether Claude drew the whole text and each of the four in place; it is erased
  * with Backspace. The run ends with Return, then Ctrl-C twice.
  *
@@ -68,7 +70,7 @@ import org.junit.Test
  * bytes as hex and as a readable escape form, and the Mac's keyboard input source. Under kitty
  * flags 5 each CSI u is decoded (key number, shifted and base keys, modifiers) and marked WRONG
  * when the key number is not the character's US ANSI base key or an unshifted character carries
- * Shift, with a summary of the WRONG set. For Claude Code it also gives
+ * Shift, with a summary of the WRONG set among the keys that arrived. For Claude Code it also gives
  * every keyboard-mode sequence it wrote, in order, the terminal's answers, and whether each character appeared in
  * what Claude drew next. Unlike the other real-iTerm2 tests this one prints terminal content: the
  * probe characters and Claude Code's UI text in a throwaway CI terminal.
@@ -77,6 +79,9 @@ class RealIterm2KeyBytesTest {
     private val rig = RealIterm2Rig()
     private val lines = mutableListOf<String>()
     private val senderLog = CopyOnWriteArrayList<String>()
+
+    /** The sender's "Send / * + = as paste" setting, read as each key is sent. */
+    private val pasteKeys = AtomicBoolean(false)
 
     @Before
     fun requireRealIterm2() = RealIterm2Rig.requireRealIterm2()
@@ -102,17 +107,11 @@ class RealIterm2KeyBytesTest {
             scope = rig.scope,
             isCurrent = { target -> target.linkId == rig.linkId.value && client.state.value is ClientState.Connected },
             log = { line -> senderLog += line },
-        )
-        // The app's "Send / * + = as paste" setting on, for the Claude Code step that checks it.
-        val pastingSender = InputSender(
-            link = client,
-            scope = rig.scope,
-            isCurrent = { target -> target.linkId == rig.linkId.value && client.state.value is ClientState.Connected },
-            log = { line -> senderLog += line },
-            pasteKeys = { true },
+            // The app's "Send / * + = as paste" setting: off, except in the Claude Code step that checks it.
+            pasteKeys = pasteKeys::get,
         )
         val target = InputTarget(linkId, watchEpoch = 0, sessionGuid = session.guid)
-        val probe = Probe(sender, pastingSender, target, "bash ${quoted(probeScript.path)} ${quoted(envFile.path)}")
+        val probe = Probe(sender, target, "bash ${quoted(probeScript.path)} ${quoted(envFile.path)}")
 
         line("Claude Code ${env["KEY_BYTES_CLAUDE_VERSION"] ?: "not installed"}; iTerm2 session ${session.guid}")
         reportInputSource()
@@ -145,9 +144,9 @@ class RealIterm2KeyBytesTest {
 
     /**
      * Types probe commands into the session and sends the probe keys, through the app's own
-     * sender; [pastingSender] has the "Send / * + = as paste" setting on.
+     * sender.
      */
-    private class Probe(val sender: InputSender, val pastingSender: InputSender, val target: InputTarget, val command: String) {
+    private class Probe(val sender: InputSender, val target: InputTarget, val command: String) {
         /** Ctrl-C first: an empty shell line (no leftover keys, no continuation prompt), then the command. */
         suspend fun type(arguments: String) {
             key("c", KeyModifiers(control = true))
@@ -155,7 +154,6 @@ class RealIterm2KeyBytesTest {
             sender.typeThenReturn(target, "$command $arguments")
         }
 
-        fun keyWithPasteSetting(text: String) = pastingSender.key(target, KeyEvent(Key.Text(text)))
         fun key(text: String, modifiers: KeyModifiers = KeyModifiers()) = sender.key(target, KeyEvent(Key.Text(text), modifiers))
         fun special(key: SpecialKey) = sender.key(target, KeyEvent(Key.Special(key)))
         fun paste(text: String) = sender.paste(target, text)
@@ -180,6 +178,7 @@ class RealIterm2KeyBytesTest {
         line("  terminal's answer to CSI ? u: ${if (query.isEmpty()) "none" else describe(concat(query))}")
 
         val wrong = mutableListOf<String>()
+        var measured = 0
         for (char in mode.chars) {
             val arrival = captureArrival(capture) { probe.key(char) }
             val shown = if (char == " ") "SP" else char
@@ -188,10 +187,12 @@ class RealIterm2KeyBytesTest {
                 continue
             }
             val verdict = kittyVerdict(char, arrival.bytes)
+            measured++
             if (verdict.wrong) wrong += shown
             line("  ${shown.padEnd(LABEL_WIDTH)} sendKey   ${arrival.text} | ${verdict.text}")
         }
-        if (mode.decodeKitty) line("  WRONG (${wrong.size} of ${mode.chars.size}): ${wrong.joinToString(" ").ifEmpty { "none" }}")
+        // Only what arrived is counted: a key that never arrived was not measured.
+        if (mode.decodeKitty) line("  WRONG (${wrong.size} of $measured measured, ${mode.chars.size} sent): ${wrong.joinToString(" ").ifEmpty { "none" }}")
         line("  ${"/*".padEnd(LABEL_WIDTH)} pasteText ${captureArrival(capture) { probe.paste(PASTE) }.text}")
         dir.resolve("exited").takeIf { it.isFile }?.let { line("  key-capture.mjs exited before the test stopped it (${tail(it)}): later keys went to the shell") }
         stopCapture(dir)
@@ -332,9 +333,15 @@ class RealIterm2KeyBytesTest {
     private suspend fun claudeWorkaround(probe: Probe, recording: File): String {
         val before = records(recording).size
         val sentAt = System.nanoTime()
-        probe.keyWithPasteSetting(WORKAROUND_TEXT)
-        val whole = rig.poll(CLAUDE_WORKAROUND_SETTLE) {
-            WORKAROUND_TEXT.takeIf { it in screenText(records(recording).drop(before).output()) }
+        // On until the text was drawn or the wait ran out: the sender reads it when it takes the key.
+        pasteKeys.set(true)
+        val whole = try {
+            probe.key(WORKAROUND_TEXT)
+            rig.poll(CLAUDE_WORKAROUND_SETTLE) {
+                WORKAROUND_TEXT.takeIf { it in screenText(records(recording).drop(before).output()) }
+            }
+        } finally {
+            pasteKeys.set(false)
         }
         val waited = (System.nanoTime() - sentAt) / 1_000_000
         delay(if (whole == null) CLAUDE_KEY_SETTLE else SETTLE)

@@ -4,7 +4,9 @@ A draft for the iTerm2 issue tracker.
 
 ## Versions
 
-- iTerm2 3.7.7 (source at commit `e0025340`), macOS runner with the US keyboard layout.
+- iTerm2 3.7.7 (source at commit `e0025340`), on a GitHub Actions macOS runner. Its input source
+  could not be read (`defaults read com.apple.HIToolbox` exited 1); the layout is presumably
+  US ANSI, since every other key's encoding matches it.
 - Companion `sendKey` from a phone (`text` key event, no modifiers).
 - Seen in Claude Code 2.1.327, which enables kitty keyboard flags 5 (`CSI > 5 u`),
   modifyOtherKeys 2 (`CSI > 4 ; 2 m`) and bracketed paste.
@@ -13,9 +15,15 @@ A draft for the iTerm2 issue tracker.
 
 When the program in the session has enabled the kitty keyboard protocol (or modifyOtherKeys),
 the companion's injected keys for four printable characters, `/ * + =`, are encoded as the wrong
-key: a key number in U+001C..U+001F, with Shift. Programs that decode the key (Claude Code) show
-nothing for them. Every other printable ASCII character is encoded correctly, and all four arrive
-as themselves when no keyboard mode is on or when they are sent with `pasteText`.
+key: a key number in U+001C..U+001F, with Shift. Under Claude Code's modes (kitty flags 5 with
+modifyOtherKeys 2) all 95 printable ASCII characters were sent from the companion, arrived and
+were decoded: exactly these four were wrong. All four arrive as themselves when no keyboard mode
+is on or when they are sent with `pasteText`.
+
+In Claude Code 2.1.327, each of `/ * + =` sent as a key is not drawn, while `a . 1 ? A ~ | -`
+are. Sent with `pasteText`, `/` alone on an empty prompt opens the slash-command menu, and `*`
+and `/*` are drawn. Typing `a/b*c+d=e` with the four sent as one-character pastes and the rest
+as keys draws all four.
 
 ## Steps
 
@@ -27,16 +35,17 @@ as themselves when no keyboard mode is on or when they are sent with `pasteText`
          while (sysread(STDIN,$b,64)) { print unpack("H*",$b), "\r\n" }'
 
 2. From the companion app, send each of `/`, `*`, `+`, `=` and `?` as a key (`sendKey` with
-   `text`, no modifiers).
-3. Compare with the same keys typed on the Mac's keyboard.
+   `text`, no modifiers), and compare with the table below.
 
 Or: run Claude Code and send `/` from the companion. Nothing is drawn and the slash-command menu
-does not open; `/` typed on the Mac's keyboard, or sent with the companion's `pasteText`, opens
-it.
+does not open; the same `/` sent with the companion's `pasteText` opens it.
+
+(We have no baseline from the Mac's own keyboard: synthesized keystrokes delivered nothing on the
+CI runner, so the expected column below is inferred, not measured.)
 
 ## Expected and actual bytes (kitty flags 5)
 
-| Key | Expected                                    | Actual (companion sendKey)                          |
+| Key | Expected (inferred)                         | Actual (companion sendKey)                          |
 |-----|---------------------------------------------|-----------------------------------------------------|
 | `/` | `2f` = `/`                                  | `1b5b33303a34373b3275` = `ESC[30:47;2u` (key U+001E, Shift) |
 | `*` | `1b5b35363a34323b3275` = `ESC[56:42;2u`     | `1b5b32393a34323b3275` = `ESC[29:42;2u` (key U+001D) |
@@ -45,7 +54,7 @@ it.
 | `?` | `1b5b34373a36333b3275` = `ESC[47:63;2u`     | the same (correct)                                  |
 | `-` | `2d` = `-`                                  | the same (correct)                                  |
 
-The expected column follows how iTerm2 encodes the companion's other keys, which are correct:
+The expected column is inferred from how iTerm2 encodes the companion's other keys, which are correct:
 unshifted punctuation as itself (`-`, `.`), shifted keys as CSI u with the base key (`?` above,
 `(` as `ESC[57:40;2u`, `A` as `ESC[97:65;2u`). The same four key numbers come out under kitty
 flags 1, 3 and 31. Under modifyOtherKeys 2 alone, `/` and `=` carry Shift (`ESC[27;2;47~`,
