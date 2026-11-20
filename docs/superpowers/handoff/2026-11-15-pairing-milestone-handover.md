@@ -228,6 +228,16 @@ Notes from that task:
   revision 15 Mac). Open pushes that session's browser view and sends `browserLoad` through the
   `BrowserDriver` once its stream takes input (dropped after 20 s). The Mac's own hostname is not
   in the protocol, so only loopback names count as Mac-local today.
+- **Review follow-ups:** links with user info (`@` in the authority), a `%` in the authority, a
+  backslash anywhere (WHATWG reads it as `/`, so `http://evil.example\@localhost/` is not what it
+  looks like) or Unicode format characters (bidi, zero-width) are refused. Every IPv4 form a
+  browser reads as loopback is Mac-local (`127.1`, `0x7f.0.0.1`, `0177.0.0.1`, `2130706433`, `0`).
+  When the stream changes mid-lookup the clear still goes: through the new stream when it is the
+  same session's, else for the old stream on its link (best effort: after Back the Mac has usually
+  stopped that stream and drops it, so the Mac's selection can stay until replaced; the protocol
+  has no session-level clear). The bubble shows the whole host and elides the path. A waiting
+  Mac-local link is dropped when its browser view is left, and a drop (left or 20 s timeout) shows
+  a toast. A double-tap zoom, wheel notches, typing and pastes hide the bubble.
 - **Tests:** `LinkTapTest`, `BrowserLinkOpenerTest`, `LinkTapsTest` (virtual time),
   `LinkBubbleDeviceTest` (device), `RealIterm2LinkTapTest` (real-Mac CI, report-only step).
 - **Open:** the on-device check (Links in `docs/reports/live-session-on-device.md`) and the first

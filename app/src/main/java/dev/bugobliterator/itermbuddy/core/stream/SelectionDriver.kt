@@ -63,8 +63,11 @@ class SelectionDriver(
 
     private sealed interface Item
 
-    /** [gesture] is the gesture the message belongs to, or null for Select All and Clear. */
-    private class Send(val key: StreamKey, val message: PhoneMessage, val gesture: Long? = null) : Item
+    /**
+     * [gesture] is the gesture the message belongs to, or null for Select All and Clear; [anyStream]
+     * sends it even when [key] is no longer the active stream ([clearStream]).
+     */
+    private class Send(val key: StreamKey, val message: PhoneMessage, val gesture: Long? = null, val anyStream: Boolean = false) : Item
 
     private class Copy(val linkId: Long, val sessionGuid: String, val timeout: Duration, val result: CompletableDeferred<String?>) : Item
 
@@ -130,6 +133,13 @@ class SelectionDriver(
 
     /** Clears the selection on the active stream. */
     fun clear() = sendForActive { PhoneMessage.ClearSelection(it) }
+
+    /**
+     * Clears the selection on stream [streamID] of link [linkId] even if it is no longer the active
+     * one, in order with the rest (a link lookup whose stream changed); best effort: it fails, logged,
+     * when that link ended, and the Mac ignores it for a stream it has stopped.
+     */
+    fun clearStream(linkId: Long, streamID: Long) = enqueue(Send(StreamKey(linkId, streamID), PhoneMessage.ClearSelection(streamID), anyStream = true))
 
     /**
      * The selection of session [sessionGuid] as text, after everything queued before it: `""` when
@@ -213,7 +223,7 @@ class SelectionDriver(
         when (item) {
             is Send -> {
                 if (item.gesture != null && item.gesture == failedGesture) return
-                if (activeKey() != item.key) {
+                if (!item.anyStream && activeKey() != item.key) {
                     log("discarded selection ${item.message::class.simpleName} for stream ${item.key.streamID} on link ${item.key.linkId}: not active")
                     return
                 }

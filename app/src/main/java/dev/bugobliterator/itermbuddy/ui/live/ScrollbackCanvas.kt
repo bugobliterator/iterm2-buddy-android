@@ -125,7 +125,8 @@ class ScrollbackControl {
  *
  * **Taps** ([onTapAt]): a single tap (see [VideoCanvas]; never one that stopped a coast) is also
  * given with the terminal point under it, mapped as a selection's ([selectionPointAt]; null when
- * nothing can be mapped), for the link lookup. [onPanStart] hears every drag or pinch.
+ * nothing can be mapped), for the link lookup. [onPanStart] hears every drag or pinch, and
+ * [onDoubleTap] every double-tap zoom.
  *
  * The geometry is used only while it is [config]'s stream. Never logs tile content.
  */
@@ -142,6 +143,7 @@ fun ScrollbackCanvas(
     onTap: () -> Unit = {},
     onTapAt: ((point: SelectionPoint?, x: Float, y: Float) -> Unit)? = null,
     onPanStart: () -> Unit = {},
+    onDoubleTap: () -> Unit = {},
     topInset: Float = 0f,
     restBottomInset: Float = 0f,
     bottomInset: () -> Float = { restBottomInset },
@@ -239,6 +241,7 @@ fun ScrollbackCanvas(
             }
         },
         onPanStart = onPanStart,
+        onDoubleTap = onDoubleTap,
         topInset = topInset,
         restBottomInset = restBottomInset,
         bottomInset = bottomInset,

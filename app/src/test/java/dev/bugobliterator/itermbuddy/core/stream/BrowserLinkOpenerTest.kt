@@ -3,6 +3,7 @@ package dev.bugobliterator.itermbuddy.core.stream
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -85,14 +86,51 @@ class BrowserLinkOpenerTest {
     }
 
     @Test
+    fun leavingTheViewDropsTheLinkWithANotice() = runTest {
+        val rig = Rig(this)
+        val drops = CopyOnWriteArrayList<BrowserLinkDrop>()
+        backgroundScope.launch { rig.opener.drops.collect { drops += it } }
+        runCurrent()
+        rig.opener.open("guid-browser", URL)
+        // The terminal's view, before the browser view shows: not a leave.
+        rig.opener.viewing(null)
+        rig.opener.viewing("guid-browser")
+        runCurrent()
+        assertTrue(drops.isEmpty())
+        // Back before its stream took input.
+        rig.opener.viewing(null)
+        rig.browserLive("guid-browser")
+        runCurrent()
+        assertTrue(rig.loads.isEmpty())
+        assertEquals(listOf(BrowserLinkDrop.LEFT), drops.toList())
+        // A timeout says so too; a replaced or cancelled link says nothing; a sent one nothing.
+        rig.inputActive.value = false
+        rig.opener.open("guid-browser", URL)
+        advanceTimeBy(10_001)
+        runCurrent()
+        assertEquals(listOf(BrowserLinkDrop.LEFT, BrowserLinkDrop.TIMED_OUT), drops.toList())
+        rig.opener.open("guid-browser", URL)
+        rig.opener.open("guid-browser", URL)
+        rig.opener.cancel()
+        rig.opener.open("guid-browser", URL)
+        rig.opener.viewing("guid-browser")
+        rig.inputActive.value = true
+        runCurrent()
+        rig.opener.viewing(null)
+        advanceTimeBy(20_000)
+        assertEquals(listOf(URL), rig.loads.toList())
+        assertEquals(2, drops.size)
+    }
+
+    @Test
     fun theMostRecentlyViewedBrowserSessionIsChosen() = runTest {
         val rig = Rig(this)
         val sessions = listOf(terminal("t1"), browser("b1"), terminal("t2"), browser("b2"), browser("b3"))
         assertEquals("none viewed: the first in the tree", "b1", rig.opener.target(sessions)?.guid)
-        rig.opener.shown("b2")
-        rig.opener.shown("b3")
+        rig.opener.viewing("b2")
+        rig.opener.viewing("b3")
         assertEquals("b3", rig.opener.target(sessions)?.guid)
-        rig.opener.shown("b2")
+        rig.opener.viewing("b2")
         assertEquals("b2", rig.opener.target(sessions)?.guid)
         // Gone from the tree: the next most recent.
         assertEquals("b3", rig.opener.target(sessions.filter { it.guid != "b2" })?.guid)

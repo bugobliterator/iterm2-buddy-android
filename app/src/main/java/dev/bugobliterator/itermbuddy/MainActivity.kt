@@ -13,7 +13,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.getValue
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.mlkit.common.MlKitException
 import com.google.mlkit.vision.barcode.common.Barcode
@@ -169,6 +171,12 @@ class MainActivity : ComponentActivity() {
         // Read now, so a recreated activity's first frame has the stream (not null, which would
         // drop the config and the Fit menu for a frame).
         val activeNow = sessions.controller.activeStream.value?.copy(liveTop = null)
+        // A Mac-local link dropped before it reached its Browser session: a brief notice.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                app.browserLinks.drops.collect { Toast.makeText(this@MainActivity, it.text, Toast.LENGTH_SHORT).show() }
+            }
+        }
         setContent {
             val state by app.client.state.collectAsStateWithLifecycle()
             val paired by app.client.paired.collectAsStateWithLifecycle()
