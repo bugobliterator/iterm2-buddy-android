@@ -227,5 +227,9 @@ class ScrollbackTilesTest {
         assertEquals(999L..1701L, prefetchLines(layout, view, DocumentView(1000f, 2000f, atLiveBottom = false)))
         // Flung down: the other way round.
         assertEquals(1399L..2101L, prefetchLines(layout, view, DocumentView(9000f, 10_000f, atLiveBottom = false)))
+        // A hard flick to the top of the history: at most four viewports (4 × 101 lines) past the wanted range.
+        assertEquals(995L..1701L, prefetchLines(layout, view, DocumentView(0f, 1000f, atLiveBottom = false)))
+        assertEquals(1399L..2105L, prefetchLines(layout, view, DocumentView(19_000f, 20_000f, atLiveBottom = false)))
+        assertEquals("no reach: what is wanted", wantedLines(layout, view), prefetchLines(layout, view, DocumentView(0f, 1000f, false), maxViewports = 0))
     }
 }

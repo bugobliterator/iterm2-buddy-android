@@ -6,6 +6,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performTouchInput
@@ -29,7 +30,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 /**
  * The terminal canvas's momentum under real Compose pointer dispatch, on a device: a flick over
  * the scrollback coasts on after the finger lifts and stops at the history's top, a touch stops
- * it, and in wheel mode a flick keeps sending notches that thin out. A real [HevcVideoOutput]
+ * it (and that tap is not a tap), and in wheel mode a flick keeps sending notches that thin out. A real [HevcVideoOutput]
  * that never gets a config (no picture). Virtual time: the rule's main clock, advanced by hand.
  */
 @RunWith(AndroidJUnit4::class)
@@ -44,6 +45,8 @@ class CanvasMomentumDeviceTest {
     /** Each wheel send: (main clock ms, up, lines). */
     private val wheel = CopyOnWriteArrayList<Triple<Long, Boolean, Int>>()
     private val keyTyped = mutableIntStateOf(0)
+
+    @Volatile private var taps = 0
 
     @Volatile private var canvas = IntSize.Zero
 
@@ -68,6 +71,7 @@ class CanvasMomentumDeviceTest {
                     wheelStepPx = wheelStep,
                     onWheel = { up, lines -> wheel += Triple(rule.mainClock.currentTime, up, lines) },
                     stopCoast = { keyTyped.intValue },
+                    onTap = { taps++ },
                 )
             }
         }
@@ -115,6 +119,23 @@ class CanvasMomentumDeviceTest {
         settle(1_000)
         assertEquals("held where the finger caught it", atTouch, views.last().topPx, 1f)
         rule.onNodeWithTag(TAG).performTouchInput { up() }
+    }
+
+    @Test
+    fun aTapThatStopsTheCoastIsNotATap() {
+        show(history = 40_000f)
+        flick(0.3f, 0.7f)
+        settle(48)
+        val atTap = views.last().topPx
+        rule.onNodeWithTag(TAG).performTouchInput { click(center) }
+        // Past the double-tap window: the deferred tap would have fired by now.
+        settle(1_000)
+        assertEquals("the coast stopped", atTap, views.last().topPx, 1f)
+        assertEquals("and that is all the tap did (no keyboard)", 0, taps)
+        // The next tap, with nothing coasting, is a tap.
+        rule.onNodeWithTag(TAG).performTouchInput { click(center) }
+        settle(1_000)
+        assertEquals(1, taps)
     }
 
     @Test

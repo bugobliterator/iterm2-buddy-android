@@ -411,8 +411,12 @@ class BrowserDriverTest {
         rig.driver.scroll(0f, -10f, 1f, 1f, 10f, 20f)
         advanceTimeBy(1_000.milliseconds)
         assertEquals(listOf(SpecialKey.DOWN), rig.keys())
-        // 30 px back up: 42 px owed up, so one Up; the finger is 30 px down, the page 0, within half a line.
+        // 30 px back up: 42 px owed up, short of the 54 px (three quarters of a line) a reversal needs.
         rig.driver.scroll(0f, 30f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(1_000.milliseconds)
+        assertEquals(listOf(SpecialKey.DOWN), rig.keys())
+        // 12 px more: one Up; the finger is 18 px up from where it began, the page back at 0.
+        rig.driver.scroll(0f, 12f, 1f, 1f, 10f, 20f)
         advanceTimeBy(1_000.milliseconds)
         assertEquals(listOf(SpecialKey.DOWN, SpecialKey.UP), rig.keys())
     }
@@ -494,6 +498,27 @@ class BrowserDriverTest {
         advanceTimeBy(1_000.milliseconds)
         assertEquals(1, rig.scrolls().size)
         assertTrue(rig.keys().isNotEmpty())
+    }
+
+    @Test
+    fun withKeysASlightlyDiagonalVerticalSwipeLocksToItsSlopTravel() = runTest {
+        val rig = keysRig(this)
+        // Past the slop the finger had gone 10 px sideways and 8 px up: not twice as wide, so vertical.
+        rig.driver.touchDown()
+        rig.driver.beginDrag(10f, -8f)
+        // Its first events lean sideways, as a thumb's arc does; none of it goes as a sideways wheel.
+        rig.driver.scroll(-12f, -5f, 1f, 1f, 10f, 20f)
+        rig.driver.scroll(-6f, -60f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(1_000.milliseconds)
+        assertTrue(rig.scrolls().isEmpty())
+        assertEquals(listOf(SpecialKey.DOWN), rig.keys())
+        // A swipe more than twice as wide as tall locks sideways.
+        rig.driver.touchDown()
+        rig.driver.beginDrag(-21f, 10f)
+        rig.driver.scroll(-100f, 30f, 1f, 1f, 10f, 20f)
+        advanceTimeBy(1_000.milliseconds)
+        assertEquals(listOf(PhoneMessage.BrowserScroll(1, 10.0, 20.0, -100.0, 0.0)), rig.scrolls())
+        assertEquals(1, rig.keys().size)
     }
 
     @Test

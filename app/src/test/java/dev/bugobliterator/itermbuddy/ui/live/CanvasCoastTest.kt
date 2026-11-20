@@ -155,4 +155,14 @@ class CanvasCoastTest {
         assertEquals(expected.topPx, target.topPx, 0.5f)
         assertFalse(target.atLiveBottom)
     }
+
+    @Test
+    fun aReleaseIsCappedAtTheMaximumKeepingItsDirection() {
+        assertEquals(3000f to -4000f, capFlingVelocity(3000f, -4000f, 8000f))
+        val (x, y) = capFlingVelocity(30_000f, -40_000f, 8000f)
+        assertEquals(4800f, x, 0.01f)
+        assertEquals(-6400f, y, 0.01f)
+        assertEquals(30_000f to 0f, capFlingVelocity(30_000f, 0f, Float.NaN))
+        assertEquals(0f to 0f, capFlingVelocity(Float.NaN, 1f, 8000f))
+    }
 }

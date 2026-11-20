@@ -15,6 +15,19 @@ import kotlin.math.hypot
 /** Within this many px of the wanted step a coast counts as still moving on that axis (rounding at the clamp). */
 private const val EDGE_SLACK_PX = 0.5f
 
+/**
+ * A release velocity ([velocityX], [velocityY]) px/s with its speed capped at [maxVelocity] (the
+ * platform's maximum fling velocity), direction kept: the terminal's coast and the browser
+ * page's fling both start from it. Unchanged for an unusable cap; (0, 0) for a non-finite input.
+ */
+internal fun capFlingVelocity(velocityX: Float, velocityY: Float, maxVelocity: Float): Pair<Float, Float> {
+    if (!velocityX.isFinite() || !velocityY.isFinite()) return 0f to 0f
+    val speed = hypot(velocityX, velocityY)
+    if (!(maxVelocity.isFinite() && maxVelocity > 0f) || speed <= maxVelocity) return velocityX to velocityY
+    val ratio = maxVelocity / speed
+    return velocityX * ratio to velocityY * ratio
+}
+
 /** One frame of a [CanvasCoast]: the new kept zoom, the wheel notches to send ([notches] toward [up]), and whether the coast is over. */
 internal class CoastFrame(val kept: KeptZoom, val notches: Int, val up: Boolean, val finished: Boolean)
 
@@ -93,12 +106,11 @@ internal class CanvasCoast private constructor(
          * ([FlingCurve.orNull]). [wheel] is the gesture's accumulator in wheel mode, else null.
          */
         fun of(velocityX: Float, velocityY: Float, densityPxPerDp: Float, maxVelocity: Float, wheel: ScrollWheelAccumulator?): CanvasCoast? {
-            if (!velocityX.isFinite() || !velocityY.isFinite()) return null
-            val speed = hypot(velocityX, velocityY)
+            val (x, y) = capFlingVelocity(velocityX, velocityY, maxVelocity)
+            val speed = hypot(x, y)
             if (!(speed > 0f)) return null
-            val capped = if (maxVelocity.isFinite() && maxVelocity > 0f) minOf(speed, maxVelocity) else speed
-            val curve = FlingCurve.orNull(capped, densityPxPerDp) ?: return null
-            return CanvasCoast(FlingStepper(curve), velocityX / speed, velocityY / speed, wheel)
+            val curve = FlingCurve.orNull(speed, densityPxPerDp) ?: return null
+            return CanvasCoast(FlingStepper(curve), x / speed, y / speed, wheel)
         }
     }
 }

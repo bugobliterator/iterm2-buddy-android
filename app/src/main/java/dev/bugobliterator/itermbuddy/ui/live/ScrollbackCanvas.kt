@@ -113,8 +113,9 @@ class ScrollbackControl {
  * any layout).
  *
  * **Momentum.** A flick coasts (see [VideoCanvas]); the lines between the view and where a
- * scrollback coast will rest are asked for at once ([prefetchLines]). [control]'s
- * [ScrollbackControl.stopCoast] and a change of stream stop a coast.
+ * scrollback coast will rest (at most [PREFETCH_VIEWPORTS] viewports ahead) are asked for at
+ * once, nearest the view first ([prefetchLines]); when the coast ends the far ones are dropped.
+ * [control]'s [ScrollbackControl.stopCoast] and a change of stream stop a coast.
  *
  * **Selection** ([onSelection] non-null, a terminal with cell geometry and the store's geometry
  * for it). A long press (see [VideoCanvas]) maps each phase's screen point to a terminal point
@@ -199,7 +200,8 @@ fun ScrollbackCanvas(
         }
             .combine(snapshotFlow { currentTiles to currentGeometry }) { wanted, (tiles, geometry) -> Triple(wanted, tiles, geometry) }
             .collect { (wanted, tiles, geometry) ->
-                if (wanted != null) store.want(wanted.second.first, wanted.second.last)
+                // Nearest the view first: the coast's far prefetch waits behind what is on screen.
+                if (wanted != null) store.want(wanted.second.first, wanted.second.last, wanted.first.first, wanted.first.last)
                 holder.update(tiles, geometry, wanted?.first ?: LongRange.EMPTY)
             }
     }

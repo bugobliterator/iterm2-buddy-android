@@ -34,7 +34,7 @@ continuous across tile boundaries and into the live area, and **↓ Live** retur
 In a session with long output (`seq 1 20000`), flick down and lift: the history keeps coasting
 and slows smoothly to a stop, as an Android list does. A hard flick stops at the top of the
 history with no bounce; a flick back down stops at the live bottom. Touching the screen while it
-coasts stops it where it is. Tiles ahead of the coast are already drawn, or fill in quickly
+coasts stops it where it is, and that tap does nothing else (the keyboard does not open). Tiles ahead of the coast are already drawn, or fill in quickly
 (dark placeholders at most for a moment). Zoomed in, a flick pans and coasts too.
 
 **Result:**

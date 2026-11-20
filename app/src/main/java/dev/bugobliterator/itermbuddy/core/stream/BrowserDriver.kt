@@ -67,9 +67,10 @@ const val BROWSER_INPUT_REVISION = 15
  *   `docs/reports/iterm2-companion-browser-scroll-offset.md`). A line is [keyLineCssPx] CSS px and a
  *   page the stream's height less [keyPageOverlapCssPx], at the config's scale. A key is queued as
  *   stream input and withdrawn at dequeue if the page is editing by then. Horizontal travel still
- *   goes as `browserScroll` (no sideways keys), but each gesture locks to its dominant axis (set
- *   by its first travel, kept for its fling), so a vertical swipe's small sideways wobble sends no
- *   misplaced wheel event. A tap or pinch drops the key backlog; so does a touch-down
+ *   goes as `browserScroll` (no sideways keys), but each gesture locks to one axis, kept for its
+ *   fling: set from the travel that took it past the touch slop ([beginDrag]; else its first
+ *   travel), biased to vertical (sideways only when more than twice as wide as tall), so a
+ *   vertical swipe's sideways wobble sends no misplaced wheel event. A tap or pinch drops the key backlog; so does a touch-down
  *   ([touchDown]) while a fling or keys are still owed, and travel reversing owed keys.
  * - **After a tap** drags use `browserScroll` for [tapKeyHoldMillis] or until [editing] changes,
  *   whichever is first, so a swipe right after tapping a field does not send arrows into it.
@@ -123,6 +124,11 @@ class BrowserDriver(
     private var axis: Axis? = null
 
     private enum class Axis { X, Y }
+
+    private companion object {
+        /** A gesture locks sideways only when its travel is more than this many times as wide as tall. */
+        const val AXIS_X_RATIO = 2f
+    }
 
     /** The stream [accumulator]'s travel belongs to; touched under [lock]. */
     private var scrollKey: StreamKey? = null
@@ -206,16 +212,30 @@ class BrowserDriver(
     }
 
     /**
+     * A drag began, having travelled ([slopDx], [slopDy]) view px to pass the touch slop: while
+     * keys may scroll, the gesture locks to its axis from that travel ([axisOf]).
+     */
+    fun beginDrag(slopDx: Float, slopDy: Float) {
+        synchronized(lock) {
+            if (!scrollKeys() || editing.value) return
+            axis = axisOf(slopDx, slopDy)
+        }
+    }
+
+    /** The axis of travel ([dx], [dy]): vertical unless more than twice as wide as tall; null for none. */
+    private fun axisOf(dx: Float, dy: Float): Axis? = when {
+        !dx.isFinite() || !dy.isFinite() || (dx == 0f && dy == 0f) -> null
+        abs(dx) > AXIS_X_RATIO * abs(dy) -> Axis.X
+        else -> Axis.Y
+    }
+
+    /**
      * ([dx], [dy]) with the gesture's minor axis dropped while keys may scroll (the switch on and
      * the page not editing): the first travel of a gesture locks it to its dominant axis. Under [lock].
      */
     private fun locked(dx: Float, dy: Float): Pair<Float, Float> {
         if (!scrollKeys() || editing.value) return dx to dy
-        val decided = axis ?: when {
-            !dx.isFinite() || !dy.isFinite() || (dx == 0f && dy == 0f) -> null
-            abs(dy) >= abs(dx) -> Axis.Y
-            else -> Axis.X
-        }.also { axis = it }
+        val decided = axis ?: axisOf(dx, dy).also { axis = it }
         return when (decided) {
             Axis.Y -> 0f to dy
             Axis.X -> dx to 0f
