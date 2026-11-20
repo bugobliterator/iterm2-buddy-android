@@ -129,6 +129,10 @@ Pinch into the bottom-right corner, pan, then double tap back to fit.
 - F-keys work in `htop` (F10 quits).
 - With Gboard, type a word with suggestions showing and hold backspace: no doubled or lost
   characters.
+- In a Claude Code prompt, type `a/b*c+d=e`: every character shows, in order. With Settings →
+  **Send / * + = as paste** off, `/ * + =` do not show (iTerm2 garbles them; see
+  `docs/reports/iterm2-companion-key-injection-bug.md`); turn it back on afterwards.
+- `/` alone on an empty Claude Code prompt opens the slash-command menu.
 
 **Result:**
 
@@ -188,8 +192,10 @@ phone locks at its normal timeout (30 s).
 
 ### Settings
 
-⋮ → Settings shows the connection and the decoder. **Unpair** asks first, then returns to Scan
-to pair. Re-pair afterwards for the remaining phases.
+⋮ → Settings shows the connection and the decoder, and the **Send / * + = as paste** switch, on.
+Turn it off, leave Settings and come back (and force-stop the app and reopen it): it stays off.
+**Unpair** asks first, then returns to Scan to pair; after re-pairing the switch is on again.
+Re-pair afterwards for the remaining phases.
 
 **Result:**
 
@@ -209,6 +215,16 @@ logcat shows each InputConnection call, key event, translated key, sender decisi
 `sendKey`/`pasteText` envelope, with every typed character written as a code point
 (`U+002F[/]`), never as plain text.
 
+Measured on the real-Mac CI (iTerm2 3.7.7, Claude Code 2.1.327): under Claude Code's keyboard
+modes (kitty flags 5 and modifyOtherKeys 2) iTerm2 sends exactly four printable characters as
+the wrong key, `/ * + =` (for example `/` as `ESC[30:47;2u`), and Claude Code draws nothing for
+them; pasted, they arrive as themselves. The app's Settings switch **Send / * + = as paste** (on
+by default) therefore sends each of the four, typed with no modifier, as a one-character
+`pasteText`, in order with the keys around it; Ctrl+/ and the like stay keys. In the trace each
+decision is a sender line: `sender: pasted key U+002F[/] as pasteText (key, run 2/3)`, or
+`sender: typed run U+0061[a] as sendKey (...)`. The upstream report is
+`docs/reports/iterm2-companion-key-injection-bug.md`.
+
 1. Turn it on (takes effect within a second; no restart needed):
 
        adb shell setprop log.tag.IB.Input VERBOSE
@@ -218,7 +234,8 @@ logcat shows each InputConnection call, key event, translated key, sender decisi
        adb logcat -c
        adb logcat -s IB.Input:V > input-trace.txt
 
-3. In a live Claude Code session, type `a/b`, then Return; then `a*b`, then Return.
+3. In a live Claude Code session, type `a/b`, then Return; then `a*b`, then Return. Do it once
+   with **Send / * + = as paste** on and once with it off.
 4. Stop the capture (Ctrl-C) and send `input-trace.txt`.
 5. Turn it off afterwards:
 
