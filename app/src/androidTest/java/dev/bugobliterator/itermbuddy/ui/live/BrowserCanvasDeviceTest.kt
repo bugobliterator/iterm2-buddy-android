@@ -246,6 +246,17 @@ class BrowserCanvasDeviceTest {
     }
 
     @Test
+    fun withScrollKeysOnASlightlyDiagonalVerticalSwipeLocksToVertical() {
+        keysOn = true
+        show(fill = false)
+        // Nearly half as wide as tall: the slop's travel is not twice as wide as tall, so vertical.
+        swipe(0.3f, 0.75f, 0.6f, 0.4f, 400)
+        val sent = sent()
+        assertTrue(keys().isNotEmpty())
+        assertTrue("no sideways scroll: $sent", sent.filterIsInstance<PhoneMessage.BrowserScroll>().all { it.deltaX == 0.0 })
+    }
+
+    @Test
     fun aTapStillClicksThePagePixelUnderIt() {
         show(fill = false)
         // At fit the page is the top half of the width; a quarter of the width down is its middle row.

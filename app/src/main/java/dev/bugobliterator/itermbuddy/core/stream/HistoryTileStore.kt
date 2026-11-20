@@ -87,7 +87,10 @@ sealed interface TileState {
  * [retry]). Each request takes a new per-slot token.
  * At most [maxInFlight] run at once, each in its own coroutine, with up to [maxQueued] waiting
  * behind them; a slot that finds the queue full is not queued (iOS rejects the incoming request,
- * `AppModel.swift:4878-4891`) and is asked for again when a request completes.
+ * `AppModel.swift:4878-4891`) and is asked for again when a request completes. Android-only:
+ * slots are asked for nearest the view first ([want]'s focus: a coasting fling's prefetch reaches
+ * far ahead of what is on screen), the queue is kept in that order, and a nearer slot that finds
+ * the queue full takes the place of the farthest queued one.
  *
  * **Acceptance.** Tile replies reach their waiter directly, not through the controller's ordered
  * inbox, so a reply can land before an earlier config or extent the controller has yet to apply.
@@ -179,6 +182,9 @@ class HistoryTileStore(
     private var nextToken = 0L
     private var wanted: LongRange? = null
 
+    /** The lines on and around the screen within [wanted]: slots are asked for nearest these first. */
+    private var focus: LongRange? = null
+
     // ---- Selection (SessionView.swift:2584-2618) ----
     private var lastEndpoints: SelectionSpan? = null
     private var selectedSlots: Set<Long> = emptySet()
@@ -268,18 +274,28 @@ class HistoryTileStore(
      * The lines the view wants: the visible range plus one viewport each way
      * (`SessionView.swift:2480-2482`). Queued requests for slots no longer wanted are dropped, and
      * every failed slot is tried again when the range changes (a scroll or zoom re-drive,
-     * `SessionView.swift:2179-2185`).
+     * `SessionView.swift:2179-2185`). Slots are asked for nearest [focusFirst]…[focusLast] first
+     * (by default the whole range: in line order), and queued ones are reordered so; when a
+     * coast's prefetch ends, the far slots it queued are dropped with the range.
      */
-    fun want(firstAbsLine: Long, lastAbsLine: Long) = update {
+    fun want(firstAbsLine: Long, lastAbsLine: Long, focusFirst: Long = firstAbsLine, focusLast: Long = lastAbsLine) = update {
         val range = minOf(firstAbsLine, lastAbsLine)..maxOf(firstAbsLine, lastAbsLine)
-        if (range == wanted) return@update
+        val near = minOf(focusFirst, focusLast)..maxOf(focusFirst, focusLast)
+        if (range == wanted && near == focus) return@update
+        val rangeChanged = range != wanted
         wanted = range
-        evicted.clear()
-        val keep = wantedSlots().toHashSet()
-        queue.removeAll { request ->
-            (request.slot !in keep).also { if (it) requested.remove(request.slot) }
+        focus = near
+        if (rangeChanged) {
+            evicted.clear()
+            val keep = wantedSlots().toHashSet()
+            queue.removeAll { request ->
+                (request.slot !in keep).also { if (it) requested.remove(request.slot) }
+            }
+            failed.clear()
         }
-        failed.clear()
+        val ordered = queue.sortedBy { distanceFromFocus(it.slot) }
+        queue.clear()
+        queue.addAll(ordered)
     }
 
     /** Asks for a failed slot again. */
@@ -408,10 +424,22 @@ class HistoryTileStore(
         return slotsBetween(lo, hi).toSet()
     }
 
+    /** The wanted slots, nearest the [focus] first (stable: in line order at equal distance). */
     private fun wantedSlots(): List<Long> {
         val range = wanted ?: return emptyList()
         if (generation == null) return emptyList()
-        return slotsBetween(maxOf(range.first, origin), minOf(range.last, historyEnd() - 1))
+        return slotsBetween(maxOf(range.first, origin), minOf(range.last, historyEnd() - 1)).sortedBy(::distanceFromFocus)
+    }
+
+    /** Lines between [slot]'s span and the [focus] (0 when they overlap, or without one). */
+    private fun distanceFromFocus(slot: Long): Long {
+        val near = focus ?: return 0L
+        val last = slot + HISTORY_SLOT_LINES - 1
+        return when {
+            last < near.first -> near.first - last
+            slot > near.last -> slot - near.last
+            else -> 0L
+        }
     }
 
     private fun startOf(slot: Long): Long = maxOf(slot, origin)
@@ -436,13 +464,21 @@ class HistoryTileStore(
             val have = cached[slot]
             if (have != null && have.count == count && have.start == startOf(slot)) continue
             val full = inFlight.size >= maxInFlight
-            if (full && queue.size >= maxQueued) break
+            if (full && queue.size >= maxQueued) {
+                // Nearest first: a nearer slot displaces the farthest queued one, else none further can.
+                val farthest = queue.maxByOrNull { distanceFromFocus(it.slot) }
+                if (farthest == null || distanceFromFocus(farthest.slot) <= distanceFromFocus(slot)) break
+                queue.remove(farthest)
+                requested.remove(farthest.slot)
+            }
             val token = ++nextToken
             tokens[slot] = token
             val request = Request(slot, startOf(slot), count, token, epoch, linkId, streamID, currentGeneration, epochScope)
             requested[slot] = request
             if (full) {
-                queue.addLast(request)
+                // Kept nearest first.
+                val at = queue.indexOfFirst { distanceFromFocus(it.slot) > distanceFromFocus(slot) }
+                if (at < 0) queue.addLast(request) else queue.add(at, request)
             } else {
                 inFlight += request
                 starts += request

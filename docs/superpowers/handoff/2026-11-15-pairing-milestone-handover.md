@@ -186,6 +186,16 @@ Notes from that task:
   fling's keys, travel against owed keys drops them, each gesture locks to its dominant axis,
   and after a tap drags use `browserScroll` until `browserEditingChanged` or 300 ms; keys go as
   stream input and are withdrawn at dequeue if the page is editing by then.
+- **Review follow-ups:** the prefetch reaches at most 4 viewports past the view's wanted lines
+  and the store asks for slots nearest the view first (`want`'s focus; a nearer slot displaces the
+  farthest queued one; the far ones go when the coast ends). A tap that stops a terminal coast
+  does nothing else (no keyboard), as on an Android list; a browser tap still clicks (iOS). Pastes
+  and composer sends stop a coast too. Browser keys: a key against the last one needs three
+  quarters of a line (hysteresis, so a trembling finger sends no up/down shake); the reviewer's
+  suggested clamp of the remainder to a quarter line was not used, because it makes a slow drag
+  scroll 1.33× the finger. The axis lock comes from the travel that passed the slop, vertical
+  unless more than twice as wide as tall. The browser fling is capped at the maximum fling
+  velocity, as the terminal's.
 - **Tests:** unit (virtual time) and device: `CanvasMomentumDeviceTest`, new cases in
   `BrowserCanvasDeviceTest`. The real-Mac probe adds a `slow key drag` line.
 - **Open:** the on-device checks (Flick the scrollback, Full-screen apps in

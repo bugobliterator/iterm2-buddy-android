@@ -247,4 +247,31 @@ class BrowserScrollTest {
         keys.add(50.0, 72.0, 1900.0)
         assertEquals(18.0, keys.pendingPx, 1e-9)
     }
+
+    @Test
+    fun jitterAtTheThresholdSendsNoShake() {
+        val keys = KeyScrollAccumulator()
+        // A slow drag down that just fired a Down: 36 owed, the 72 px line paid, 36 px ahead.
+        keys.add(-36.0, 72.0, 1900.0)
+        assertEquals(ScrollKey.LINE_DOWN, keys.next(72.0, 1900.0))
+        // The finger trembles up and down by up to 17 px: an Up would need 54 px owed (half a line and a quarter).
+        val sent = mutableListOf<ScrollKey>()
+        repeat(50) { i ->
+            keys.add(if (i % 2 == 0) 17.0 else -17.0, 72.0, 1900.0)
+            keys.next(72.0, 1900.0)?.let { sent += it }
+        }
+        assertEquals("no up/down shake", emptyList<ScrollKey>(), sent)
+        // Carrying on down a line fires the next Down at half a line owed, the slow drag's fidelity kept.
+        keys.add(-72.0, 72.0, 1900.0)
+        assertEquals(ScrollKey.LINE_DOWN, keys.next(72.0, 1900.0))
+        // A real reversal fires once three quarters of a line is owed the other way (36 already, then 18 and 1 more).
+        keys.cancel()
+        keys.add(-36.0, 72.0, 1900.0)
+        keys.next(72.0, 1900.0)
+        keys.add(18.0, 72.0, 1900.0)
+        assertFalse("just short", keys.hasWork(72.0))
+        assertEquals(null, keys.next(72.0, 1900.0))
+        keys.add(1.0, 72.0, 1900.0)
+        assertEquals(ScrollKey.LINE_UP, keys.next(72.0, 1900.0))
+    }
 }

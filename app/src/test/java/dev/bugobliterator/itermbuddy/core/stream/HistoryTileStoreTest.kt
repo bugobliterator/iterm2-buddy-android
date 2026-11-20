@@ -216,6 +216,67 @@ class HistoryTileStoreTest {
     }
 
     @Test
+    fun aCoastsPrefetchIsAskedForNearestTheViewFirst() = runTest {
+        val rig = Rig(this)
+        rig.config(first = 0, total = 5040) // 100 slots
+        // The view around lines 3000..3199; a coast's prefetch reaches up to line 1000.
+        rig.store.want(1000, 3199, focusFirst = 3000, focusLast = 3199)
+        val window = rig.take()
+        // The view's four slots, then the nearest above it.
+        assertEquals(listOf(3000L, 3050L, 3100L, 3150L, 2950L, 2900L), window.map { it.fetch.firstAbsLine })
+        // Answered one at a time, the queue keeps going outward from the view.
+        val order = ArrayList(window.map { it.fetch.firstAbsLine })
+        var open = window
+        while (open.isNotEmpty()) {
+            open.forEach { rig.answer(it) }
+            open = rig.take()
+            order += open.map { it.fetch.firstAbsLine }
+        }
+        val farOnes = order.drop(4)
+        assertEquals("$order", farOnes.sortedDescending(), farOnes)
+        assertEquals((1000L until 3200L step 50).toList(), order.sorted())
+    }
+
+    @Test
+    fun aNearerSlotDisplacesTheFarthestQueuedOne() = runTest {
+        val rig = Rig(this)
+        rig.config(first = 0, total = 5040)
+        // Everything wanted, the view at the bottom: 6 in flight and 24 queued, all near the bottom.
+        rig.store.want(0, 4999, focusFirst = 4800, focusLast = 4999)
+        val old = rig.take()
+        assertEquals(6, old.size)
+        assertEquals(24, rig.store.queuedCount)
+        // The view moved to the top (same range): the top slots take the places of the farthest queued ones.
+        rig.store.want(0, 4999, focusFirst = 0, focusLast = 199)
+        assertEquals(24, rig.store.queuedCount)
+        rig.answer(old.first())
+        assertEquals("the top's first slot goes next", 0L, rig.take().single().fetch.firstAbsLine)
+        rig.answer(old[1])
+        assertEquals(50L, rig.take().single().fetch.firstAbsLine)
+    }
+
+    @Test
+    fun theCoastsFarRequestsAreDroppedWhenItStops() = runTest {
+        val rig = Rig(this)
+        rig.config(first = 0, total = 5040)
+        rig.store.want(1000, 4999, focusFirst = 4800, focusLast = 4999)
+        val old = rig.take()
+        assertEquals(24, rig.store.queuedCount)
+        // The coast stopped: only the view's wanted range is left, and the queue holds nothing outside it.
+        rig.store.want(4600, 4999)
+        assertTrue(rig.store.queuedCount < 24)
+        old.forEach { rig.answer(it) }
+        var open = rig.take()
+        val asked = ArrayList<Long>()
+        while (open.isNotEmpty()) {
+            asked += open.map { it.fetch.firstAbsLine }
+            open.forEach { rig.answer(it) }
+            open = rig.take()
+        }
+        assertTrue("$asked", asked.all { it in 4600L..4999L })
+    }
+
+    @Test
     fun staleGenerationReplyIsDropped() = runTest {
         val rig = Rig(this)
         // The old reply reaches the store even though its request was cancelled by the flush.

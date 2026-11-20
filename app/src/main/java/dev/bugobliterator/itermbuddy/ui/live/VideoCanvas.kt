@@ -190,7 +190,8 @@ class LiveVideoSource(
  * zoomed picture pan on and stop at the top or the live bottom without a bounce, and in wheel
  * mode the coast keeps sending decaying notches through [onWheel] (one count per frame, capped).
  * [onCoastTarget] hears where a scrollback coast will rest (null when it ends), so its tiles are
- * fetched ahead. Any touch stops it, as do a change of the zoom key, of what [stopCoast] reads
+ * fetched ahead. Any touch stops it, and a tap that stops it does nothing else (no [onTap]), as
+ * on an Android list. So do a change of the zoom key, of what [stopCoast] reads
  * (snapshot state, read outside composition: a key typed, another stream), of the wheel step, and
  * [jumpToLive]. A browser page coasts in its driver.
  */
@@ -259,6 +260,8 @@ fun VideoCanvas(
     val coastJob = remember { arrayOfNulls<Job>(1) }
     val currentOnCoastTarget by rememberUpdatedState(onCoastTarget)
     val stopCoasting = remember { { coastJob[0]?.cancel(); coastJob[0] = null } }
+    // Whether the press under way came down on a coast: its tap only stops it, as on an Android list.
+    val caughtCoast = remember { booleanArrayOf(false) }
     DisposableEffect(zoomKey, wheel, jumpToLive) {
         onDispose { stopCoasting() }
     }
@@ -271,6 +274,7 @@ fun VideoCanvas(
         stopCoasting()
         currentOnCoastTarget(coast.target(kept, geometry, currentInset()))
         coastJob[0] = coastScope.launch {
+            val self = coroutineContext[Job]
             try {
                 coast.start(withFrameMillis { it })
                 do {
@@ -279,7 +283,9 @@ fun VideoCanvas(
                     if (frame.notches > 0) currentOnWheel(frame.up, frame.notches)
                 } while (!frame.finished)
             } finally {
-                currentOnCoastTarget(null)
+                // Not when a newer coast has already taken over (and announced its own target).
+                val now = coastJob[0]
+                if (now == null || now === self) currentOnCoastTarget(null)
             }
         }
     }
@@ -322,10 +328,11 @@ fun VideoCanvas(
                 var scrollAt: Pair<Float, Float>? = null
                 detectZoomPan(
                     onDown = {
+                        caughtCoast[0] = coastJob[0]?.isActive == true
                         stopCoasting()
                         currentBrowser?.touchDown()
                     },
-                    onStart = { down ->
+                    onStart = { down, slop ->
                         multiTouch = false
                         sawPinch = false
                         currentWheel?.reset()
@@ -334,6 +341,7 @@ fun VideoCanvas(
                             val g = geometry
                             val image = currentImage
                             browserScrollPoint(down.x, down.y, shownZoom(kept, g, currentInset()), g.fit, image.width, image.height)?.let { scrollAt = it }
+                            currentBrowser?.beginDrag(slop.x, slop.y)
                         }
                     },
                     onEnd = { velocity, completed ->
@@ -351,7 +359,8 @@ fun VideoCanvas(
                             val shown = shownZoom(kept, g, currentInset())
                             val density = browserImagePxPerViewPx(currentImage.width, g.fit)
                             if (density != null && browserFlings(shown.scale, sawPinch, g.base?.scale ?: 1f)) {
-                                val (flingX, flingY) = browserFlingVelocity(velocity.x, velocity.y, shown.scale)
+                                val (cappedX, cappedY) = capFlingVelocity(velocity.x, velocity.y, viewConfiguration.maximumFlingVelocity)
+                                val (flingX, flingY) = browserFlingVelocity(cappedX, cappedY, shown.scale)
                                 page.fling(flingX, flingY, density, shown.scale, at.first, at.second, this@pointerInput.density)
                             }
                         }
@@ -386,7 +395,10 @@ fun VideoCanvas(
                     val inset = currentInset()
                     val shown = shownZoom(kept, g, inset)
                     when (action) {
-                        is PressAction.Tap -> {
+                        is PressAction.Tap -> if (caughtCoast[0] && currentBrowser == null) {
+                            // This press stopped a coast: that is all it does (no keyboard).
+                            caughtCoast[0] = false
+                        } else {
                             val page = currentBrowser
                             if (page != null) {
                                 val image = currentImage
@@ -539,13 +551,13 @@ internal suspend fun PointerInputScope.detectPresses(holdMillis: Long, doubleTap
 /**
  * Pinch and drag, as `detectTransformGestures` (touch slop, then centroid, pan and zoom per event,
  * no rotation), also giving how many pointers are down and when a gesture past the slop starts
- * (with where its first finger went down) and ends (the wheel's accumulator resets then, unless
+ * (with where its first finger went down and the pan that took it past the slop) and ends (the wheel's accumulator resets then, unless
  * it coasts), with the first finger's velocity in px/s and whether it ended with every finger
  * lifted (not cancelled); [onDown] hears every first finger down (it stops a coast).
  */
 private suspend fun PointerInputScope.detectZoomPan(
     onDown: () -> Unit,
-    onStart: (down: Offset) -> Unit,
+    onStart: (down: Offset, slop: Offset) -> Unit,
     onEnd: (velocity: Velocity, completed: Boolean) -> Unit,
     onGesture: (centroid: Offset, pan: Offset, zoom: Float, pointers: Int) -> Unit,
 ) {
@@ -573,7 +585,7 @@ private suspend fun PointerInputScope.detectZoomPan(
                         val zoomMotion = abs(1 - zoom) * event.calculateCentroidSize(useCurrent = false)
                         if (zoomMotion > touchSlop || pan.getDistance() > touchSlop) {
                             pastTouchSlop = true
-                            onStart(down.position)
+                            onStart(down.position, pan)
                         }
                     }
                     if (pastTouchSlop) {

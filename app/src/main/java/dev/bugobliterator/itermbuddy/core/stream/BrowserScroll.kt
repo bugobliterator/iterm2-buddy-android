@@ -151,13 +151,19 @@ enum class ScrollKey { LINE_UP, LINE_DOWN, PAGE_UP, PAGE_DOWN }
  * Each key takes its whole size off the pending travel, signed, so a key that overshoots (an
  * arrow for 0.6 of a line) is paid back by the travel that follows: a slow drag scrolls as far as
  * the finger went, within half a line, never twice as far. What is left is clamped to just inside
- * half a line either way, so rounding never fires a key back the other way. Travel against keys
- * still owed (a drag reversing a fling's backlog) drops them first ([add]). The backlog is capped
+ * half a line either way, so rounding never fires a key back the other way. **Hysteresis:** an
+ * arrow against the last key's direction needs [REVERSE_HYSTERESIS] of a line more (three
+ * quarters of a line in all), so a finger jittering at the threshold sends no up/down shake; the
+ * same way stays at half a line, so a slow drag keeps its fidelity. Travel against keys still
+ * owed (a drag reversing a fling's backlog) drops them first ([add]). The backlog is capped
  * at [MAX_BACKLOG_PAGES] pages, so a long fling does not keep paging long after the finger has
  * gone. Not thread-safe; the caller serialises calls.
  */
 class KeyScrollAccumulator {
     private var pending = 0.0
+
+    /** The direction of the last key (true: up), null since a [cancel]. */
+    private var lastUp: Boolean? = null
 
     /** The travel not yet handed over as keys, encoded px (positive: content down). */
     val pendingPx: Double get() = pending
@@ -174,7 +180,11 @@ class KeyScrollAccumulator {
     }
 
     /** Whether a key is still owed for lines of [linePx]. */
-    fun hasWork(linePx: Double): Boolean = linePx > 0 && abs(pending) >= linePx / 2
+    fun hasWork(linePx: Double): Boolean = linePx > 0 && pending != 0.0 && abs(pending) >= lineThreshold(linePx, pending > 0)
+
+    /** Half a line, or with [REVERSE_HYSTERESIS] more against the last key. */
+    private fun lineThreshold(linePx: Double, up: Boolean): Double =
+        linePx / 2 + if (lastUp != null && lastUp != up) linePx * REVERSE_HYSTERESIS else 0.0
 
     /** The next key for lines of [linePx] and pages of [pagePx], or null when less than half a line is pending. */
     fun next(linePx: Double, pagePx: Double): ScrollKey? {
@@ -183,24 +193,29 @@ class KeyScrollAccumulator {
         val size = abs(pending)
         val (key, step) = when {
             pagePx > linePx && size >= pagePx - linePx / 2 -> (if (up) ScrollKey.PAGE_UP else ScrollKey.PAGE_DOWN) to pagePx
-            size >= linePx / 2 -> (if (up) ScrollKey.LINE_UP else ScrollKey.LINE_DOWN) to linePx
+            size > 0 && size >= lineThreshold(linePx, up) -> (if (up) ScrollKey.LINE_UP else ScrollKey.LINE_DOWN) to linePx
             else -> return null
         }
+        lastUp = up
         // Just inside half a line the other way, so the overshoot never fires a key back.
         val left = maxOf(size - step, -(linePx / 2) * INSIDE)
         pending = if (up) left else -left
         return key
     }
 
-    /** Drops the pending travel. */
+    /** Drops the pending travel (and the hysteresis: the next key may go either way at half a line). */
     fun cancel() {
         pending = 0.0
+        lastUp = null
     }
 
-    private companion object {
-        const val MAX_BACKLOG_PAGES = 2.0
+    companion object {
+        /** A key against the last one needs this fraction of a line more than half a line. */
+        const val REVERSE_HYSTERESIS = 0.25
+
+        private const val MAX_BACKLOG_PAGES = 2.0
 
         /** "Just inside" half a line: a remainder of exactly half a line would fire. */
-        const val INSIDE = 1 - 1e-6
+        private const val INSIDE = 1 - 1e-6
     }
 }

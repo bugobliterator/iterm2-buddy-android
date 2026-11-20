@@ -29,16 +29,24 @@ fun wantedLines(layout: ScrollbackLayout, view: DocumentView): LongRange {
     return (first - viewport)..(last + viewport)
 }
 
+/** A coast's prefetch reaches at most this many viewports past what is wanted around the view. */
+const val PREFETCH_VIEWPORTS = 4
+
 /**
  * The lines to fetch while the view shows [view] and a fling is coasting to [coastTo] (null: none):
  * [wantedLines] of both and everything between, which the coast will pass, so the tiles it will
- * reach are asked for ahead of it rather than as it arrives.
+ * reach are asked for ahead of it rather than as it arrives; but never more than
+ * [maxViewports] viewports beyond [wantedLines] of the view (a hard flick through a long history
+ * fetches what the next seconds will show, not everything to its end). The store asks for them
+ * nearest the view first.
  */
-fun prefetchLines(layout: ScrollbackLayout, view: DocumentView, coastTo: DocumentView?): LongRange {
+fun prefetchLines(layout: ScrollbackLayout, view: DocumentView, coastTo: DocumentView?, maxViewports: Int = PREFETCH_VIEWPORTS): LongRange {
     val now = wantedLines(layout, view)
     if (coastTo == null) return now
     val then = wantedLines(layout, coastTo)
-    return minOf(now.first, then.first)..maxOf(now.last, then.last)
+    val viewport = layout.absLineAt(maxOf(view.topPx, view.bottomPx)) - layout.absLineAt(minOf(view.topPx, view.bottomPx)) + 1
+    val reach = viewport * maxOf(0, maxViewports)
+    return maxOf(minOf(now.first, then.first), now.first - reach)..minOf(maxOf(now.last, then.last), now.last + reach)
 }
 
 /** The [slots] (50-line history slots) with a line in [view]'s span of [layout]. */

@@ -537,7 +537,10 @@ private fun LiveSessionContent(
                     menuAnchor = null
                     val text = clipboardText(context)
                     val pasteTarget = currentTarget
-                    if (text != null && pasteTarget != null) currentActions.paste(pasteTarget, text)
+                    if (text != null && pasteTarget != null) {
+                        scrollback.stopCoast()
+                        currentActions.paste(pasteTarget, text)
+                    }
                 },
             )
         }
@@ -618,6 +621,7 @@ private fun LiveSessionContent(
             canSend = offersInput,
             onPaste = {
                 currentTarget?.let {
+                    scrollback.stopCoast()
                     actions.paste(it, draft)
                     updateDraft("")
                     composerOpen = false
@@ -625,6 +629,7 @@ private fun LiveSessionContent(
             },
             onPasteThenReturn = {
                 currentTarget?.let {
+                    scrollback.stopCoast()
                     actions.typeThenReturn(it, draft)
                     updateDraft("")
                     composerOpen = false
