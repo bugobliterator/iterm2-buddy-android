@@ -28,7 +28,7 @@ plugin_resolved_path() {
 #   SCRIPT_BASENAME  Contents/Resources/<this>.js and .sig inside the plugin app
 install_signed_plugin() {
     local name="$1" url="$2" pinned="$3" key="$4" bundle_id="$5" script="$6"
-    require_tools curl ditto java osascript codesign shasum /usr/libexec/PlistBuddy
+    require_tools curl ditto unzip java osascript codesign shasum /usr/libexec/PlistBuddy
     [[ -x "$LSREGISTER" ]] || die "lsregister is not at $LSREGISTER"
 
     local slug zip actual
@@ -45,6 +45,7 @@ install_signed_plugin() {
     fi
 
     local unpacked app found_id version
+    check_zip_entries "$zip"
     unpacked="$DOWNLOADS_DIR/$slug-unpacked"
     rm -rf "$unpacked"
     mkdir -p "$unpacked"
