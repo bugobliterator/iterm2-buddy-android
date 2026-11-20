@@ -32,18 +32,22 @@ import java.net.URLDecoder
 import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.sign
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Before
@@ -60,8 +64,8 @@ import org.junit.Test
  * whose script beacons back to the server on load (its viewport and devicePixelRatio), on every
  * scroll (`scrollY`, and an inner scroller's `scrollTop`), click (`clientX`/`clientY`), wheel
  * event (where WebKit placed it and its deltas) and key, and every 250 ms with its scroll state.
- * It opens a window of that profile with the bundled it2, typed into the first terminal session,
- * streams the browser session through the app's own [StreamController] and drives it through the
+ * It opens a window of that profile ([BrowserWindows]: the bundled it2 run from the test, then
+ * typed into the first terminal session, then AppleScript, each attempt's output printed), streams the browser session through the app's own [StreamController] and drives it through the
  * app's own [BrowserDriver] and [InputSender]. Each step loads a fresh page (`browserLoad`), so it
  * starts at the top, and then:
  *
@@ -121,14 +125,14 @@ class RealIterm2BrowserTest {
             log = { senderLog += it; line("input: $it") },
         )
 
-        val browser = openBrowserSession(client, sender, linkId)
+        val windows = BrowserWindows(client, sender, linkId)
         try {
-            probe(client, controller, frames, sender, linkId, browser, sent)
+            probe(client, controller, frames, sender, linkId, windows.open(), sent)
         } finally {
             try {
-                closeBrowserSession(client, sender, linkId, browser)
+                windows.closeAll()
             } catch (e: Exception) {
-                line("could not close the browser session: ${e.javaClass.simpleName}")
+                line("could not close the browser window: ${e.javaClass.simpleName}")
             }
         }
     }
@@ -192,39 +196,163 @@ class RealIterm2BrowserTest {
     }
 
     /**
-     * Closes the browser session (`it2 session close`, typed into the terminal session), so the
-     * steps after this one see the window iTerm2 opened at launch in front again. Best effort.
+     * Opens and closes the browser window, with evidence for each attempt. Attempts, until the
+     * session tree shows a browser session:
+     *
+     * 1. the bundled it2 run from the test (`it2 window new --profile buddy-ci-browser`, the API's
+     *    createTab by profile name). The API lets it in by "Allow all apps to connect" (the
+     *    root-owned `disable-automation-auth` that `seed-claude-status.sh` writes,
+     *    iTermAPIHelper.m:1641-1644); a placeholder `ITERM2_COOKIE` only stops it2 asking iTerm2
+     *    for a cookie over AppleScript (CookieAuth.swift:7-15), and an unknown cookie is not a
+     *    refusal (iTermWebSocketConnection.m:132-141);
+     * 2. the same typed into the first terminal session (Ctrl-C and Ctrl-U first, since earlier
+     *    steps typed there), its stdout, stderr and exit status written to a file the test reads;
+     * 3. AppleScript (`create window with profile`), which needs the Automation permission; its
+     *    answer or error is recorded.
+     *
+     * Each attempt's output (it2 prints window IDs and profile names, never terminal content) and
+     * the session tree after it (counts and types; titles are terminal content, so only lengths)
+     * are printed.
      */
-    private suspend fun closeBrowserSession(client: CompanionClient, sender: InputSender, linkId: Long, browser: SessionSummary) {
-        if (!browser.guid.all { it.isLetterOrDigit() || it == '-' || it == ':' }) return
-        val terminal = sessionsOf(rig.sessionTree(client)).firstOrNull { !it.isBrowser } ?: return
-        sender.typeThenReturn(InputTarget(linkId, watchEpoch = 0, sessionGuid = terminal.guid), "\"$IT2\" session close --force --session ${browser.guid}")
-        val closed = rig.poll { sessionsOf(rig.sessionTree(client)).none { it.guid == browser.guid }.takeIf { it } } != null
-        line(if (closed) "closed the browser session" else "the browser session is still open after it2 session close")
-    }
+    private inner class BrowserWindows(private val client: CompanionClient, private val sender: InputSender, private val linkId: Long) {
+        private var before: Set<String>? = null
+        private val created = mutableSetOf<String>()
+        private var opened = false
 
-    /** Opens a window of the browser profile with the bundled it2, typed into the first terminal session; the browser session. */
-    private suspend fun openBrowserSession(client: CompanionClient, sender: InputSender, linkId: Long): SessionSummary {
-        sessionsOf(rig.sessionTree(client)).firstOrNull { it.isBrowser }?.let {
-            line("a browser session is already open")
-            return it
-        }
-        val terminal = rig.firstTerminalSession(client)
-        val stderr = diagnosticsDir().resolve(IT2_STDERR_FILE).also { it.delete() }
-        val target = InputTarget(linkId, watchEpoch = 0, sessionGuid = terminal.guid)
-        sender.key(target, KeyEvent(Key.Text("c"), KeyModifiers(control = true)))
-        delay(300)
-        sender.typeThenReturn(target, "\"$IT2\" window new --profile $PROFILE_NAME 2>>\"${stderr.path}\"")
-        line("typed it2 window new --profile $PROFILE_NAME into the terminal session")
-        return rig.poll { sessionsOf(rig.sessionTree(client)).firstOrNull { it.isBrowser } } ?: run {
-            val profile = File(System.getProperty("user.home"), "Library/Application Support/iTerm2/DynamicProfiles/$PROFILE_NAME.json")
-            val error = if (stderr.isFile) stderr.readLines().filter { it.isNotBlank() }.takeLast(10).joinToString(" | ") else "none"
+        suspend fun open(): SessionSummary {
+            browserIn(rig.sessionTree(client))?.let {
+                line("a browser session is already open")
+                opened = true
+                return it
+            }
+            before = windowIds("before")
+            treeReport("before")
+
+            val direct = it2("window", "new", "--profile", PROFILE_NAME)
+            noteCreated(direct.out)
+            awaitBrowser("it2 run from the test")?.let { return it }
+
+            val terminal = rig.firstTerminalSession(client)
+            val target = InputTarget(linkId, watchEpoch = 0, sessionGuid = terminal.guid)
+            val outFile = diagnosticsDir().resolve(IT2_OUT_FILE).also { it.delete() }
+            sender.key(target, KeyEvent(Key.Text("c"), KeyModifiers(control = true)))
+            delay(300)
+            sender.key(target, KeyEvent(Key.Text("u"), KeyModifiers(control = true)))
+            delay(300)
+            sender.typeThenReturn(
+                target,
+                "\"$IT2\" window new --profile $PROFILE_NAME >\"${outFile.path}\" 2>&1; echo \"exit=\$?\" >>\"${outFile.path}\"",
+            )
+            line("typed it2 window new --profile $PROFILE_NAME into the terminal session")
+            val typed = rig.poll { outFile.takeIf { it.isFile }?.readText()?.takeIf { "exit=" in it } }
+            line("typed it2: ${typed?.let(::oneLine) ?: "no output file within ${rig.requestTimeout} (the shell did not run the line)"}")
+            typed?.let(::noteCreated)
+            awaitBrowser("it2 typed into the terminal session")?.let { return it }
+
+            val script = runProcess(
+                listOf("osascript", "-e", "tell application \"iTerm2\" to create window with profile \"$PROFILE_NAME\""),
+                APPLESCRIPT_TIMEOUT,
+            )
+            line("osascript create window with profile: ${script.text()}")
+            awaitBrowser("AppleScript")?.let { return it }
+
+            val profiles = it2("profile", "list")
+            val listed = profiles.out.lines().count { PROFILE_NAME in it }
+            val profileFile = File(System.getProperty("user.home"), "Library/Application Support/iTerm2/DynamicProfiles/$PROFILE_NAME.json")
             failWith(
-                "no browser session appeared within ${rig.requestTimeout}: profile file ${if (profile.isFile) "present" else "missing"}; " +
-                    "it2 stderr: $error. A missing browser plugin drops the profile (install-browser-plugin.sh), and it2 then " +
-                    "reports an invalid profile name.",
+                "no browser session appeared: it2 from the test ${direct.text()}; typed it2 ${typed?.let(::oneLine) ?: "did not run"}; " +
+                    "AppleScript ${script.text()}; it2 profile list shows $PROFILE_NAME $listed times; the profile file is " +
+                    "${if (profileFile.isFile) "present" else "missing"}",
             )
         }
+
+        /**
+         * Closes every window that appeared since [open] began (and any it2 reported creating),
+         * retrying, then checks the session tree. When no browser was seen it first waits a little,
+         * so a window that comes up after the poll gave up is closed too. Best effort.
+         */
+        suspend fun closeAll() {
+            if (!opened) delay(LATE_WINDOW)
+            for (attempt in 1..2) {
+                val now = windowIds("closing") ?: emptySet()
+                val toClose = (before?.let { now - it } ?: emptySet()) + created.intersect(now)
+                if (toClose.isEmpty() && browserIn(rig.sessionTree(client)) == null) break
+                for (id in toClose) line("it2 window close $id: ${it2("window", "close", "--force", id).text()}")
+                val gone = rig.poll(CLOSE_WAIT) {
+                    (browserIn(rig.sessionTree(client)) == null && windowIds(null)?.let { ids -> ids.none { it in toClose } } != false).takeIf { it }
+                }
+                if (gone != null) {
+                    line("closed ${toClose.size} window(s); no browser session left")
+                    return
+                }
+                line("close attempt $attempt left a browser session or window open")
+            }
+            treeReport("after closing")
+        }
+
+        private fun noteCreated(output: String) {
+            Regex("Created new window: (\\S+)").find(output)?.let { created += it.groupValues[1] }
+        }
+
+        private suspend fun awaitBrowser(how: String): SessionSummary? {
+            val found = rig.poll(OPEN_WAIT) { browserIn(rig.sessionTree(client)) }
+            treeReport("after $how")
+            if (found != null) {
+                line("browser session opened by $how")
+                opened = true
+            }
+            return found
+        }
+
+        private suspend fun treeReport(label: String) {
+            val tree = rig.sessionTree(client)
+            val sessions = sessionsOf(tree)
+            line(
+                "session tree $label: ${tree.windows.size} windows " +
+                    tree.windows.joinToString(prefix = "[", postfix = "]") { w -> "title(len=${w.title.length}) ${w.tabs.size} tabs" } +
+                    ", ${sessions.size} sessions (${sessions.count { it.isBrowser }} browser), ${sessions.map { it.guid }.toSet().size} distinct guids",
+            )
+        }
+
+        /** The window IDs it2 lists (with their frames, printed), or null when it2 cannot list them. */
+        private suspend fun windowIds(label: String?): Set<String>? {
+            val listed = it2("window", "list", "--json", quiet = label == null)
+            if (listed.exit != 0) {
+                if (label != null) line("it2 window list ($label): ${listed.text()}")
+                return null
+            }
+            if (label != null) line("it2 window list ($label): ${oneLine(listed.out)}")
+            return Regex("\"id\"\\s*:\\s*\"([^\"]+)\"").findAll(listed.out).map { it.groupValues[1] }.toSet()
+        }
+
+        private fun browserIn(tree: dev.bugobliterator.itermbuddy.core.sessions.SessionTree): SessionSummary? =
+            sessionsOf(tree).firstOrNull { it.isBrowser }
+
+        private suspend fun it2(vararg args: String, quiet: Boolean = false): Run {
+            val result = runProcess(listOf(IT2) + args, IT2_TIMEOUT, mapOf("ITERM2_COOKIE" to PLACEHOLDER_COOKIE))
+            if (!quiet) line("it2 ${args.joinToString(" ")}: ${result.text()}")
+            return result
+        }
+    }
+
+    /** A finished (or killed) process: its exit status (null: timed out), stdout and stderr. */
+    private class Run(val exit: Int?, val out: String, val err: String) {
+        fun text(): String = "exit ${exit ?: "timed out"}, stdout ${oneLine(out)}, stderr ${oneLine(err)}"
+    }
+
+    /** Runs [command] for at most [timeout], with [env] added; never throws for the process's own failure. */
+    private suspend fun runProcess(command: List<String>, timeout: Duration, env: Map<String, String> = emptyMap()): Run = withContext(Dispatchers.IO) {
+        val process = try {
+            ProcessBuilder(command).apply { environment().putAll(env) }.start()
+        } catch (e: java.io.IOException) {
+            return@withContext Run(-1, "", "could not start: ${e.javaClass.simpleName}")
+        }
+        process.outputStream.close()
+        val out = async { process.inputStream.bufferedReader().readText() }
+        val err = async { process.errorStream.bufferedReader().readText() }
+        val finished = process.waitFor(timeout.inWholeMilliseconds, TimeUnit.MILLISECONDS)
+        if (!finished) process.destroyForcibly()
+        Run(if (finished) process.exitValue() else null, out.await(), err.await())
     }
 
     /** The steps, each on a fresh page; [summary] collects one line per result. */
@@ -500,7 +628,21 @@ class RealIterm2BrowserTest {
     private companion object {
         /** The it2 iTerm2 bundles (`ITERM2_IT2` in `ci/real-iterm2/common.sh`). */
         const val IT2 = "/Applications/iTerm.app/Contents/Resources/utilities/it2"
-        const val IT2_STDERR_FILE = "browser-it2-stderr.txt"
+        const val IT2_OUT_FILE = "browser-it2-output.txt"
+
+        /** Stops it2 asking iTerm2 for a cookie over AppleScript; "Allow all apps to connect" lets it in. */
+        const val PLACEHOLDER_COOKIE = "buddy-ci-no-cookie"
+        val IT2_TIMEOUT = 20.seconds
+        val APPLESCRIPT_TIMEOUT = 20.seconds
+        val OPEN_WAIT = 15.seconds
+        val CLOSE_WAIT = 10.seconds
+        val LATE_WINDOW = 5.seconds
+
+        /** [text] on one line, at most 400 characters (it2's own messages and IDs). */
+        fun oneLine(text: String): String {
+            val flat = text.trim().replace(Regex("\\s*\\n\\s*"), " | ")
+            return if (flat.isEmpty()) "(empty)" else if (flat.length > 400) flat.take(400) + "…" else flat
+        }
 
         /** `BROWSER_PAGE_PORT` and `BROWSER_PROFILE_NAME` in `ci/real-iterm2/common.sh`. */
         const val PAGE_PORT = 8793
