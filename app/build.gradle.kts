@@ -103,12 +103,15 @@ dependencies {
     testImplementation(libs.okhttp.tls)
     testImplementation(libs.kotlinx.coroutines.test)
 
-    // Instrumented tests (AndroidKeyStore); run on a device only.
+    // Instrumented tests (AndroidKeyStore, decoding, gestures); run on a device or emulator only
+    // (.github/workflows/android-device-tests.yml).
     androidTestImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    // Virtual time for the browser canvas's scroll ticker (BrowserCanvasDeviceTest).
+    androidTestImplementation(libs.kotlinx.coroutines.test)
 }
 
 // -PtestForks=1 runs unit tests serially, for timing comparisons.
