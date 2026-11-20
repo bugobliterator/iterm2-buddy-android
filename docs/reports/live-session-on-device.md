@@ -90,6 +90,21 @@ within half a second of appearing on the Mac each time, with no touch.
 
 **Result:**
 
+### Decoder latency with and without the low-latency keys
+
+Debug build. Turn on Settings › Video stats and open a session running `top`. The overlay's
+first line is the decoder and `LL on` (it took the low-latency keys) or `LL fallback` (it
+rejected them and runs the earlier format); the second ends `latency N ms · median M ms`, the
+time from a frame's submit to its output, last frame and median of the last 31. After about
+30 s, record the decoder, the LL state and the median. Then turn off Settings › Decoder
+low-latency keys, go back to the session (the overlay shows `LL off`), wait 30 s and record the
+median again; turn the switch back on. Expected: the median with `LL on` is well under the
+median with `LL off` (the Pixel 9's `c2.exynos.hevc.decoder` showed 112 ms before this
+change). If it shows `LL fallback`, record it, and the log line `decoder … rejected the
+low-latency keys` (Share log).
+
+**Result:**
+
 ### Static screen is silent
 
 Leave an idle shell for 60 s with the Video stats overlay on. Frames in stops growing within a
