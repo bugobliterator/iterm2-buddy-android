@@ -248,6 +248,13 @@ and drives it through the app's `BrowserDriver` and `InputSender`. Each step loa
 - **inner**: a raw scroll at the centre of the inner-scroller page.
 - **keys**: Page Down, Down ×5 and Space through `sendKey` (the browser key path), on both pages,
   after a tap: the fallback if synthetic scrolls are dead.
+- **key drag**: right after **moved** (the window at (400, 300), where a raw scroll's wheel lands
+  off target), the app's drag through `BrowserDriver` with "Scroll web pages with keys" on, on
+  the document and on the inner-scroller page, first with no tap, then after a tap if nothing
+  moved. Then the window goes back to (0, 0).
+- **calibrate**: one Down; five Downs at 0, 60, 120 and 250 ms gaps; Page Down once and three
+  times 120 ms apart; Up; Page Up, each with the CSS px it moved. These set the key path's line
+  size, page overlap and key interval (`DEFAULT_KEY_*` in `BrowserDriver.kt`).
 
 It prints `browser:` lines: the stream's size, scale and the Mac's revision; each step's deltas
 (and the points the Mac makes of them) with the page's scroll offset before and after; and the
