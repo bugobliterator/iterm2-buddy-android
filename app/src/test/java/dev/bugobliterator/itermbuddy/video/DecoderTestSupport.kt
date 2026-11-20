@@ -17,6 +17,8 @@ import org.junit.Assert.assertTrue
 /**
  * A [DecoderThread] on one real thread, as the production `HandlerThread`: tasks run in post
  * order. [drain] waits until everything posted so far (and anything those tasks posted) has run.
+ * Delayed tasks wait in [delayed], in virtual time: [fireDelayed] posts them all, whatever their
+ * delay (the test moves its clock first).
  */
 class TestDecoderThread : DecoderThread {
     @Volatile private var thread: Thread? = null
@@ -30,6 +32,22 @@ class TestDecoderThread : DecoderThread {
         true
     } catch (_: RejectedExecutionException) {
         false
+    }
+
+    val delayed = CopyOnWriteArrayList<Pair<Runnable, Long>>()
+
+    override fun postDelayed(task: Runnable, delayMillis: Long): Boolean {
+        if (executor.isShutdown) return false
+        delayed += task to delayMillis
+        return true
+    }
+
+    /** Posts every delayed task (and drains). */
+    fun fireDelayed() {
+        val due = delayed.toList()
+        delayed.removeAll(due.toSet())
+        due.forEach { post(it.first) }
+        drain()
     }
 
     override fun isCurrent(): Boolean = Thread.currentThread() === thread
@@ -60,6 +78,8 @@ class WedgedDecoderThread : DecoderThread {
         return true
     }
 
+    override fun postDelayed(task: Runnable, delayMillis: Long): Boolean = post(task)
+
     override fun isCurrent(): Boolean = false
 
     override fun quit() = Unit
@@ -88,6 +108,12 @@ class FakeCodecHandle(
     /** Configure throws for a [LowLatencyRequest.REQUESTED] format: a decoder that rejects the low-latency keys. */
     @Volatile var rejectRequestedFormat = false
 
+    /** What configure throws when [rejectRequestedFormat]. */
+    @Volatile var requestedFormatError: () -> RuntimeException = { IllegalArgumentException("injected rejection of the low-latency keys") }
+
+    /** Before a [rejectRequestedFormat] throw, posts an input buffer through the rejected attempt's callback. */
+    @Volatile var staleInputOnRejection = false
+
     /** Start throws for a [LowLatencyRequest.REQUESTED] format. */
     @Volatile var rejectRequestedStart = false
 
@@ -115,7 +141,11 @@ class FakeCodecHandle(
         configureCalls += format
         if (throwOnConfigure) throw IllegalStateException("injected configure failure")
         if (rejectRequestedFormat && format.request == LowLatencyRequest.REQUESTED) {
-            throw IllegalArgumentException("injected rejection of the low-latency keys")
+            if (staleInputOnRejection) {
+                val stale = callback
+                thread.post { stale?.onInputAvailable(STALE_INPUT_INDEX) }
+            }
+            throw requestedFormatError()
         }
         configureError?.let { throw it }
         configuredFormat = format
@@ -138,8 +168,12 @@ class FakeCodecHandle(
         callback = null
     }
 
+    /** Every index [inputBuffer] was asked for. */
+    val inputIndices = CopyOnWriteArrayList<Int>()
+
     override fun inputBuffer(index: Int): ByteBuffer? {
         check(!released) { "released" }
+        inputIndices += index
         return buffers.getOrPut(index) { ByteBuffer.allocate(bufferCapacity ?: checkNotNull(configuredFormat).maxInputSize) }
     }
 
@@ -178,6 +212,9 @@ class FakeCodecHandle(
         thread.post { callback?.block() }
     }
 }
+
+/** The input index [FakeCodecHandle.staleInputOnRejection] posts. */
+const val STALE_INPUT_INDEX = 7
 
 /** Builds [FakeCodecHandle]s and keeps them, for [HevcVideoOutput]'s `codecFactory`. */
 class FakeCodecFactory(private val thread: DecoderThread, private val configure: FakeCodecHandle.(index: Int) -> Unit = {}) {

@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy.video
 
+import android.media.MediaCodec
 import android.os.Build
 import android.os.SystemClock
 import android.view.Surface
@@ -56,6 +57,12 @@ private const val MIN_MAX_INPUT_SIZE: Long = 4L shl 20
 /** The `KEY_MAX_INPUT_SIZE` a decoder is rebuilt with, once, for a keyframe over the first one: 16 MiB. */
 private const val ENLARGED_MAX_INPUT_SIZE: Int = 16 shl 20
 
+/**
+ * How long a decoder configured with the low-latency keys may go without any output after its
+ * first keyframe went in before it is rebuilt with the minimal format.
+ */
+const val DEFAULT_LOW_LATENCY_OUTPUT_TIMEOUT_MILLIS: Long = 3_000
+
 /** Failures of one decoder, with no output in between, before the next candidate is tried. */
 private const val FAILURES_BEFORE_FALLBACK = 2
 
@@ -88,12 +95,24 @@ private const val TAG = "HevcVideoOutput"
  * same surface again does nothing. Until a codec's first keyframe, [submit] refuses non-keyframes.
  *
  * **Low latency.** Each decoder is first configured with [LowLatencyRequest.REQUESTED]
- * ([decoderIntegerKeys]: `KEY_LOW_LATENCY` whether or not advertised, plus its vendor's keys). If
- * configure or start throws (other than [InsufficientResourceException]), the same codec is reset
- * and configured once more with [LowLatencyRequest.MINIMAL] (the earlier format); when that works,
- * the decoder is remembered in [lowLatencyFallbacks] and gets the minimal format straight away
- * from then on. Which path ran is logged, key names only. [setLowLatencyKeys] (the debug switch)
- * turns the requested format off and on, rebuilding the decoder.
+ * ([decoderIntegerKeys]: `KEY_LOW_LATENCY` whether or not advertised, plus its vendor's keys;
+ * Qualcomm's picture-order key only when the SPS says the stream never reorders,
+ * [spsMaxNumReorderPics]). When that format differs from [LowLatencyRequest.MINIMAL] (the earlier
+ * format):
+ * - If configure or start throws (other than [InsufficientResourceException]), the same codec is
+ *   reset and configured once more with the minimal format. When that works, a configure-time
+ *   rejection (`IllegalArgumentException` or `CodecException`) remembers the decoder in
+ *   [lowLatencyFallbacks] at once; any other rejection counts, and the decoder is remembered at
+ *   the second ([LowLatencyFallbacks.reject]).
+ * - If the started codec fails (a codec call or callback throws) before its first output, or
+ *   gives no output within [lowLatencyOutputTimeoutMillis] of its first keyframe going in, the
+ *   decoder is remembered and the same decoder rebuilt with the minimal format at once (the queue
+ *   empties and a keyframe is requested); this does not count toward moving to the next decoder.
+ *
+ * A remembered decoder gets the minimal format straight away for the rest of the process. Which
+ * path ran is logged, key names only. Callbacks of the first attempt are ignored once the retry
+ * starts (an attempt counter). [setLowLatencyKeys] (the debug switch) turns the requested format
+ * off and on, rebuilding the decoder.
  *
  * **Failures and fallback.** Any exception from a codec call or callback releases the codec,
  * empties the pending queue and requests a keyframe; the next keyframe [submit] accepts rebuilds
@@ -127,6 +146,9 @@ class HevcVideoOutput(
     private val log: (String) -> Unit = { AppLog.i(TAG, it) },
     private val sdkInt: Int = Build.VERSION.SDK_INT,
     private val lowLatencyFallbacks: LowLatencyFallbacks = LowLatencyFallbacks.process,
+    private val lowLatencyOutputTimeoutMillis: Long = DEFAULT_LOW_LATENCY_OUTPUT_TIMEOUT_MILLIS,
+    /** Device tests only: added to every [LowLatencyRequest.REQUESTED] format, so it differs from the minimal one on any decoder. */
+    private val extraRequestedKeys: Map<String, Int> = emptyMap(),
 ) : VideoOutput, AutoCloseable {
 
     /**
@@ -142,6 +164,8 @@ class HevcVideoOutput(
         val candidates: List<DecoderInfo>,
         val csd: ByteArray?,
         var maxInputSize: Int,
+        /** The SPS may reorder pictures (`sps_max_num_reorder_pics > 0`, or unknown). */
+        val reorders: Boolean = true,
     ) {
         var candidate = 0
         var failures = 0
@@ -164,6 +188,7 @@ class HevcVideoOutput(
         val csd: ByteArray,
         val maxInputSize: Int,
         val lowLatencyKeys: Boolean,
+        val reorders: Boolean,
     )
 
     // ---- Guarded by lock: the wanted state, the pending queue and the overdue clock ----
@@ -190,6 +215,19 @@ class HevcVideoOutput(
     private var codecEpoch = -1L
     private var codecHasOutput = false
     private val freeInputs = ArrayDeque<Int>()
+
+    /** Bumped for every configure attempt; callbacks of an earlier attempt are ignored. */
+    private var codecAttempt = 0L
+
+    /** The running codec runs [LowLatencyRequest.REQUESTED] and that differs from the minimal format. */
+    private var codecRequested = false
+    private var codecDecoderName: String? = null
+
+    /** The attempt the no-output check is armed for. */
+    private var watchdogAttempt = -1L
+
+    /** Set while configure (not start) runs, so a rejection knows where it came from. */
+    private var inConfigure = false
 
     /** The running decoder's recent accept-to-output samples, oldest first (at most [LATENCY_WINDOW]). */
     private val latencies = ArrayDeque<Long>()
@@ -432,7 +470,8 @@ class HevcVideoOutput(
         val decoders = decoderList
         val choice = chooseDecoder(decoders, width, height)
         val candidates = if (choice is DecoderChoice.Use) decoderCandidates(decoders, width, height) else emptyList()
-        return Plan(extradata, width, height, true, choice, candidates, parameterSetsToCsd(extradata), maxInput)
+        val reorders = spsMaxNumReorderPics(extradata)?.let { it > 0 } ?: true
+        return Plan(extradata, width, height, true, choice, candidates, parameterSetsToCsd(extradata), maxInput, reorders)
     }
 
     // ---- Decoder thread ----
@@ -446,7 +485,7 @@ class HevcVideoOutput(
             val info = current?.current()
             val csd = current?.csd
             if (!closed && !rebuildOnKeyframe && surface != null && current != null && info != null && csd != null) {
-                wanted = Wanted(info, current.width, current.height, csd, current.maxInputSize, lowLatencyKeys)
+                wanted = Wanted(info, current.width, current.height, csd, current.maxInputSize, lowLatencyKeys, current.reorders)
                 wantedSurface = surface
             }
             wantedEpoch = epoch
@@ -458,10 +497,11 @@ class HevcVideoOutput(
         feed()
     }
 
-    private fun formatFor(wanted: Wanted, request: LowLatencyRequest) = CodecFormat(
-        wanted.width, wanted.height, wanted.csd, request,
-        decoderIntegerKeys(wanted.info.name, wanted.info.supportsLowLatency, request, sdkInt, wanted.maxInputSize),
-    )
+    private fun formatFor(wanted: Wanted, request: LowLatencyRequest): CodecFormat {
+        var keys = decoderIntegerKeys(wanted.info.name, wanted.info.supportsLowLatency, request, sdkInt, wanted.maxInputSize, wanted.reorders)
+        if (request == LowLatencyRequest.REQUESTED && extraRequestedKeys.isNotEmpty()) keys = keys + extraRequestedKeys
+        return CodecFormat(wanted.width, wanted.height, wanted.csd, request, keys)
+    }
 
     private fun buildCodec(wanted: Wanted, target: Surface, forEpoch: Long) {
         val info = wanted.info
@@ -474,6 +514,8 @@ class HevcVideoOutput(
         codec = handle
         codecEpoch = forEpoch
         codecHasOutput = false
+        codecRequested = false
+        codecDecoderName = info.name
         freeInputs.clear()
         val minimal = formatFor(wanted, LowLatencyRequest.MINIMAL)
         val first = if (!wanted.lowLatencyKeys || info.name in lowLatencyFallbacks) minimal else formatFor(wanted, LowLatencyRequest.REQUESTED)
@@ -483,12 +525,24 @@ class HevcVideoOutput(
                 startCodec(handle, first, target)
             } catch (e: RuntimeException) {
                 if (first === minimal || e is InsufficientResourceException || first.integerKeys == minimal.integerKeys) throw e
-                log("decoder ${info.name} rejected the low-latency keys (${e.javaClass.simpleName}); retrying with the minimal format")
+                val atConfigure = inConfigure
+                log(
+                    "decoder ${info.name} rejected the low-latency keys at ${if (atConfigure) "configure" else "start"} " +
+                        "(${e.javaClass.simpleName}); retrying with the minimal format",
+                )
                 handle.reset()
                 startCodec(handle, minimal, target)
-                lowLatencyFallbacks.add(info.name)
                 used = minimal
+                // Remembered only once the minimal format worked: a decoder failing both is not the keys' fault.
+                val remembered = if (atConfigure && (e is IllegalArgumentException || e is MediaCodec.CodecException)) {
+                    lowLatencyFallbacks.add(info.name)
+                    true
+                } else {
+                    lowLatencyFallbacks.reject(info.name)
+                }
+                if (remembered) log("decoder ${info.name} gets the minimal format from now on")
             }
+            codecRequested = used.request == LowLatencyRequest.REQUESTED && used.integerKeys != minimal.integerKeys
             val state = when {
                 used.request == LowLatencyRequest.REQUESTED -> LowLatencyState.ON
                 !wanted.lowLatencyKeys -> LowLatencyState.OFF
@@ -509,9 +563,60 @@ class HevcVideoOutput(
 
     private fun startCodec(handle: CodecHandle, format: CodecFormat, target: Surface) {
         freeInputs.clear()
-        handle.setCallback(Events(handle))
+        handle.setCallback(Events(handle, ++codecAttempt))
+        // Left true when configure throws, so the caller knows where the rejection came from.
+        inConfigure = true
         handle.configure(format, target)
+        inConfigure = false
         handle.start()
+    }
+
+    /**
+     * Arms the no-output check once per attempt, when the first keyframe goes into a codec running
+     * the low-latency keys and it has not output yet.
+     */
+    private fun armOutputWatchdog() {
+        if (!codecRequested || codecHasOutput || watchdogAttempt == codecAttempt) return
+        val attempt = codecAttempt
+        watchdogAttempt = attempt
+        val since = nowMillis()
+        decoderThread.postDelayed({ guarded("low-latency output check") { checkOutput(attempt, since) } }, lowLatencyOutputTimeoutMillis)
+    }
+
+    private fun checkOutput(attempt: Long, since: Long) {
+        val handle = codec ?: return
+        if (attempt != codecAttempt || codecHasOutput || !codecRequested) return
+        val waited = nowMillis() - since
+        if (waited < lowLatencyOutputTimeoutMillis) {
+            decoderThread.postDelayed({ guarded("low-latency output check") { checkOutput(attempt, since) } }, lowLatencyOutputTimeoutMillis - waited)
+            return
+        }
+        fallBackToMinimal(handle, codecEpoch, "no output within $lowLatencyOutputTimeoutMillis ms of a keyframe")
+    }
+
+    /**
+     * The codec running the low-latency keys failed or stayed silent before its first output: the
+     * decoder is remembered and the same decoder rebuilt at once with the minimal format, without
+     * counting a failure against it. Its frames and the queue go (the clock carries) and a
+     * keyframe is requested.
+     */
+    private fun fallBackToMinimal(handle: CodecHandle, forEpoch: Long, reason: String) {
+        val name = codecDecoderName ?: handle.name
+        val wanted = synchronized(lock) {
+            if (forEpoch == epoch && !closed) {
+                discardWanted()
+                rebuildOnKeyframe = false
+                true
+            } else {
+                false
+            }
+        }
+        releaseCodec()
+        if (!wanted) return
+        lowLatencyFallbacks.add(name)
+        log("decoder $name failed before its first output with the low-latency keys ($reason); rebuilding it with the minimal format")
+        decoderThread.post(reconcileTask)
+        keyframeRequester?.invoke()
     }
 
     /** Moves pending frames into free input buffers, in order. */
@@ -530,6 +635,7 @@ class HevcVideoOutput(
                 handle.queueInput(index, frame.payloadSize, presentationTimeUs(frame))
                 freeInputs.removeFirst()
                 statsFlow.update { it.copy(framesIn = it.framesIn + 1) }
+                if (frame.isKeyframe) armOutputWatchdog()
             } catch (e: HevcFramingException) {
                 dropUnparseable(e)
                 return
@@ -618,6 +724,10 @@ class HevcVideoOutput(
             releaseQuietly(handle)
             return
         }
+        if (handle != null && codecRequested && !codecHasOutput && error !is InsufficientResourceException) {
+            fallBackToMinimal(handle, forEpoch, error.javaClass.simpleName)
+            return
+        }
         log("decoder failed: ${error.javaClass.simpleName}; releasing it and requesting a keyframe")
         val request = synchronized(lock) {
             if (forEpoch == epoch && !closed) {
@@ -646,6 +756,7 @@ class HevcVideoOutput(
         val handle = codec ?: return
         codec = null
         codecEpoch = -1
+        codecRequested = false
         freeInputs.clear()
         releaseQuietly(handle)
         statsFlow.update { it.copy(decoderName = null) }
@@ -664,8 +775,11 @@ class HevcVideoOutput(
         }
     }
 
-    /** Callbacks of one codec; anything for a codec that is no longer current is ignored. */
-    private inner class Events(private val handle: CodecHandle) : CodecHandle.Callback {
+    /**
+     * Callbacks of one configure [attempt] of a codec; anything for a codec that is no longer
+     * current, or for an attempt before its minimal-format retry, is ignored.
+     */
+    private inner class Events(private val handle: CodecHandle, private val attempt: Long) : CodecHandle.Callback {
         override fun onInputAvailable(index: Int) = onCurrent {
             freeInputs.addLast(index)
             feed()
@@ -682,7 +796,7 @@ class HevcVideoOutput(
         }
 
         private inline fun onCurrent(block: () -> Unit) {
-            if (handle !== codec) return
+            if (handle !== codec || attempt != codecAttempt) return
             try {
                 block()
             } catch (e: RuntimeException) {

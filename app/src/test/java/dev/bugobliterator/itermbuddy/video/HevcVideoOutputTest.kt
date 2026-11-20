@@ -841,7 +841,13 @@ class HevcVideoOutputTest {
         thread.drain()
         assertEquals(listOf(us(1)), codec.queued)
         // Logged by key name only.
-        assertTrue(logs.any { it == "decoder c2.exynos.hevc.decoder rejected the low-latency keys (IllegalArgumentException); retrying with the minimal format" })
+        assertTrue(
+            logs.any {
+                it == "decoder c2.exynos.hevc.decoder rejected the low-latency keys at configure (IllegalArgumentException); " +
+                    "retrying with the minimal format"
+            },
+        )
+        assertTrue(logs.any { it == "decoder c2.exynos.hevc.decoder gets the minimal format from now on" })
         assertTrue(logs.any { it == "decoder c2.exynos.hevc.decoder started for 1280x800, low latency fallback: priority, max-input-size" })
 
         // A rebuild for a new config goes straight to the minimal format.
@@ -854,7 +860,7 @@ class HevcVideoOutputTest {
     }
 
     @Test
-    fun aStartFailureWithTheLowLatencyKeysAlsoRetriesMinimal() {
+    fun aStartFailureWithTheLowLatencyKeysRetriesMinimalAndIsRememberedOnlyAtTheSecond() {
         catalog = exynos()
         factory = FakeCodecFactory(thread) { rejectRequestedStart = true }
         val video = output()
@@ -865,6 +871,172 @@ class HevcVideoOutputTest {
         assertTrue(factory.last.started)
         assertEquals(LowLatencyState.FALLBACK, video.stats.value.lowLatency)
         assertEquals(1, factory.made.size)
+        assertFalse("a one-off start failure is not remembered", "c2.exynos.hevc.decoder" in fallbacks)
+        assertTrue(logs.any { it.startsWith("decoder c2.exynos.hevc.decoder rejected the low-latency keys at start (IllegalStateException)") })
+
+        // The next decoder asks again; the second rejection remembers it.
+        video.configure(streamConfig(extradata = completeExtradata(tag = 2)))
+        thread.drain()
+        assertEquals(listOf(LowLatencyRequest.REQUESTED, LowLatencyRequest.MINIMAL), factory.last.configureCalls.map { it.request })
+        assertTrue("c2.exynos.hevc.decoder" in fallbacks)
+
+        video.configure(streamConfig(extradata = completeExtradata(tag = 3)))
+        thread.drain()
+        assertEquals(listOf(LowLatencyRequest.MINIMAL), factory.last.configureCalls.map { it.request })
+    }
+
+    @Test
+    fun anIllegalStateAtConfigureCountsLikeAStartFailure() {
+        catalog = exynos()
+        factory = FakeCodecFactory(thread) {
+            rejectRequestedFormat = true
+            requestedFormatError = { IllegalStateException("injected") }
+        }
+        val video = output()
+        video.configure(streamConfig())
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        assertEquals(LowLatencyState.FALLBACK, video.stats.value.lowLatency)
+        assertFalse("c2.exynos.hevc.decoder" in fallbacks)
+    }
+
+    @Test
+    fun callbacksOfTheRejectedAttemptAreIgnored() {
+        catalog = exynos()
+        factory = FakeCodecFactory(thread) {
+            rejectRequestedFormat = true
+            staleInputOnRejection = true
+        }
+        val video = output()
+        video.configure(streamConfig())
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        thread.drain()
+        // The retry's buffers are 0-3; index 7 came from the rejected attempt's callback.
+        assertEquals(listOf(us(1)), factory.last.queued)
+        assertFalse(factory.last.inputIndices.contains(STALE_INPUT_INDEX))
+    }
+
+    // ---- Failure before the first output with the low-latency keys ----
+
+    /** An Exynos decoder running the low-latency keys, its first keyframe in, no output yet. */
+    private fun requestedWithKeyframeIn(): HevcVideoOutput {
+        catalog = exynos()
+        val video = ready()
+        assertEquals(LowLatencyState.ON, video.stats.value.lowLatency)
+        assertTrue(video.submit(frame(1, keyframe = true)))
+        thread.drain()
+        return video
+    }
+
+    @Test
+    fun anErrorBeforeTheFirstOutputRebuildsTheSameDecoderMinimal() {
+        val video = requestedWithKeyframeIn()
+        val first = factory.last
+        first.error()
+        thread.drain()
+        assertTrue(first.released)
+        assertEquals(2, factory.made.size)
+        assertEquals(listOf("c2.exynos.hevc.decoder", "c2.exynos.hevc.decoder"), factory.requested.map { it.name })
+        assertEquals("built at once, not on the next keyframe", LowLatencyRequest.MINIMAL, factory.last.configuredFormat?.request)
+        assertEquals(LowLatencyState.FALLBACK, video.stats.value.lowLatency)
+        assertTrue("c2.exynos.hevc.decoder" in fallbacks)
+        assertEquals("a keyframe for the rebuilt decoder", 1, requests.get())
+        assertEquals(0, video.pendingInputCount())
+        assertTrue(logs.any { it.startsWith("decoder c2.exynos.hevc.decoder failed before its first output with the low-latency keys (IllegalStateException)") })
+        // The rebuilt decoder decodes.
+        assertTrue(video.submit(frame(2, keyframe = true)))
+        thread.drain()
+        assertEquals(listOf(us(2)), factory.last.queued)
+
+        // Not counted against the decoder: with no output since, one ordinary failure keeps it ...
+        factory.last.error()
+        thread.drain()
+        assertTrue(video.submit(frame(3, keyframe = true)))
+        thread.drain()
+        assertEquals("c2.exynos.hevc.decoder", factory.requested.last().name)
+        // ... and only the second moves to the next decoder.
+        factory.last.error()
+        thread.drain()
+        assertTrue(video.submit(frame(4, keyframe = true)))
+        thread.drain()
+        assertEquals("sw.hevc", factory.requested.last().name)
+    }
+
+    @Test
+    fun anErrorAfterTheFirstOutputIsAnOrdinaryFailure() {
+        val video = requestedWithKeyframeIn()
+        factory.last.output(us(1))
+        thread.drain()
+        factory.last.error()
+        thread.drain()
+        assertFalse("c2.exynos.hevc.decoder" in fallbacks)
+        assertFalse("no rebuild until a keyframe", video.submit(frame(2, keyframe = false)))
+        assertTrue(video.submit(frame(3, keyframe = true)))
+        thread.drain()
+        assertEquals(LowLatencyRequest.REQUESTED, factory.last.configuredFormat?.request)
+    }
+
+    @Test
+    fun noOutputWithinTheTimeoutOfAKeyframeRebuildsMinimal() {
+        clock.set(10_000)
+        val video = requestedWithKeyframeIn()
+        assertEquals("armed once", 1, thread.delayed.size)
+        assertEquals(DEFAULT_LOW_LATENCY_OUTPUT_TIMEOUT_MILLIS, thread.delayed.single().second)
+        assertTrue(video.submit(frame(2, keyframe = true)))
+        thread.drain()
+        assertEquals("not armed again for the same codec", 1, thread.delayed.size)
+
+        // Fired early (the clock has not reached the timeout): checks again later.
+        clock.set(11_000)
+        thread.fireDelayed()
+        assertEquals(1, factory.made.size)
+        assertEquals(2_000L, thread.delayed.single().second)
+
+        clock.set(13_000)
+        thread.fireDelayed()
+        assertEquals(2, factory.made.size)
+        assertEquals(LowLatencyRequest.MINIMAL, factory.last.configuredFormat?.request)
+        assertEquals(LowLatencyState.FALLBACK, video.stats.value.lowLatency)
+        assertTrue("c2.exynos.hevc.decoder" in fallbacks)
+        assertEquals(1, requests.get())
+        assertTrue(logs.any { it.contains("(no output within 3000 ms of a keyframe)") })
+        // The minimal decoder is not watched.
+        assertTrue(video.submit(frame(3, keyframe = true)))
+        thread.drain()
+        assertTrue(thread.delayed.isEmpty())
+    }
+
+    @Test
+    fun anOutputDisarmsTheNoOutputCheck() {
+        clock.set(10_000)
+        val video = requestedWithKeyframeIn()
+        factory.last.output(us(1))
+        thread.drain()
+        clock.set(20_000)
+        thread.fireDelayed()
+        assertEquals(1, factory.made.size)
+        assertEquals(LowLatencyState.ON, video.stats.value.lowLatency)
+        assertFalse("c2.exynos.hevc.decoder" in fallbacks)
+    }
+
+    @Test
+    fun theQualcommPictureOrderKeyFollowsTheSps() {
+        catalog = FixedCatalog(listOf(decoder("c2.qti.hevc.decoder", lowLatency = false)))
+        val noReorder = extradataOf(HevcSpsTest.hex(HevcSpsTest.BF0_VPS), HevcSpsTest.hex(HevcSpsTest.BF0_SPS), HevcSpsTest.hex(HevcSpsTest.PPS))
+        val reorder = extradataOf(HevcSpsTest.hex(HevcSpsTest.BF3_VPS), HevcSpsTest.hex(HevcSpsTest.BF3_SPS), HevcSpsTest.hex(HevcSpsTest.PPS))
+        val video = output()
+        video.configure(streamConfig(extradata = noReorder))
+        video.attachSurface(fakeSurface())
+        thread.drain()
+        assertEquals(1, factory.last.configuredFormat?.integerKeys?.get("vendor.qti-ext-dec-picture-order.enable"))
+        video.configure(streamConfig(extradata = reorder))
+        thread.drain()
+        assertEquals(2, factory.made.size)
+        val keys = checkNotNull(factory.last.configuredFormat).integerKeys
+        assertFalse("vendor.qti-ext-dec-picture-order.enable" in keys)
+        assertEquals(1, keys["vendor.qti-ext-dec-low-latency.enable"])
     }
 
     @Test
