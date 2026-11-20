@@ -3,7 +3,8 @@ name: Real iTerm2
 # Runs the app's own CompanionClient, as the phone, against a real iTerm2 3.7.7 on a macOS
 # runner, through a local relay behind TLS: pairing, the session tree, typing into a session, its
 # live HEVC stream, Claude Code's status in the session subtitle, the bytes keys deliver (a
-# probe), live-session latency (a report), what scrolls a browser session's page (a probe), and
+# probe), live-session latency (a report), what scrolls a browser session's page (a probe), what
+# Fit to phone gets on the runner's screen (a report), and
 # Agent Chat against a local fake model (no model key, no secret). See ci/real-iterm2/README.md.
 #
 # Manual only: it is slow and depends on iterm2.com, so it never runs on every push to main.
@@ -240,6 +241,30 @@ jobs:
         if: success() || failure()
         run: |
           kept="$RUNNER_TEMP/real-iterm2/diagnostics/browser"
+          mkdir -p "$kept"
+          cp -R app/build/test-results/realIterm2Test "$kept/test-results" 2>/dev/null || true
+          cp -R app/build/reports/tests/realIterm2Test "$kept/reports" 2>/dev/null || true
+
+      # The Fit to phone report (RealIterm2FitTest): the app's AutoFitter for a tall phone (1080x2200)
+      # on the runner's small screen, where iTerm2 caps a window's rows: the grid it asks for, the
+      # grid the Mac gives, the one corrective step and its result; then landscape, and a split pane
+      # (it2 session split). It reports in the log (fit: lines) and fails only when the stream broke.
+      - name: Report Fit to phone on the runner's screen
+        if: success() || failure()
+        continue-on-error: true
+        timeout-minutes: 6
+        env:
+          REAL_ITERM2: '1'
+          REAL_ITERM2_PAIRING_FILE: ${{ runner.temp }}/real-iterm2/pairing.env
+          REAL_ITERM2_RELAY_URL: ws://127.0.0.1:8787/
+          REAL_ITERM2_CONNECT_TIMEOUT_SECONDS: '180'
+          REAL_ITERM2_REQUEST_TIMEOUT_SECONDS: '30'
+        run: ./gradlew realIterm2Test --tests '*.RealIterm2FitTest'
+
+      - name: Keep the Fit to phone results
+        if: success() || failure()
+        run: |
+          kept="$RUNNER_TEMP/real-iterm2/diagnostics/fit"
           mkdir -p "$kept"
           cp -R app/build/test-results/realIterm2Test "$kept/test-results" 2>/dev/null || true
           cp -R app/build/reports/tests/realIterm2Test "$kept/reports" 2>/dev/null || true

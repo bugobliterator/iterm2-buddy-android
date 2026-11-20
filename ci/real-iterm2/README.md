@@ -192,6 +192,26 @@ Mac's and the phone's own share, and the `TCP_NODELAY` difference is a lower bou
 link shows. The report is `latency:` lines in the job log, ending with a summary per round. It
 prints numbers only.
 
+## The Fit to phone report
+
+The owner's report: with Fit to phone, a portrait session fills the phone's width but only about
+three quarters of its height. iTerm2 grows a window's rows only as far as its screens hold
+(`PseudoTerminal.m` `safelySetSessionSize:rows:columns:`, "Cap growth if it exceeds the maximum",
+rows only; `sessionInitiatedResize:width:height:` then fits the window to the tab), so 60 columns ×
+the rows of a tall phone can come back with fewer rows: wider than the phone. The app then sends
+one corrective resize with fewer columns and the rows the Mac gave (`correctedFitGrid`).
+`RealIterm2FitTest` reproduces it on the runner, whose screen is small. It runs after the browser
+probe, in its own step that continues on error.
+
+It streams the first terminal session in the app's own `StreamController` and runs the app's
+`AutoFitter` with the toggle on: for a 1080×2200 viewport, then 2200×1080, then 1080×2200 again,
+then after splitting the session top/bottom with `it2 session split` (from the JVM, else typed
+into the session) and turning the toggle off and on. Each case prints the fitter's own log lines
+(the grid sent, the grid the next config showed, the corrective step and its result, or that the
+grid did not change) and the final config (grid, pixel size, cell, `canResize`). The added pane is
+closed with `it2 session close --force`. The report is `fit:` lines in the job log, numbers only;
+it fails only when the stream could not start.
+
 ## The browser probe
 
 The owner's report: on a browser session (a local web app shown in iTerm2's built-in browser), a
@@ -333,7 +353,7 @@ what was typed.
 | Start the relay | `start-relay.sh` | Fetches the relay at `b8aa2f9` the way `scripts/relay-it.sh` does and makes a throwaway CA and a `localhost` certificate. It trusts the CA system-wide and starts the relay on `127.0.0.1:8787` (open mode, `RELAY_ORIGIN=https://localhost:8443`). Then it starts `tls-proxy.mjs` on `localhost:8443`. |
 | Start the fake model | `start-fake-model.sh` | Starts `fake-model.mjs` on `127.0.0.1:8790` and waits for `/health`. |
 | Launch iTerm2 | `launch-iterm2.sh` | Runs `open -a iTerm`, then waits for the relay to log `hello role=mac` (iTerm2 parked) and takes a screenshot. |
-| Test | `./gradlew realIterm2Test --tests …` | Runs stages 1 and 2, then, each in its own step that runs even when the ones before fail, the Claude Code status probe, the key-bytes probe, the latency report and the browser probe (the last three continue on error) and stage 3, so a main thread that Agent Chat leaves blocked cannot fail the others. The phone connects to the relay directly at `ws://127.0.0.1:8787/` and signs for `https://localhost:8443`. |
+| Test | `./gradlew realIterm2Test --tests …` | Runs stages 1 and 2, then, each in its own step that runs even when the ones before fail, the Claude Code status probe, the key-bytes probe, the latency report, the browser probe and the Fit to phone report (the last four continue on error) and stage 3, so a main thread that Agent Chat leaves blocked cannot fail the others. The phone connects to the relay directly at `ws://127.0.0.1:8787/` and signs for `https://localhost:8443`. |
 | Diagnostics | `collect-diagnostics.sh` | Always runs. It collects screenshots, the relay, proxy and fake model logs, the companion and AI defaults, both secure settings, the status probe's defaults and files (the profile, `disable-automation-auth`, the API socket, it2), which seeded keychain items were migrated, both plugin lookups, the fake model's counts and captured request shape, iTerm2's unified log and crash reports. They are uploaded with the test reports as `real-iterm2-<run>-<attempt>`. |
 
 `dump-iterm2-state.sh <label>` prints, as text in the job log, what a screenshot would show:
