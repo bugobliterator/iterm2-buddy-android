@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 
 /**
  * A link found under a tap on the terminal: [url] normalised ([linkFromSelection]), and whether
@@ -190,42 +191,73 @@ fun linksInLine(line: String): List<LineLink> {
 
 /**
  * Cells a code point takes on a terminal grid, as best as can be told without the font: 0 for
- * combining and format characters, 2 for East Asian wide and emoji ranges, else 1.
+ * combining and format characters, 2 for East Asian wide (W and F) ranges and the emoji with
+ * default emoji presentation (East Asian Width W), else 1. A tab is placed by the walkers
+ * ([indexAtCell], [cellsOf]), not here.
  */
 internal fun cellWidth(codePoint: Int): Int {
     val type = Character.getType(codePoint)
     if (type == Character.NON_SPACING_MARK.toInt() || type == Character.ENCLOSING_MARK.toInt() || type == Character.FORMAT.toInt()) return 0
-    val wide = codePoint in 0x1100..0x115F || codePoint in 0x2E80..0x303E || codePoint in 0x3041..0xA4CF ||
-        codePoint in 0xAC00..0xD7A3 || codePoint in 0xF900..0xFAFF || codePoint in 0xFE30..0xFE4F ||
-        codePoint in 0xFF00..0xFF60 || codePoint in 0xFFE0..0xFFE6 || codePoint in 0x1F300..0x1F64F ||
-        codePoint in 0x1F900..0x1F9FF || codePoint in 0x20000..0x3FFFD
-    return if (wide) 2 else 1
+    return if (WIDE.any { codePoint in it }) 2 else 1
 }
 
-/** Where cell [cell] of [line] falls: its string index (past the end, the length plus the blank cells beyond), and whether every width before it was plain (1). */
-internal fun indexAtCell(line: String, cell: Int): Pair<Int, Boolean> {
+/** East Asian Width W and F, and the emoji-presentation symbols that are W. */
+private val WIDE: List<IntRange> = listOf(
+    0x1100..0x115F, 0x231A..0x231B, 0x2329..0x232A, 0x23E9..0x23EC, 0x23F0..0x23F0, 0x23F3..0x23F3,
+    0x25FD..0x25FE, 0x2614..0x2615, 0x2648..0x2653, 0x267F..0x267F, 0x2693..0x2693, 0x26A1..0x26A1,
+    0x26AA..0x26AB, 0x26BD..0x26BE, 0x26C4..0x26C5, 0x26CE..0x26CE, 0x26D4..0x26D4, 0x26EA..0x26EA,
+    0x26F2..0x26F3, 0x26F5..0x26F5, 0x26FA..0x26FA, 0x26FD..0x26FD, 0x2705..0x2705, 0x270A..0x270B,
+    0x2728..0x2728, 0x274C..0x274C, 0x274E..0x274E, 0x2753..0x2755, 0x2757..0x2757, 0x2795..0x2797,
+    0x27B0..0x27B0, 0x27BF..0x27BF, 0x2B1B..0x2B1C, 0x2B50..0x2B50, 0x2B55..0x2B55,
+    0x2E80..0x303E, 0x3041..0xA4CF, 0xAC00..0xD7A3, 0xF900..0xFAFF, 0xFE10..0xFE19, 0xFE30..0xFE6F,
+    0xFF00..0xFF60, 0xFFE0..0xFFE6,
+    0x1F004..0x1F004, 0x1F0CF..0x1F0CF, 0x1F18E..0x1F18E, 0x1F191..0x1F19A, 0x1F1E6..0x1F1FF,
+    0x1F200..0x1F202, 0x1F210..0x1F23B, 0x1F240..0x1F248, 0x1F250..0x1F251, 0x1F300..0x1F64F,
+    0x1F680..0x1F6FF, 0x1F7E0..0x1F7EB, 0x1F90C..0x1F9FF, 0x1FA70..0x1FAFF, 0x20000..0x3FFFD,
+)
+
+/**
+ * Whether [codePoint]'s width is not certain: anything not one cell ([cellWidth]), any other
+ * symbol (`So`: a font or a variation selector can make it two), and anything above the BMP.
+ */
+internal fun uncertainWidth(codePoint: Int): Boolean =
+    cellWidth(codePoint) != 1 || Character.getType(codePoint) == Character.OTHER_SYMBOL.toInt() || codePoint > 0xFFFF
+
+/** Tab stops every this many cells, iTerm2's default. */
+internal const val TAB_STOP = 8
+
+/** The cell after one at [cells] advanced by [codePoint]: a tab to the next tab stop, else its [cellWidth]. */
+private fun advance(cells: Int, codePoint: Int): Int =
+    if (codePoint == '\t'.code) (cells / TAB_STOP + 1) * TAB_STOP else cells + cellWidth(codePoint)
+
+/**
+ * Where cell [cell] of [line] falls: its string index (past the end, the length plus the blank
+ * cells beyond), and how many code points before it have an [uncertainWidth] (each may put the
+ * index a cell off). A tab covers the cells up to the next tab stop.
+ */
+internal fun indexAtCell(line: String, cell: Int): Pair<Int, Int> {
     var cells = 0
     var i = 0
-    var plain = true
+    var uncertain = 0
     while (i < line.length) {
         val codePoint = line.codePointAt(i)
-        val width = cellWidth(codePoint)
-        if (width != 1) plain = false
-        if (cell < cells + maxOf(width, 1) && width > 0) return i to plain
-        cells += width
+        val next = advance(cells, codePoint)
+        if (cell < next && next > cells) return i to uncertain
+        if (uncertainWidth(codePoint)) uncertain++
+        cells = next
         i += Character.charCount(codePoint)
     }
     // Past the end: one index per blank cell beyond it, so a tap far right of a link is far from it.
-    return line.length + (cell - cells) to plain
+    return line.length + (cell - cells) to uncertain
 }
 
-/** [line]'s width in cells ([cellWidth]). */
+/** [line]'s width in cells (tabs to their stops). */
 internal fun cellsOf(line: String): Int {
     var cells = 0
     var i = 0
     while (i < line.length) {
         val codePoint = line.codePointAt(i)
-        cells += cellWidth(codePoint)
+        cells = advance(cells, codePoint)
         i += Character.charCount(codePoint)
     }
     return cells
@@ -239,31 +271,40 @@ internal fun gridLine(text: String): String = text.replace('\u0000', ' ').trimEn
 
 /**
  * The link under the tap at [point] in [text], the Mac's whole (soft-wrapped, logical) line there
- * ([gridLine] first). The tapped cell's offset into the line is its rows below the line's first
- * row (from [span], the Mac's report of that selection, when it covers [point]) times [columns],
- * plus its column (a whole line starts at column 0, whatever column the report gives); with no
- * usable span the line is taken to start on the tapped row. The offset becomes a string index
- * through [indexAtCell]. When that mapping is sure (a span, or a line that fits in one row, and
- * only plain-width characters before the tap) the nearest link is taken when it is within
- * [SURE_SLACK_CELLS] of the index; when it is not sure (wide or combining characters, a long line
- * with no report, an offset before the line), the nearest link on the line. Null when none.
+ * ([gridLine] first), or null. The tapped cell's offset into the line is its rows below the line's
+ * first row (from [span], the Mac's report of that selection, when it covers [point]) times
+ * [columns], plus its column (a whole line starts at column 0, whatever column the report gives).
+ * With no usable span, a line longer than a row could start on any of its rows above the tap, so
+ * each row's offset (`k × columns + column`) is tried. Each offset becomes a string index through
+ * [indexAtCell]; a link counts only when it is within [SURE_SLACK_CELLS] of it, plus one for each
+ * code point of uncertain width before it. The nearest link that counts is taken. A tap never
+ * takes a link far from it, however unsure the mapping.
  */
 fun linkAtTap(text: String, point: SelectionPoint, span: SelectionSpan?, columns: Int): String? {
     val line = gridLine(text)
     val links = linksInLine(line)
     if (links.isEmpty()) return null
     val usableSpan = span?.takeIf { point.absLine in it.start.absLine..it.end.absLine && columns > 0 }
-    val fitsOneRow = columns > 0 && cellsOf(line) <= columns
-    val cell = if (usableSpan != null) (point.absLine - usableSpan.start.absLine) * columns + point.column else point.column.toLong()
-    val (index, plain) = indexAtCell(line, cell.coerceIn(0, Int.MAX_VALUE.toLong()).toInt())
-    val sure = plain && cell >= 0 && (usableSpan != null || fitsOneRow)
-    fun distance(link: LineLink): Int = when {
-        index < link.start -> link.start - index
-        index >= link.end -> index - link.end + 1
-        else -> 0
+    val lineCells = cellsOf(line)
+    val cells: List<Long> = when {
+        usableSpan != null -> listOf((point.absLine - usableSpan.start.absLine) * columns + point.column)
+        columns > 0 && lineCells > columns -> (0..(lineCells - 1) / columns).map { k -> k.toLong() * columns + point.column }
+        else -> listOf(point.column.toLong())
     }
-    val nearest = links.minBy(::distance)
-    return if (!sure || distance(nearest) <= SURE_SLACK_CELLS) nearest.url else null
+    var best: Pair<Int, String>? = null
+    for (cell in cells) {
+        if (cell < 0 || cell > Int.MAX_VALUE) continue
+        val (index, uncertain) = indexAtCell(line, cell.toInt())
+        for (link in links) {
+            val distance = when {
+                index < link.start -> link.start - index
+                index >= link.end -> index - link.end + 1
+                else -> 0
+            }
+            if (distance <= SURE_SLACK_CELLS + uncertain && (best == null || distance < best.first)) best = distance to link.url
+        }
+    }
+    return best?.second
 }
 
 /** How far off a sure tap may land and still take a link: rounding, a cell's edge, a wrap's seam. */
@@ -280,8 +321,10 @@ const val SURE_SLACK_CELLS = 3
  * gives `example.com/path`, which is not). Then `clearSelection`. The Mac's selection is replaced
  * and then cleared.
  *
- * - **Bounded.** Everything is bounded by [timeout] together (each copy request too, so a late
- *   reply holds the queue no longer); late, it finds nothing.
+ * - **Bounded.** Everything is bounded by [timeout] together: the line copy by 60 % of it (its
+ *   request too, so a late reply holds the queue no longer; past it, or with a line longer than
+ *   64 K characters, the smart fallback runs), the smart copy by what is left; late, it finds
+ *   nothing. A gesture the owner begins meanwhile ends the lookup with nothing.
  * - **Only when free.** Nothing is sent while the Mac reports a selection ([SelectionDriver.range])
  *   or when the active stream is not [sessionGuid]'s terminal stream.
  * - **Clear.** Always queued at the end (also on a timeout, a failure or a cancel), unless
@@ -300,6 +343,8 @@ class LinkLookup(
     private val timeout: Duration = DEFAULT_LINK_LOOKUP_TIMEOUT,
     private val macHosts: () -> Set<String> = { emptySet() },
     private val log: (String) -> Unit = {},
+    /** The clock the bound is measured on; tests pass the scheduler's. */
+    private val timeSource: TimeSource = TimeSource.Monotonic,
 ) {
     /** The link under terminal [point] of [sessionGuid]'s stream, or null (see the class comment). */
     suspend fun lookup(sessionGuid: String, point: SelectionPoint): TappedLink? {
@@ -314,17 +359,25 @@ class LinkLookup(
         var lineChars = -1
         var smartChars = -1
         var url: String? = null
+        val started = timeSource.markNow()
         try {
             url = withTimeoutOrNull(timeout) {
-                val line = selection.copy(sessionGuid, timeout) ?: return@withTimeoutOrNull null
-                lineChars = line.length
-                if (line.length <= MAX_LINE_CHARS) linkAtTap(line, point, selection.range.value, columns)?.let { return@withTimeoutOrNull it }
-                // Not when the stream moved on or the owner began a selection.
-                if (!sameStream() || selection.gesturesBegun() != begun) return@withTimeoutOrNull null
+                // The line gets its share of the bound, so a slow (long) line leaves time for smart.
+                val lineBound = timeout * LINE_SHARE
+                val line = withTimeoutOrNull(lineBound) { selection.copy(sessionGuid, lineBound) }
+                // A gesture the owner began meanwhile owns the selection (and its report): stop.
+                if (selection.gesturesBegun() != begun) return@withTimeoutOrNull null
+                if (line != null) {
+                    lineChars = line.length
+                    if (line.length <= MAX_LINE_CHARS) linkAtTap(line, point, selection.range.value, columns)?.let { return@withTimeoutOrNull it }
+                }
+                if (!sameStream()) return@withTimeoutOrNull null
+                val left = timeout - started.elapsedNow()
+                if (!left.isPositive()) return@withTimeoutOrNull null
                 if (!selection.begin(point, SelectionMode.SMART)) return@withTimeoutOrNull null
                 begun = selection.gesturesBegun()
                 selection.end(point)
-                val smart = selection.copy(sessionGuid, timeout) ?: return@withTimeoutOrNull null
+                val smart = selection.copy(sessionGuid, left) ?: return@withTimeoutOrNull null
                 smartChars = smart.length
                 linkFromSelection(smart)
             }
@@ -347,8 +400,15 @@ class LinkLookup(
     }
 
     private companion object {
-        /** A line longer than this is not searched (a minified file): only the smart selection is tried. */
+        /**
+         * A line longer than this is not searched (a minified file): only the smart selection is
+         * tried. The protocol cannot bound what `copySelection` sends, so such a line still
+         * crosses the link; [LINE_SHARE] keeps a slow one from using the whole bound.
+         */
         const val MAX_LINE_CHARS = 65_536
+
+        /** The line copy's share of the bound; the smart fallback gets what is left. */
+        const val LINE_SHARE = 0.6
     }
 }
 

@@ -21,6 +21,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 /** Link extraction, Mac-local hosts, and the tap's smart-select → copy → clear, in virtual time. */
@@ -125,7 +126,7 @@ class LinkTapTest {
         val range = MutableStateFlow<SelectionSpan?>(null)
         val logs = CopyOnWriteArrayList<String>()
         val driver = SelectionDriver(link, active, range, test.backgroundScope, copyTimeout = 15.seconds)
-        val lookup = LinkLookup(driver, active, timeout = 1.seconds, log = { logs += it })
+        val lookup = LinkLookup(driver, active, timeout = 1.seconds, log = { logs += it }, timeSource = test.testScheduler.timeSource)
 
         fun sent(): List<PhoneMessage> {
             test.runCurrent()
@@ -139,7 +140,7 @@ class LinkTapTest {
         val found = async { rig.lookup.lookup(GUID, POINT) }
         val request = rig.link.requests.receive()
         assertEquals(PhoneMessage.CopySelection(GUID), request.message)
-        assertEquals("the request is bounded as the tap is", 1.seconds, request.timeout)
+        assertEquals("the line's share of the tap's bound", 600.milliseconds, request.timeout)
         assertEquals(
             listOf(
                 PhoneMessage.SelectionGesture(7, SelectionPhase.BEGIN, SelectionMode.LINE, POINT),
@@ -202,11 +203,11 @@ class LinkTapTest {
         val rig = Rig(this)
         val start = currentTime
         val found = async { rig.lookup.lookup(GUID, POINT) }
-        advanceTimeBy(600)
+        advanceTimeBy(500)
         rig.link.requests.receive().reply.complete(MacMessage.SelectionText("no link here"))
         runCurrent()
-        rig.link.requests.receive()
-        advanceTimeBy(400)
+        assertEquals("the smart copy gets what is left", 500.milliseconds, rig.link.requests.receive().timeout)
+        advanceTimeBy(500)
         runCurrent()
         assertTrue(found.isCompleted)
         assertNull(found.await())
@@ -244,18 +245,37 @@ class LinkTapTest {
         assertTrue(found.isCompleted)
         assertNull(found.await())
         assertEquals(1_000L, currentTime - start)
-        // The client's own bound (the request's 1 s) fails it; the queue moves on to the clear.
+        // The client's own bound fails the line copy (600 ms), then the smart one; the clear goes last.
         assertTrue("the clear waits behind the copy", rig.sent().none { it is PhoneMessage.ClearSelection })
         request.reply.completeExceptionally(CompanionRequestException("request timed out"))
+        rig.link.requests.receive().reply.completeExceptionally(CompanionRequestException("request timed out"))
         assertEquals(PhoneMessage.ClearSelection(7), rig.sent().last())
         assertTrue(rig.logs.any { "no answer" in it })
+    }
+
+    @Test
+    fun aSlowLineFallsBackToSmartInTheTimeLeft() = runTest {
+        val rig = Rig(this)
+        val found = async { rig.lookup.lookup(GUID, POINT) }
+        val line = rig.link.requests.receive()
+        advanceTimeBy(600)
+        runCurrent()
+        // The client's bound on the line copy (600 ms) frees the queue for the smart gestures.
+        line.reply.completeExceptionally(CompanionRequestException("request timed out"))
+        val smart = rig.link.requests.receive()
+        assertEquals(400.milliseconds, smart.timeout)
+        smart.reply.complete(MacMessage.SelectionText("https://example.com/path"))
+        assertEquals("https://example.com/path", found.await()?.url)
+        assertEquals(PhoneMessage.ClearSelection(7), rig.sent().last())
     }
 
     @Test
     fun anErrorReplyFindsNothing() = runTest {
         val rig = Rig(this)
         val found = async { rig.lookup.lookup(GUID, POINT) }
-        rig.link.requests.receive().reply.completeExceptionally(CompanionRequestException("link 1 has ended"))
+        rig.link.requests.receive().reply.completeExceptionally(CompanionRequestException("request failed"))
+        // A failed line copy (as a timed-out one) falls back to the smart selection; it fails too.
+        rig.link.requests.receive().reply.completeExceptionally(CompanionRequestException("request failed"))
         assertNull(found.await())
         assertEquals(PhoneMessage.ClearSelection(7), rig.sent().last())
     }
@@ -331,10 +351,10 @@ class LinkTapTest {
         assertEquals(url, linkAtTap(line, SelectionPoint(120, 1), SelectionSpan(SelectionPoint(10, 0), SelectionPoint(10, 3)), columns = 20))
         // Wide characters: 日本 take four cells, so the URL starts at cell 5 but index 3; unsure, so the nearest.
         assertEquals("https://e.example/", linkAtTap("日本 https://e.example/", SelectionPoint(0, 6), null, columns = 80))
-        assertEquals(3 to false, indexAtCell("日本 https://e.example/", 5))
+        assertEquals(3 to 2, indexAtCell("日本 https://e.example/", 5))
         // Combining marks take none.
-        assertEquals(3 to false, indexAtCell("e\u0301 x", 2))
-        assertEquals(7 to true, indexAtCell("ab", 7))
+        assertEquals(3 to 1, indexAtCell("e\u0301 x", 2))
+        assertEquals(7 to 0, indexAtCell("ab", 7))
         assertEquals(listOf(2, 1, 0, 2), listOf(cellWidth('日'.code), cellWidth('a'.code), cellWidth(0x0301), cellWidth(0x1F600)))
         assertNull(linkAtTap("no links", SelectionPoint(0, 0), null, 80))
     }
@@ -361,6 +381,49 @@ class LinkTapTest {
         assertNull(linkAtTap("ab  $url", SelectionPoint(166, 0), null, columns = 80))
         assertEquals(url, linkAtTap("$url   more", SelectionPoint(166, 26), null, columns = 80))
         assertNull(linkAtTap("$url   more", SelectionPoint(166, 27), null, columns = 80))
+    }
+
+    @Test
+    fun tabsAdvanceToTheNextStop() {
+        val line = "a\thttps://one.example\tb\thttps://two.example"
+        assertEquals(59, cellsOf(line))
+        assertEquals(6 to 0, indexAtCell(line, 12))
+        assertEquals("a tab covers its cells", 1 to 0, indexAtCell(line, 5))
+        assertEquals("https://one.example", linkAtTap(line, SelectionPoint(0, 12), null, columns = 80))
+        assertEquals("https://two.example", linkAtTap(line, SelectionPoint(0, 44), null, columns = 80))
+    }
+
+    @Test
+    fun emojiBeforeLinksPlaceTheTap() {
+        val line = "✅ ok ❌ no https://a.example https://b.example"
+        assertEquals(listOf(2, 2, 1), listOf(cellWidth('✅'.code), cellWidth('❌'.code), cellWidth('⚠'.code)))
+        assertEquals("https://a.example", linkAtTap(line, SelectionPoint(0, 13), null, columns = 80))
+        assertEquals("https://b.example", linkAtTap(line, SelectionPoint(0, 31), null, columns = 80))
+        assertEquals(listOf(2, 2, 2, 2), listOf(0x231A, 0x1F680, 0x1FA70, 0x1F1E6).map(::cellWidth))
+        assertTrue("an other symbol is uncertain", uncertainWidth('⚠'.code))
+        assertTrue("above the BMP is uncertain", uncertainWidth(0x1D400))
+        assertFalse(uncertainWidth('a'.code))
+    }
+
+    @Test
+    fun anUnsureTapStillHasToBeNear() {
+        // NFD é, ⚠️ (a symbol and a variation selector): three uncertain code points, slack 6.
+        val line = "cafe\u0301 \u26A0\uFE0F notes and more words https://x.example"
+        assertNull(linkAtTap(line, SelectionPoint(0, 0), null, columns = 80))
+        assertNull(linkAtTap(line, SelectionPoint(0, 20), null, columns = 80))
+        assertEquals("https://x.example", linkAtTap(line, SelectionPoint(0, 33), null, columns = 80))
+        assertEquals("within the widened slack", "https://x.example", linkAtTap(line, SelectionPoint(0, 23), null, columns = 80))
+    }
+
+    @Test
+    fun aWrappedLineWithNoReportTriesEachRow() {
+        // 43 cells on a 20-column grid: rows 0, 1, 2; the link at cells 31..42.
+        val line = "x".repeat(30) + " https://e.co"
+        assertEquals("row 1, column 12", "https://e.co", linkAtTap(line, SelectionPoint(5, 12), null, columns = 20))
+        assertEquals("row 2, column 1", "https://e.co", linkAtTap(line, SelectionPoint(5, 1), null, columns = 20))
+        assertNull("no row puts column 7 near it", linkAtTap(line, SelectionPoint(5, 7), null, columns = 20))
+        // With a report the row is known: column 1 on the first row is plain text.
+        assertNull(linkAtTap(line, SelectionPoint(5, 1), SelectionSpan(SelectionPoint(5, 0), SelectionPoint(7, 2)), columns = 20))
     }
 
     @Test
@@ -402,7 +465,8 @@ class LinkTapTest {
         val request = rig.link.requests.receive()
         rig.driver.begin(SelectionPoint(101, 0))
         request.reply.complete(MacMessage.SelectionText("https://example.com"))
-        assertEquals("https://example.com", found.await()?.url)
+        assertNull("the owner's gesture ends the lookup (its report is not the line's)", found.await())
+        assertTrue("no smart fallback", rig.sent().filterIsInstance<PhoneMessage.SelectionGesture>().none { it.mode == SelectionMode.SMART })
         assertTrue("the owner's selection is not cleared", rig.sent().none { it is PhoneMessage.ClearSelection })
         assertTrue(rig.logs.any { "a selection began meanwhile" in it })
     }
