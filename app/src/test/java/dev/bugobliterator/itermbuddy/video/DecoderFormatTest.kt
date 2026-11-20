@@ -8,8 +8,8 @@ import org.junit.Test
 class DecoderFormatTest {
     private val maxInput = 4 shl 20
 
-    private fun keys(name: String, advertises: Boolean, request: LowLatencyRequest, sdk: Int = 34) =
-        decoderIntegerKeys(name, advertises, request, sdk, maxInput)
+    private fun keys(name: String, advertises: Boolean, request: LowLatencyRequest, sdk: Int = 34, reorders: Boolean = false) =
+        decoderIntegerKeys(name, advertises, request, sdk, maxInput, reorders)
 
     @Test
     fun requestedAsksForLowLatencyWhetherOrNotAdvertised() {
@@ -57,9 +57,9 @@ class DecoderFormatTest {
 
     @Test
     fun noVendorKeysForOtherDecodersOrTheMinimalFormat() {
-        assertTrue(vendorLowLatencyKeys("c2.android.hevc.decoder").isEmpty())
-        assertTrue(vendorLowLatencyKeys("c2.goldfish.hevc.decoder").isEmpty())
-        assertTrue(vendorLowLatencyKeys("exynos.c2.hevc").isEmpty())
+        assertTrue(vendorLowLatencyKeys("c2.android.hevc.decoder", reorders = false).isEmpty())
+        assertTrue(vendorLowLatencyKeys("c2.goldfish.hevc.decoder", reorders = false).isEmpty())
+        assertTrue(vendorLowLatencyKeys("exynos.c2.hevc", reorders = false).isEmpty())
         assertEquals(
             listOf("priority", "max-input-size"),
             keys("c2.qti.hevc.decoder", advertises = false, request = LowLatencyRequest.MINIMAL).keys.toList(),
@@ -88,6 +88,28 @@ class DecoderFormatTest {
     }
 
     @Test
+    fun qualcommPictureOrderOnlyWhenTheStreamNeverReorders() {
+        assertEquals(
+            listOf("low-latency", "vendor.qti-ext-dec-low-latency.enable", "priority", "max-input-size"),
+            keys("c2.qti.hevc.decoder", false, LowLatencyRequest.REQUESTED, reorders = true).keys.toList(),
+        )
+        assertEquals(
+            mapOf("vendor.qti-ext-dec-low-latency.enable" to 1),
+            vendorLowLatencyKeys("c2.qti.hevc.decoder", reorders = true),
+        )
+        // The default is to assume reordering (an SPS that did not parse).
+        assertTrue(
+            "vendor.qti-ext-dec-picture-order.enable" !in
+                decoderIntegerKeys("c2.qti.hevc.decoder", false, LowLatencyRequest.REQUESTED, 34, maxInput),
+        )
+        // Other families do not depend on it.
+        assertEquals(
+            vendorLowLatencyKeys("c2.exynos.hevc.decoder", reorders = false),
+            vendorLowLatencyKeys("c2.exynos.hevc.decoder", reorders = true),
+        )
+    }
+
+    @Test
     fun neverAnOperatingRate() {
         for (request in LowLatencyRequest.entries) {
             assertTrue("operating-rate" !in keys("c2.qti.hevc.decoder", true, request))
@@ -101,5 +123,10 @@ class DecoderFormatTest {
         fallbacks.add("c2.exynos.hevc.decoder")
         assertTrue("c2.exynos.hevc.decoder" in fallbacks)
         assertTrue("c2.android.hevc.decoder" !in fallbacks)
+        // One-off rejections are remembered at the second.
+        assertEquals(false, fallbacks.reject("c2.qti.hevc.decoder"))
+        assertTrue("c2.qti.hevc.decoder" !in fallbacks)
+        assertEquals(true, fallbacks.reject("c2.qti.hevc.decoder"))
+        assertTrue("c2.qti.hevc.decoder" in fallbacks)
     }
 }

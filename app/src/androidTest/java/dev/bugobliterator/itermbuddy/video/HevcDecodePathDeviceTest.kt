@@ -125,6 +125,48 @@ class HevcDecodePathDeviceTest {
         assertTrue("the last frame took ${latencies.joinToString(" and ")} ms", latencies.min() <= 250)
     }
 
+    /**
+     * A decoder whose start throws for the low-latency format (a test key makes that format differ
+     * from the minimal one on any decoder): the same codec is reset, started with the minimal
+     * format, and decodes.
+     */
+    @Test
+    fun startFailureWithTheLowLatencyKeysFallsBackAndDecodes() {
+        val fallbacks = LowLatencyFallbacks()
+        val video = start(
+            codecFactory = { info -> LowLatencyFaultHandle(mediaCodecHandle(info), failStart = true) },
+            fallbacks = fallbacks,
+            extraRequestedKeys = mapOf(TEST_KEY to 1),
+        )
+        for (i in 0..4) assertTrue(video.submit(clip.frames[i]))
+        assertNotNull("an image with the minimal format", awaitImage(clip.frames[4], SystemClock.uptimeMillis() + 2_000))
+        assertEquals(LowLatencyState.FALLBACK, video.stats.value.lowLatency)
+        assertTrue("a one-off start failure is not remembered", checkNotNull(video.stats.value.decoderName) !in fallbacks)
+    }
+
+    /**
+     * A decoder running the low-latency format that errors before its first output: it is
+     * remembered, rebuilt with the minimal format and a keyframe requested; the next keyframe
+     * decodes.
+     */
+    @Test
+    fun errorBeforeFirstOutputRebuildsWithTheMinimalFormat() {
+        val fallbacks = LowLatencyFallbacks()
+        val video = start(
+            codecFactory = { info -> LowLatencyFaultHandle(mediaCodecHandle(info), errorBeforeOutput = true) },
+            fallbacks = fallbacks,
+            extraRequestedKeys = mapOf(TEST_KEY to 1),
+        )
+        assertTrue("started with the low-latency keys", awaitTrue { video.stats.value.lowLatency == LowLatencyState.ON })
+        val decoder = checkNotNull(video.stats.value.decoderName)
+        val before = requests.get()
+        assertTrue(video.submit(clip.frames[0]))
+        assertTrue("rebuilt and a keyframe requested", awaitTrue { requests.get() > before && video.stats.value.lowLatency == LowLatencyState.FALLBACK })
+        assertTrue(decoder in fallbacks)
+        assertTrue(video.submit(clip.frames[10]))
+        assertNotNull("the rebuilt decoder outputs", awaitImage(clip.frames[10], SystemClock.uptimeMillis() + 2_000))
+    }
+
     @Test
     fun surfaceReattachRecoversWithKeyframe() {
         val video = start()
@@ -237,6 +279,8 @@ class HevcDecodePathDeviceTest {
         codecFactory: (DecoderInfo) -> CodecHandle = ::mediaCodecHandle,
         nowMillis: () -> Long = SystemClock::uptimeMillis,
         decoderThread: DecoderThread = HandlerDecoderThread(),
+        fallbacks: LowLatencyFallbacks = LowLatencyFallbacks(),
+        extraRequestedKeys: Map<String, Int> = emptyMap(),
     ): HevcVideoOutput {
         val video = HevcVideoOutput(
             catalog = MediaCodecCatalog(),
@@ -244,7 +288,8 @@ class HevcDecodePathDeviceTest {
             nowMillis = nowMillis,
             decoderThread = decoderThread,
             // Its own memory: a test's rejected keys must not change what the next test configures.
-            lowLatencyFallbacks = LowLatencyFallbacks(),
+            lowLatencyFallbacks = fallbacks,
+            extraRequestedKeys = extraRequestedKeys,
         )
         outputs += video
         video.setKeyframeRequester { requests.incrementAndGet() }
@@ -354,6 +399,43 @@ class HevcDecodePathDeviceTest {
         }
     }
 
+    /**
+     * Wraps the real codec. With [failStart], start throws while the configured format is the
+     * low-latency one. With [errorBeforeOutput], the low-latency format's first output is reported
+     * as an error instead (the codec fails before its first output).
+     */
+    private class LowLatencyFaultHandle(
+        private val real: CodecHandle,
+        private val failStart: Boolean = false,
+        private val errorBeforeOutput: Boolean = false,
+    ) : CodecHandle by real {
+        @Volatile private var request: LowLatencyRequest? = null
+
+        override fun setCallback(callback: CodecHandle.Callback) {
+            real.setCallback(
+                object : CodecHandle.Callback by callback {
+                    override fun onOutputAvailable(index: Int, presentationTimeUs: Long) {
+                        if (errorBeforeOutput && request == LowLatencyRequest.REQUESTED) {
+                            callback.onError(IllegalStateException("injected error before the first output"))
+                        } else {
+                            callback.onOutputAvailable(index, presentationTimeUs)
+                        }
+                    }
+                },
+            )
+        }
+
+        override fun configure(format: CodecFormat, surface: Surface) {
+            request = format.request
+            real.configure(format, surface)
+        }
+
+        override fun start() {
+            if (failStart && request == LowLatencyRequest.REQUESTED) throw IllegalStateException("injected start failure")
+            real.start()
+        }
+    }
+
     /** A codec that decodes nothing: it frees [inputs] input buffers and outputs only when told. */
     private class ScriptedCodecHandle(private val inputs: Int, private val recycleInputs: Boolean = true) : CodecHandle {
         override val name: String = "scripted"
@@ -397,5 +479,8 @@ class HevcDecodePathDeviceTest {
         /** The catalog is logged once per test run (the class is instantiated per test). */
         val catalogLogged = AtomicBoolean(false)
         const val FRAME_GAP_MILLIS = 33L
+
+        /** Makes the low-latency format differ from the minimal one on any decoder; codecs ignore unknown keys. */
+        const val TEST_KEY = "itermbuddy-test-low-latency"
     }
 }

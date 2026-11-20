@@ -36,7 +36,7 @@ class CodecFormat(
  * Every call is made on the decoder thread; [setCallback] is called there first, and the
  * callbacks must be delivered on that same thread (the real handle posts them to its looper).
  * Any call may throw a [RuntimeException] (`CodecException`, `IllegalStateException`, ...).
- * [configure] and [start] throw [InsufficientResourceException] when the codec reports
+ * [configure], [start] and [reset] throw [InsufficientResourceException] when the codec reports
  * `ERROR_INSUFFICIENT_RESOURCE`, so the output moves to another decoder at once. [reset] returns
  * the codec to the unconfigured state (from any state, an error one included) so it can be
  * configured again; the callback is set again after it.
@@ -116,7 +116,7 @@ private class MediaCodecHandle(private val codec: MediaCodec) : CodecHandle {
 
     override fun start() = resourceChecked { codec.start() }
 
-    override fun reset() = codec.reset()
+    override fun reset() = resourceChecked { codec.reset() }
 
     private inline fun resourceChecked(block: () -> Unit) {
         try {
@@ -146,6 +146,9 @@ private class MediaCodecHandle(private val codec: MediaCodec) : CodecHandle {
 interface DecoderThread {
     fun post(task: Runnable): Boolean
 
+    /** Runs [task] on this thread after [delayMillis]; false once the thread has quit. */
+    fun postDelayed(task: Runnable, delayMillis: Long): Boolean
+
     /** True when called on this thread. */
     fun isCurrent(): Boolean
 
@@ -159,6 +162,8 @@ class HandlerDecoderThread(name: String = "HevcDecoder") : DecoderThread {
     private val handler = Handler(thread.looper)
 
     override fun post(task: Runnable): Boolean = handler.post(task)
+
+    override fun postDelayed(task: Runnable, delayMillis: Long): Boolean = handler.postDelayed(task, delayMillis)
 
     override fun isCurrent(): Boolean = Looper.myLooper() == thread.looper
 

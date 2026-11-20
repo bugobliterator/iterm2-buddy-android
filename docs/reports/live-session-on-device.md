@@ -39,7 +39,7 @@ log lines).
     adb install -r app-debug-androidTest.apk
     adb shell am instrument -w -e class dev.bugobliterator.itermbuddy.video.HevcDecodePathDeviceTest dev.bugobliterator.itermbuddy.test/androidx.test.runner.AndroidJUnitRunner
 
-Expected: `OK (7 tests)`. Record the logged last-frame latency. If
+Expected: `OK (9 tests)`. Record the logged last-frame latency. If
 `lastFrameOfBurstIsOutputWithoutMoreInput` fails, record it; no drain logic is added without
 asking the owner.
 
