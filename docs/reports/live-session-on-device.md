@@ -216,9 +216,11 @@ logcat shows each InputConnection call, key event, translated key, sender decisi
 (`U+002F[/]`), never as plain text.
 
 Measured on the real-Mac CI (iTerm2 3.7.7, Claude Code 2.1.327): under Claude Code's keyboard
-modes (kitty flags 5 and modifyOtherKeys 2) iTerm2 sends exactly four printable characters as
-the wrong key, `/ * + =` (for example `/` as `ESC[30:47;2u`), and Claude Code draws nothing for
-them; pasted, they arrive as themselves. The app's Settings switch **Send / * + = as paste** (on
+modes (kitty flags 5 and modifyOtherKeys 2) all 95 printable ASCII characters sent as keys
+arrived, and exactly four were the wrong key, `/ * + =` (for example `/` as `ESC[30:47;2u`).
+Claude Code draws none of those four sent as keys (`a . 1 ? A ~ | -` are drawn); pasted, `/`
+alone opens the slash-command menu and `*` and `/*` are drawn. With the switch on, `a/b*c+d=e`
+arrived as `a`, `ESC[200~/ESC[201~`, `b`, … `e` and Claude drew all four. The app's Settings switch **Send / * + = as paste** (on
 by default) therefore sends each of the four, typed with no modifier, as a one-character
 `pasteText`, in order with the keys around it; Ctrl+/ and the like stay keys. In the trace each
 decision is a sender line: `sender: pasted key U+002F[/] as pasteText (key, run 2/3)`, or

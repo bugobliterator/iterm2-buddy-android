@@ -67,8 +67,11 @@ fun isInputTarget(active: ActiveStream?, target: InputTarget): Boolean =
  *   `sources/Keyboard/VimKeyParser.swift:243-275`; see
  *   `docs/reports/iterm2-companion-key-injection-bug.md`). A paste is written as text whatever
  *   the keyboard mode (bracketed when the program asked). A one-character paste is written at
- *   once on the Mac (`iTermPasteHelper.pasteLiteralEventUnconditionallyImmediately`: no
- *   indicator, no timer), so the key sent after it is not overtaken. A key event with any modifier
+ *   once on the Mac when no other paste is in progress
+ *   (`iTermPasteHelper.pasteLiteralEventUnconditionallyImmediately`: no indicator, no timer).
+ *   While a long paste is still being written on the Mac, though, `iTermPasteHelper` queues
+ *   further pastes behind it, and injected keys skip that queue: the pasted key can then be
+ *   overtaken by the keys sent after it. A key event with any modifier
  *   (Ctrl+/) is sent as a key, unchanged, as is a key for a browser session's page ([key] with
  *   `pasteKeys` false); the composer's **Paste** is unchanged. As with typed
  *   pieces, each run after the first is sent only while the target is still current, and the item
@@ -294,8 +297,10 @@ class InputSender(
 
 /**
  * The characters sent as pastes when the Settings switch is on (see [InputSender]): exactly the
- * four iTerm2 3.7.7 garbles under the kitty keyboard protocol and modifyOtherKeys, measured on a
- * real Mac (every other printable ASCII character arrives right).
+ * four iTerm2 3.7.7 sends as the wrong key under Claude Code's kitty flags 5 with
+ * modifyOtherKeys 2, measured on the real-Mac CI (all 95 printable ASCII characters arrived and
+ * were decoded; the other 91 were right). Claude Code 2.1.327 draws none of the four sent as keys,
+ * and draws each of them pasted.
  */
 const val PASTED_KEYS = "/*+="
 
