@@ -2,6 +2,7 @@ package dev.bugobliterator.itermbuddy.core.sessions
 
 import dev.bugobliterator.itermbuddy.Fixtures
 import dev.bugobliterator.itermbuddy.core.input.InMemoryPasteKeysStore
+import dev.bugobliterator.itermbuddy.core.stream.InMemoryFitToPhoneStore
 import dev.bugobliterator.itermbuddy.core.sessions.SessionsRig.Companion.REPLY
 import dev.bugobliterator.itermbuddy.core.sessions.SessionsRig.Companion.treeOf
 import dev.bugobliterator.itermbuddy.ui.HomeTab
@@ -190,6 +191,19 @@ class SessionTreePollingTest {
         rig.client.unpair()
         runCurrent()
         assertTrue(rig.graph.pasteKeys.enabled.value)
+        assertEquals(null, store.enabled())
+    }
+
+    @Test
+    fun unpairTurnsFitToPhoneBackOff() = runTest {
+        val store = InMemoryFitToPhoneStore(true)
+        val rig = SessionsRig(this, fitToPhoneStore = store)
+        rig.connect()
+        runCurrent()
+        assertTrue("the stored value", rig.graph.fitToPhone.enabled.value)
+        rig.client.unpair()
+        runCurrent()
+        assertFalse(rig.graph.fitToPhone.enabled.value)
         assertEquals(null, store.enabled())
     }
 

@@ -1,7 +1,5 @@
 package dev.bugobliterator.itermbuddy.core.stream
 
-import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
-import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -98,22 +96,39 @@ class FitToPhoneTest {
     }
 
     @Test
-    fun fitSendsResizeOnTheActiveStreamsLink() = runTest {
-        val link = ScriptedStreamLink().apply { currentLink = 3 }
-        val stream = ActiveStream(3, 7, "guid-alpha", 1, config(), 0)
-        assertEquals(Grid(60, 55), fitToPhone(link, stream, 1080, 2000, null))
-        val sent = link.sent.single()
-        assertEquals(PhoneMessage.ResizeSession("guid-alpha", 60, 55), sent.message)
-        assertEquals(3L, sent.onLink)
+    fun correctionNarrowsACappedFitToFillTheViewport() {
+        // A tall phone: 1080×2200 at 16×32 cells asks 60 columns × 61 rows; a Mac whose screen
+        // holds 45 rows gives 60×45, wider than the phone. 45 × 1080/2200 × 32/16 = 44.18 → 44.
+        val requested = fitGrid(1080, 2200, config(), null)
+        assertEquals(Grid(60, 61), requested)
+        assertEquals(Grid(44, 45), correctedFitGrid(Grid(60, 61), Grid(60, 45), 1080, 2200, config(columns = 60, rows = 45)))
+        // The cell comes from the reporting config: no geometry, the image over the grid (16×32 again).
+        val derived = config(cell = null, pixelWidth = 960, pixelHeight = 1440, columns = 60, rows = 45)
+        assertEquals(Grid(44, 45), correctedFitGrid(Grid(60, 61), Grid(60, 45), 1080, 2200, derived))
     }
 
     @Test
-    fun fitSendsNothingWithoutAGrid() = runTest {
-        val link = ScriptedStreamLink()
-        assertNull(fitToPhone(link, ActiveStream(1, 1, "guid-alpha", 1, null, null), 1080, 2000, null))
-        assertNull(fitToPhone(link, ActiveStream(1, 1, "guid-alpha", 1, config(canResize = false), 0), 1080, 2000, null))
-        assertNull(fitToPhone(link, ActiveStream(1, 1, "guid-alpha", 1, config(isBrowser = true), 0), 1080, 2000, null))
-        assertTrue(link.sent.isEmpty())
+    fun correctionKeepsAtLeastFortyColumns() {
+        // 20 rows fill only 19 columns' width: kept at 40.
+        assertEquals(Grid(FIT_MIN_CORRECTED_COLUMNS, 20), correctedFitGrid(Grid(60, 61), Grid(60, 20), 1080, 2200, config()))
+        assertEquals(40, FIT_MIN_CORRECTED_COLUMNS)
+        // Already at or below 40 columns: nothing narrower to ask for.
+        assertNull(correctedFitGrid(Grid(40, 61), Grid(40, 20), 1080, 2200, config()))
+    }
+
+    @Test
+    fun noCorrectionUnlessRowsWereCapped() {
+        // All the rows: nothing to correct.
+        assertNull(correctedFitGrid(Grid(60, 61), Grid(60, 61), 1080, 2200, config()))
+        // More rows than asked (never expected): nothing either.
+        assertNull(correctedFitGrid(Grid(60, 61), Grid(60, 70), 1080, 2200, config()))
+        // Capped by a row or two (under 5 %): left alone; by 4 rows (6.6 %): corrected.
+        assertNull(correctedFitGrid(Grid(60, 61), Grid(60, 60), 1080, 2200, config()))
+        assertNull(correctedFitGrid(Grid(60, 61), Grid(60, 58), 1080, 2200, config()))
+        assertEquals(Grid(55, 57), correctedFitGrid(Grid(60, 61), Grid(60, 57), 1080, 2200, config()))
+        // No viewport or no cell: none.
+        assertNull(correctedFitGrid(Grid(60, 61), Grid(60, 45), 0, 2200, config()))
+        assertNull(correctedFitGrid(Grid(60, 61), Grid(60, 45), 1080, 2200, config(cell = null, columns = 0, rows = 0)))
     }
 
     @Test

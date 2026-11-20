@@ -1,6 +1,7 @@
 package dev.bugobliterator.itermbuddy.ui.live
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -89,6 +90,7 @@ import dev.bugobliterator.itermbuddy.core.input.ModifierKey
 import dev.bugobliterator.itermbuddy.core.input.StickyModifiers
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.core.stream.ActiveStream
+import dev.bugobliterator.itermbuddy.core.stream.FitViewport
 import dev.bugobliterator.itermbuddy.core.stream.LatencyMeter
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
@@ -111,8 +113,14 @@ interface LiveSessionActions {
     /** The controller's `retry`: restarts the stream (or watches an ended one again). */
     fun retry()
 
-    /** Fit to phone for the session shown, with the canvas measured with the keyboard hidden. */
-    fun fitToPhone(sessionGuid: String, viewportWidthPx: Int, viewportHeightPx: Int)
+    /** The ⤢ Fit to phone toggle: on fits the session shown now and keeps fitting; off undoes nothing. */
+    fun setFitToPhone(enabled: Boolean) {}
+
+    /** The view of a session measured its canvas for Fit to phone (keyboard hidden); on every change. */
+    fun fitViewport(viewport: FitViewport) {}
+
+    /** The view of [sessionGuid] left: Fit to phone stops fitting to its canvas. */
+    fun clearFitViewport(sessionGuid: String) {}
 
     /** The debug video stats overlay on or off (debug builds only). */
     fun setVideoStatsShown(shown: Boolean)
@@ -155,11 +163,16 @@ interface LiveSessionActions {
 /**
  * The live session view, always dark ([LiveSessionTheme], with light system bar icons while it
  * shows): the session's video ([VideoCanvas]) with zoom and pan, the state's [liveOverlay] over
- * it, ⌨ (show or hide the keyboard) while input is offered, ⤢ **Fit to phone** ([fitButton]:
- * shown for every terminal session, greyed with a reason in a snackbar when unavailable, as iOS's
- * "Resize for This Screen") and, in debug builds, a ⋮ menu with Video stats. The screen never
- * opens or closes a stream itself, and Fit is sent only from a tap (⤢ or the too-large overlay),
- * on the active stream's link for this session, and never undone.
+ * it, ⌨ (show or hide the keyboard) while input is offered, ⤢ **Fit to phone** and, in debug
+ * builds, a ⋮ menu with Video stats. The screen never opens or closes a stream itself.
+ *
+ * **Fit to phone** is an on/off toggle ([fitToPhone], one global setting): drawn filled while on,
+ * outlined while off, and greyed when it cannot fit this session ([fitButton]: shown for every
+ * terminal session, as iOS's "Resize for This Screen"). A tap flips it, and turning it on where it
+ * cannot fit shows why ([fitToggleMessage]); a long press explains it. The too-large overlay's Fit
+ * turns it on. The screen reports its fit viewport ([LiveSessionActions.fitViewport]) while shown;
+ * the app's [AutoFitter][dev.bugobliterator.itermbuddy.core.stream.AutoFitter] does the resizing and
+ * its [LiveVideoSource.fitNotices] for this session show in the snackbar.
  *
  * **Typing.** Input is offered only while [inputTarget] gives a target: the state is `Live` for
  * this session, the session is a terminal, and the active stream is this session's (a browser
@@ -202,7 +215,8 @@ interface LiveSessionActions {
  *
  * **Fit viewport.** Fit to phone computes its grid for the area inside the insets with the
  * keyboard hidden ([fitViewport]), so a fitted grid fills it; the canvas never shrinks for the
- * keyboard, so it follows rotation, split screen and window resizes at once.
+ * keyboard, so it follows rotation, split screen and window resizes at once, and the keyboard never
+ * changes it (so never resizes the Mac).
  *
  * **Keyboard lift.** The key bar sits over the picture, padded by `ime ∪ navigationBars`. While
  * the keyboard is up, the taller of the keyboard and the navigation bar plus the key bar (its
@@ -217,6 +231,7 @@ interface LiveSessionActions {
  * @param macRevision the Mac's hello revision, for the browser note ([browserNote]); null when not connected.
  * @param macAlert the Mac alert banner's text (`macAlertBanner`), shown as a row under the top
  *   bar, inside its measured height, so the picture and Fit sit below it; null for none.
+ * @param fitToPhone whether the Fit to phone toggle is on.
  */
 @Composable
 fun LiveSessionScreen(
@@ -231,9 +246,10 @@ fun LiveSessionScreen(
     actions: LiveSessionActions,
     modifier: Modifier = Modifier,
     macAlert: String? = null,
+    fitToPhone: Boolean = false,
 ) {
     LiveSessionTheme {
-        LiveSessionContent(title, session, live, activeStream, macRevision, source, debugBuild, videoStatsShown, actions, modifier, macAlert)
+        LiveSessionContent(title, session, live, activeStream, macRevision, source, debugBuild, videoStatsShown, actions, modifier, macAlert, fitToPhone)
     }
 }
 
@@ -252,6 +268,7 @@ private fun LiveSessionContent(
     actions: LiveSessionActions,
     modifier: Modifier,
     macAlert: String?,
+    fitToPhone: Boolean,
 ) {
     val config = shownConfig(session, live, activeStream)
     val target = inputTarget(session, live, activeStream)
@@ -269,7 +286,14 @@ private fun LiveSessionContent(
     val canFit = !session.isBrowser && config != null &&
         fitGrid(viewportWidth, viewportHeight, config, source.output.maxSize(), source.output::sizeSupported) != null
     val fitState = fitButton(session, live, config, viewportWidth, viewportHeight, source.output.maxSize(), source.output::sizeSupported)
-    val fit = { actions.fitToPhone(session.guid, viewportWidth, viewportHeight) }
+    // The fit viewport while this view shows, for the app's auto fit (it waits for it to settle).
+    val fitActions by rememberUpdatedState(actions)
+    LaunchedEffect(session.guid, viewportWidth, viewportHeight) {
+        if (viewportWidth > 0 && viewportHeight > 0) fitActions.fitViewport(FitViewport(session.guid, viewportWidth, viewportHeight))
+    }
+    DisposableEffect(session.guid) { onDispose { fitActions.clearFitViewport(session.guid) } }
+    // The too-large overlay's Fit: turn the toggle on (it fits at once).
+    val fit = { actions.setFitToPhone(true) }
     var menuOpen by remember { mutableStateOf(false) }
     val scrollback = remember(session.guid) { ScrollbackControl() }
     val snackbar = remember { SnackbarHostState() }
@@ -460,6 +484,15 @@ private fun LiveSessionContent(
             }
             SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
         }
+        // The auto fit's brief messages for this session (cannot resize, the Mac did not resize).
+        LaunchedEffect(source, session.guid) {
+            source.fitNotices.collect { notice ->
+                if (notice.sessionGuid == session.guid) {
+                    snackbar.currentSnackbarData?.dismiss()
+                    snackbar.showSnackbar(notice.text)
+                }
+            }
+        }
         if (selection != null) {
             val notice by selection.copyNotices.collectAsStateWithLifecycle()
             LaunchedEffect(notice, session.guid) {
@@ -508,18 +541,23 @@ private fun LiveSessionContent(
                 ) { Text("⌨", style = MaterialTheme.typography.titleMedium) }
             }
             if (fitState != FitButton.Hidden) {
-                val reason = (fitState as? FitButton.Disabled)?.reason
-                FitToolbarButton(
-                    enabled = reason == null,
-                    onFit = fit,
-                    onExplain = {
-                        if (reason != null) {
-                            snackbarScope.launch {
-                                snackbar.currentSnackbarData?.dismiss()
-                                snackbar.showSnackbar(reason)
-                            }
+                val show = { message: String? ->
+                    if (message != null) {
+                        snackbarScope.launch {
+                            snackbar.currentSnackbarData?.dismiss()
+                            snackbar.showSnackbar(message)
                         }
+                    }
+                }
+                FitToolbarButton(
+                    on = fitToPhone,
+                    available = fitState == FitButton.Enabled,
+                    onToggle = {
+                        val turnOn = !fitToPhone
+                        actions.setFitToPhone(turnOn)
+                        show(fitToggleMessage(fitState, turnOn, turnedOn = turnOn))
                     },
+                    onExplain = { show(fitToggleMessage(fitState, fitToPhone, turnedOn = null)) },
                 )
             }
             if (debugBuild) {
@@ -689,28 +727,35 @@ internal fun Modifier.insetBy(left: Int, top: () -> Int, right: Int, bottom: () 
 }
 
 /**
- * ⤢ in the live bar ("Resize for this screen"). Enabled, a tap is [onFit]. Disabled, it is drawn
- * greyed (the disabled content alpha) and still answers a tap or a long press with [onExplain],
- * which shows why; TalkBack reads it as unavailable.
+ * ⤢ in the live bar, the Fit to phone toggle. [on]: drawn on a filled circle (the theme's primary)
+ * in the primary's content colour; off: plain, with a thin outline. Not [available] (it cannot fit
+ * this session now) it is drawn greyed. A tap is [onToggle], whatever its state; a long press is
+ * [onExplain]. TalkBack reads it as a switch, on or off, and "can't fit this session" when greyed.
  */
 @Composable
-private fun FitToolbarButton(enabled: Boolean, onFit: () -> Unit, onExplain: () -> Unit) {
-    val color = LocalContentColor.current.copy(alpha = if (enabled) 1f else DISABLED_ALPHA)
+private fun FitToolbarButton(on: Boolean, available: Boolean, onToggle: () -> Unit, onExplain: () -> Unit) {
+    val alpha = if (available) 1f else DISABLED_ALPHA
+    val colors = MaterialTheme.colorScheme
+    val content = if (on) colors.onPrimary else LocalContentColor.current
     Box(
         modifier = Modifier
             .size(48.dp)
+            .padding(4.dp)
             .clip(CircleShape)
-            .combinedClickable(
-                role = Role.Button,
-                onClick = if (enabled) onFit else onExplain,
-                onLongClick = if (enabled) null else onExplain,
+            .then(
+                if (on) {
+                    Modifier.background(colors.primary.copy(alpha = alpha), CircleShape)
+                } else {
+                    Modifier.border(1.dp, LocalContentColor.current.copy(alpha = OUTLINE_ALPHA * alpha), CircleShape)
+                },
             )
+            .combinedClickable(role = Role.Switch, onClick = onToggle, onLongClick = onExplain)
             .semantics {
-                contentDescription = "Resize for this screen"
-                if (!enabled) stateDescription = "Unavailable"
+                contentDescription = "Fit to phone"
+                stateDescription = (if (on) "On" else "Off") + if (available) "" else ", can't fit this session"
             },
         contentAlignment = Alignment.Center,
-    ) { Text("⤢", style = MaterialTheme.typography.titleMedium, color = color) }
+    ) { Text("⤢", style = MaterialTheme.typography.titleMedium, color = content.copy(alpha = alpha)) }
 }
 
 /** **↓ Live**: back to the live band from the history (Android-only; iOS has no such control). */
@@ -724,6 +769,9 @@ private fun LiveChip(onClick: () -> Unit, modifier: Modifier) {
 
 /** Material's alpha for disabled content. */
 private const val DISABLED_ALPHA = 0.38f
+
+/** The Fit toggle's outline while off. */
+private const val OUTLINE_ALPHA = 0.5f
 
 /** The top bar's opacity over the picture. */
 internal const val TOP_BAR_ALPHA = 0.8f

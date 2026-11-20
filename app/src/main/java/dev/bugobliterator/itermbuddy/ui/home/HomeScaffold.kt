@@ -139,7 +139,7 @@ interface HomeActions : LiveSessionActions {
  * is the Chats item's dot; [claudeTip] shows the Sessions list's `\(status)` tip; [pasteKeys] is
  * Settings' "Send / * + = as paste" switch, [scrollKeys] its "Scroll web pages with keys" and
  * [keyTrace] its "Include typed-key trace"; [decoderLowLatency] is the debug builds' "Decoder
- * low-latency keys" switch. The chat
+ * low-latency keys" switch; [fitToPhone] is the live bar's Fit to phone toggle. The chat
  * destinations collect their own flows from [ChatsHome].
  */
 data class HomeModel(
@@ -166,6 +166,7 @@ data class HomeModel(
     val scrollKeys: Boolean = true,
     val keyTrace: Boolean = false,
     val decoderLowLatency: Boolean = true,
+    val fitToPhone: Boolean = false,
 )
 
 /**
@@ -461,6 +462,7 @@ private fun LiveSession(session: SessionSummary, title: String, model: HomeModel
         actions = actions,
         modifier = modifier,
         macAlert = macAlertBanner(model.macStatus),
+        fitToPhone = model.fitToPhone,
     )
 }
 

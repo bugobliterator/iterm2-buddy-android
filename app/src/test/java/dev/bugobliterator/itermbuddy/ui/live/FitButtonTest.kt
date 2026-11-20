@@ -9,7 +9,7 @@ import dev.bugobliterator.itermbuddy.core.wire.StreamEndReason
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/** The live bar's ⤢ Fit to phone button: shown, enabled or disabled with a reason (iOS `SessionView.swift:923-937`). */
+/** The live bar's ⤢ Fit to phone toggle: shown, able to fit or greyed with a reason (iOS `SessionView.swift:923-937`). */
 class FitButtonTest {
     private val session = SessionSummary("guid-alpha", "alpha", "subtitle", isBrowser = false)
     private val browser = SessionSummary("guid-web", "web", "subtitle", isBrowser = true)
@@ -54,7 +54,7 @@ class FitButtonTest {
         assertEquals(reason, button(config = config(canResize = false)))
         assertEquals(reason, button(config = config(canResize = null)))
         assertEquals(
-            "The Mac can't resize this window. Leave full screen, un-maximise it, or detach it from the screen edge.",
+            "This session can't be resized from the phone: its Mac window is full screen, maximised, attached to a screen edge or locked to its width.",
             FIT_REASON_CANNOT_RESIZE,
         )
     }
@@ -77,5 +77,21 @@ class FitButtonTest {
     fun endedStreamIsDisabled() {
         val ended = LiveViewState.Ended(session, StreamEndReason.SESSION_CLOSED)
         assertEquals(FitButton.Disabled(FIT_REASON_ENDED), button(live = ended))
+    }
+
+    @Test
+    fun toggleMessages() {
+        val cannot = FitButton.Disabled(FIT_REASON_CANNOT_RESIZE)
+        val waiting = FitButton.Disabled(FIT_REASON_WAITING)
+        // Turning it on where it cannot fit says why; while waiting for the picture it just fits later.
+        assertEquals(FIT_REASON_CANNOT_RESIZE, fitToggleMessage(cannot, on = true, turnedOn = true))
+        assertEquals(null, fitToggleMessage(waiting, on = true, turnedOn = true))
+        assertEquals(null, fitToggleMessage(FitButton.Enabled, on = true, turnedOn = true))
+        // Turning it off says nothing (it undoes nothing).
+        assertEquals(null, fitToggleMessage(cannot, on = false, turnedOn = false))
+        // A long press explains: the reason, else what on or off means.
+        assertEquals(FIT_REASON_CANNOT_RESIZE, fitToggleMessage(cannot, on = false, turnedOn = null))
+        assertEquals(FIT_HINT_ON, fitToggleMessage(FitButton.Enabled, on = true, turnedOn = null))
+        assertEquals(FIT_HINT_OFF, fitToggleMessage(waiting, on = false, turnedOn = null))
     }
 }

@@ -161,17 +161,31 @@ paste warning on the Mac.
 
 ### Fit to phone
 
-On a wide window, **Fit to phone** shrinks the Mac window to 60 columns (portrait), and the text
-is readable at fit. Go back to the list: the Mac window stays at the fitted size (never
-restored).
+**Fit to phone** (⤢ in the live bar) is an on/off toggle, off by default, one setting for every
+session (kept across restarts, off again after unpairing). On, it is drawn on a filled circle;
+off, outlined; greyed when it cannot fit the session shown. A long press explains it.
+
+- Off: open a wide session. Nothing is resized. Turn it on: the Mac window goes to 60 columns
+  (portrait) at once and the text is readable at fit.
+- On: go back to the list and open another wide session. It fits as it opens, without a tap.
+- Rotate to landscape: one resize to 120 columns once the rotation settles (watch the Mac window:
+  one change, not several). Rotate back: 60 columns again.
+- Show and hide the keyboard: the Mac window does not change.
+- Turn it off: the Mac window keeps its size (never restored).
+- Tall phone: in portrait, the session's picture fills the phone's height, not only its width.
+  When the Mac's screen cannot hold that many rows, the app narrows the session (fewer columns,
+  bigger text) in one second step. Share the log: the `fit to phone` lines give the grid asked
+  for, the grid the Mac gave and the corrective step's result. Record them.
+- A full-screen or width-locked window: the toggle greys, and turning it on (or opening that
+  session with it on) shows "This session can't be resized from the phone: …".
 
 **Result:**
 
 ### Oversize window
 
 - Resize a normal (not full-screen) iTerm2 window to fill the largest display and record the
-  frame size. If the too-large message shows, it offers **Fit to phone**, and Fit recovers the
-  picture.
+  frame size. If the too-large message shows, it offers **Fit to phone**, and Fit (which turns
+  the toggle on) recovers the picture.
 - Make the window full-screen and record the frame size. If too large, the message explains the
   Mac-side change and offers no Fit (the Mac refuses resize in full screen).
 
