@@ -158,6 +158,40 @@ and whether each character appeared in what it drew next (or the screen text, wh
 its prompt). This probe prints terminal content: only the probe characters and Claude Code's UI in a
 throwaway CI terminal.
 
+## The latency report
+
+The owner finds live sessions slow, typing echo and scrolling alike. `RealIterm2LatencyTest`
+measures them on the real Mac. It reports and does not assert on the numbers; it fails only when a
+round could not connect or stream. It runs after the key-bytes probe, in its own step that
+continues on error.
+
+It opens a live stream of the first terminal session in the app's own `StreamController` (acks
+included, as the live view runs it; the video output records instead of decoding), clears the
+prompt (Ctrl-C twice, `clear`), and then measures, in two rounds on fresh connections: the phone's
+relay socket with `TCP_NODELAY` (as the app has it, `relayHttpClient`) and without.
+
+- **ping**: 20 `ping` → `pong` round trips, 100 ms apart, with the screen quiet.
+- **key → frame**: 20 letters typed at the prompt, one `sendKey` each, one every 250 ms (under the
+  300 ms after which iTerm2 re-sends a quiet screen as a keyframe). Each key's time runs from its
+  send returning to the arrival from the relay of the first non-key frame of the stream after it.
+  The letters are erased with Ctrl-U.
+- **scrolling**: a command that prints a line every 10 ms (400 lines). It reports the frames
+  received until the output stops: count, frames per second, kbit/s, the gaps between frames
+  (min/median/p90/max and a histogram), the time from Return to the first frame, the frame sizes
+  and ping round trips taken alongside every 250 ms.
+- **stream parameters**: what the phone asks for (`maxFrameRate` 30, no `maxBitrate`, media
+  version 2, as iOS), the config the Mac sent (pixel size, scale, grid), and the frame-rate cap,
+  effective frame rate and target bitrate the Mac derives from the pixel size. The last three are
+  recomputed from iTerm2's formulas (CompanionHostBridge.swift:1218,
+  CompanionSessionStreamer.swift:224-265); the wire does not carry them.
+
+Arrival times are the relay queue's stamps (`StreamInput.Media.receivedAtNanos`), the same the
+app's video stats overlay uses. Distributions are min/median/p90 (nearest rank)/max in ms. The
+relay runs on the runner, on localhost, so the network adds almost nothing: the numbers are the
+Mac's and the phone's own share, and the `TCP_NODELAY` difference is a lower bound of what a real
+link shows. The report is `latency:` lines in the job log, ending with a summary per round. It
+prints numbers only.
+
 ## Stage 3: Agent Chat on a fake model
 
 iTerm2's AI runs on `fake-model.mjs`, a local OpenAI Chat Completions server (Node built-ins only)
@@ -226,7 +260,7 @@ what was typed.
 | Start the relay | `start-relay.sh` | Fetches the relay at `b8aa2f9` the way `scripts/relay-it.sh` does and makes a throwaway CA and a `localhost` certificate. It trusts the CA system-wide and starts the relay on `127.0.0.1:8787` (open mode, `RELAY_ORIGIN=https://localhost:8443`). Then it starts `tls-proxy.mjs` on `localhost:8443`. |
 | Start the fake model | `start-fake-model.sh` | Starts `fake-model.mjs` on `127.0.0.1:8790` and waits for `/health`. |
 | Launch iTerm2 | `launch-iterm2.sh` | Runs `open -a iTerm`, then waits for the relay to log `hello role=mac` (iTerm2 parked) and takes a screenshot. |
-| Test | `./gradlew realIterm2Test --tests …` | Runs stages 1 and 2, then, each in its own step that runs even when the ones before fail, the Claude Code status probe, the key-bytes probe (which continues on error) and stage 3, so a main thread that Agent Chat leaves blocked cannot fail the others. The phone connects to the relay directly at `ws://127.0.0.1:8787/` and signs for `https://localhost:8443`. |
+| Test | `./gradlew realIterm2Test --tests …` | Runs stages 1 and 2, then, each in its own step that runs even when the ones before fail, the Claude Code status probe, the key-bytes probe and the latency report (both continue on error) and stage 3, so a main thread that Agent Chat leaves blocked cannot fail the others. The phone connects to the relay directly at `ws://127.0.0.1:8787/` and signs for `https://localhost:8443`. |
 | Diagnostics | `collect-diagnostics.sh` | Always runs. It collects screenshots, the relay, proxy and fake model logs, the companion and AI defaults, both secure settings, the status probe's defaults and files (the profile, `disable-automation-auth`, the API socket, it2), which seeded keychain items were migrated, both plugin lookups, the fake model's counts and captured request shape, iTerm2's unified log and crash reports. They are uploaded with the test reports as `real-iterm2-<run>-<attempt>`. |
 
 `dump-iterm2-state.sh <label>` prints, as text in the job log, what a screenshot would show:

@@ -6,6 +6,7 @@ import dev.bugobliterator.itermbuddy.core.CompanionClient
 import dev.bugobliterator.itermbuddy.core.chat.ChatSink
 import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
 import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
+import dev.bugobliterator.itermbuddy.core.relay.relayHttpClient
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTree
 import dev.bugobliterator.itermbuddy.core.stream.StreamInput
@@ -34,7 +35,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
-import okhttp3.OkHttpClient
 import org.junit.Assume.assumeTrue
 
 /**
@@ -58,10 +58,13 @@ import org.junit.Assume.assumeTrue
  *   waits on iTerm2's agent and the fake model as well as on the link.
  *
  * [report] prints states, counts and sizes; nothing here prints terminal content.
+ *
+ * @param tcpNoDelay whether the relay socket has `TCP_NODELAY`, as the app's does
+ *   ([relayHttpClient]); false only to measure the difference (`RealIterm2LatencyTest`).
  */
-class RealIterm2Rig : AutoCloseable {
+class RealIterm2Rig(tcpNoDelay: Boolean = true) : AutoCloseable {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val http = OkHttpClient.Builder().connectTimeout(5, TimeUnit.SECONDS).build()
+    private val http = relayHttpClient(tcpNoDelay) { connectTimeout(5, TimeUnit.SECONDS) }
 
     /** Every line the client logged, in order. */
     val clientLog = CopyOnWriteArrayList<String>()
