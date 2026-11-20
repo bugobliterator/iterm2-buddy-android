@@ -225,9 +225,11 @@ that continues on error. It streams the first terminal session in the app's `Str
 gets a clean prompt (`RealIterm2Rig.restoreTerminal`: kitty flags popped and zeroed,
 modifyOtherKeys and bracketed paste off, `stty sane`, `clear`; then waits until the rows below the
 first are empty), echoes a plain URL, `see (https://example.com/a_(b)). ok` and `www.example.com/w`, each
-with its own command, and dumps the first nine rows as the lookup sees them (the whole-line text
-escaped, the Mac's selection report, the links found with their positions, the smart selection
-at column 10; the content is the test's own). Then for each link it taps the top rows in turn through the app's own mapping
+with its own command, then two links between tabs with `printf` (reporting whether iTerm2 copies
+a tab as one `\t`, which the app counts to the next stop of 8), and dumps the first 15 rows as
+the lookup sees them: the whole-line text escaped, the Mac's selection report, the links found
+with their positions, the smart selection at column 10; the content is the test's own. If the
+screen did not clear it fails with a count of the rows left and prints none of them. Then for each link it taps the top rows in turn through the app's own mapping
 (`selectionPointAt` at fit) and `LinkLookup` until the expected link is found. It asserts every
 link was found exactly, that the stream's selection report goes back to none, and that
 `copySelection` then answers `""` (nothing left selected). The report is `link-tap:` lines: rows,

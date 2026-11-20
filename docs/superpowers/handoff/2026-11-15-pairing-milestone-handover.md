@@ -251,6 +251,15 @@ Notes from that task:
   the blank cells; a whole line's report is used for its rows only (its start column is ignored).
   The real-Mac step gets a clean prompt first (Ctrl-C, Ctrl-U, `clear`, waits for empty rows),
   echoes each link with its own command and dumps the rows as the lookup sees them.
+- **Final review follow-ups (after run 28 passed):** tabs advance to the next stop of 8 cells; the
+  width table has the East Asian W emoji-presentation ranges, and any other symbol (`So`) or code
+  point above the BMP counts as uncertain. A tap takes a link only within 3 cells plus one per
+  uncertain code point before it (never the nearest link at any distance); with no report on a
+  multi-row line each row's `k × columns + column` is tried. The line copy gets 60 % of the 1 s
+  bound and the smart fallback what is left (also after a failed or slow line); a gesture the
+  owner begins during the lookup ends it with nothing. The protocol cannot bound a copy's size;
+  lines over 64 K characters are not searched. The real-Mac step adds a `printf` of two links
+  between tabs and reports how iTerm2 copies a tab.
 - **Tests:** `LinkTapTest`, `BrowserLinkOpenerTest`, `LinkTapsTest` (virtual time),
   `LinkBubbleDeviceTest` (device), `RealIterm2LinkTapTest` (real-Mac CI, report-only step).
 - **Open:** the on-device check (Links in `docs/reports/live-session-on-device.md`) and the first
