@@ -197,13 +197,14 @@ class BrowserCanvasDeviceTest {
     @Test
     fun onTheWholeBrowserScreenASwipeScrollsAndATapClicks() {
         val session = SessionSummary(GUID, "page", "", isBrowser = true)
+        val stream = active.value
         rule.setContent {
             Box(Modifier.size(360.dp, 640.dp).testTag(TAG)) {
                 BrowserSessionScreen(
                     title = "page",
                     session = session,
                     live = LiveViewState.Live(session, browserConfig()),
-                    activeStream = active.value,
+                    activeStream = stream,
                     source = source,
                     browser = driver,
                     debugBuild = false,
