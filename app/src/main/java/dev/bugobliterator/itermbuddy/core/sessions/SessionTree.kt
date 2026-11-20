@@ -33,4 +33,8 @@ data class WindowEntry(val title: String, val tabs: List<TabEntry>) {
 
 data class SessionTree(val windows: List<WindowEntry>) {
     override fun toString(): String = "SessionTree(windows=$windows)"
+
+    /** Every session in tree order: each pane's session, then its peers. */
+    fun sessions(): List<SessionSummary> =
+        windows.flatMap { it.tabs }.flatMap { it.panes }.flatMap { pane -> listOf(pane.session) + pane.peers.map { it.session } }
 }

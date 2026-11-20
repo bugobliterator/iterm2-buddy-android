@@ -99,11 +99,13 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
 import dev.bugobliterator.itermbuddy.core.stream.fitGrid
 import dev.bugobliterator.itermbuddy.core.stream.latencyStatsText
 import dev.bugobliterator.itermbuddy.core.wire.SelectionPhase
+import dev.bugobliterator.itermbuddy.core.wire.SelectionPoint
 import dev.bugobliterator.itermbuddy.ui.LiveSessionTheme
 import dev.bugobliterator.itermbuddy.video.VideoStats
 import dev.bugobliterator.itermbuddy.video.lowLatencyLabel
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -163,6 +165,15 @@ interface LiveSessionActions {
 
     /** [sessionGuid]'s sticky modifiers, tray and keyboard-restore flag, app-scoped so rotation keeps them. */
     fun inputMemory(sessionGuid: String): LiveInputMemory
+
+    /** The link bubble's Open for a phone link: [url] in the phone's browser. */
+    fun openLink(url: String) {}
+
+    /** The browser session a Mac-local link opens in now (the most recently viewed), or null when there is none. */
+    fun linkBrowserSession(): SessionSummary? = null
+
+    /** The link bubble's Open for a Mac-local link: [session]'s browser view, loading [url] once its stream takes input. */
+    fun openLinkInBrowserSession(session: SessionSummary, url: String) {}
 }
 
 /**
@@ -209,6 +220,16 @@ interface LiveSessionActions {
  * the ordered input sender, only while input is offered). The Mac draws the selection into the
  * video and the tiles. A tap while the menu or a selection is up sends Clear Selection and hides
  * the menu instead of raising the keyboard.
+ *
+ * **Links** ([LiveVideoSource.links]). Any other single tap on a terminal does what it always did
+ * (raises the keyboard while input is offered) and also asks the Mac what its smart selection is at
+ * the tapped cell ([LinkTaps], [LinkLookup][dev.bugobliterator.itermbuddy.core.stream.LinkLookup]:
+ * select, copy, clear, within 1 s); when that is a link, a [LinkBubble] shows by the tap with
+ * **Open** and **Copy**. A phone link opens in the phone's browser ([LiveSessionActions.openLink]);
+ * a Mac-local one (localhost and loopback) in the most recently viewed Browser session
+ * ([LiveSessionActions.openLinkInBrowserSession]), or the bubble says there is none. A tap
+ * elsewhere, a drag, a long press or a stream change hides it (that tap does nothing else); a tap
+ * that stopped a coast, a double tap and a tap while a selection shows never look one up.
  *
  * **Edge to edge** (iOS `SessionView.swift:870-889, 1985-2005`). The canvas is the whole window
  * on black; the compact [LiveTopBar] (status bar scrim and a 48 dp row), the navigation bar, and
@@ -319,14 +340,24 @@ private fun LiveSessionContent(
     val press = remember(selection, session.guid) { selection?.let(::SelectionPress) }
     // The menu belongs to the stream it was shown on: gone with it (an end, a reconnect, another session).
     val selectionStream = activeStream?.takeIf { it.sessionGuid == session.guid }?.let { it.linkId to it.streamID }
-    LaunchedEffect(selectionStream) { menuAnchor = null }
-    val canvasTap = {
+    val linkLookup = source.links
+    val linkScope = rememberCoroutineScope()
+    val links = remember(session.guid, linkLookup) { linkLookup?.let { lookup -> LinkTaps(linkScope) { point -> lookup.lookup(session.guid, point) } } }
+    val linkBubble by (links?.bubble ?: NO_LINK_BUBBLE).collectAsStateWithLifecycle()
+    LaunchedEffect(selectionStream) {
+        menuAnchor = null
+        links?.dismiss()
+    }
+    val canvasTap = { point: SelectionPoint?, x: Float, y: Float ->
         val range = selection?.range?.value
-        if (menuAnchor != null || range != null) {
+        if (links?.dismiss() == true) {
+            // A tap while the link bubble shows only hides it.
+        } else if (menuAnchor != null || range != null) {
             selection?.clear()
             menuAnchor = null
-        } else if (currentTarget != null) {
-            keyboard.show()
+        } else {
+            if (currentTarget != null) keyboard.show()
+            if (point != null && selectionStream != null) links?.tap(point, x, y)
         }
     }
     var modifierVersion by remember { mutableIntStateOf(0) }
@@ -421,7 +452,8 @@ private fun LiveSessionContent(
                     val wheelStream = currentStreamID
                     if (wheelTarget != null && wheelStream != null) currentActions.scrollWheel(wheelTarget, wheelStream, up, lines)
                 },
-                onTap = canvasTap,
+                onTapAt = canvasTap,
+                onPanStart = { links?.dismiss() },
                 topInset = topChrome.toFloat(),
                 restBottomInset = navigationBottom.toFloat(),
                 bottomInset = bottomCover,
@@ -434,6 +466,7 @@ private fun LiveSessionContent(
                         when (phase) {
                             SelectionPhase.BEGIN -> {
                                 menuAnchor = null
+                                links?.dismiss()
                                 if (press?.begin(point) == true) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                             }
                             SelectionPhase.MOVE -> press?.move(point)
@@ -541,6 +574,29 @@ private fun LiveSessionContent(
                         scrollback.stopCoast()
                         currentActions.paste(pasteTarget, text)
                     }
+                },
+            )
+        }
+        val bubble = linkBubble
+        if (links != null && bubble != null) {
+            // Chosen when the bubble shows: the session it names is the one Open goes to.
+            val browserTarget = remember(bubble.id) { if (bubble.link.macLocal) actions.linkBrowserSession() else null }
+            LinkBubble(
+                anchor = Offset(bubble.x, bubble.y),
+                bounds = { Rect4(leftInset, topChrome, canvas.width - rightInset, canvas.height - bottomCover().roundToInt()) },
+                link = bubble.link,
+                browserSession = browserTarget?.let { it.name.ifBlank { "Browser session" } },
+                onOpen = {
+                    links.dismiss()
+                    if (!bubble.link.macLocal) {
+                        actions.openLink(bubble.link.url)
+                    } else if (browserTarget != null) {
+                        actions.openLinkInBrowserSession(browserTarget, bubble.link.url)
+                    }
+                },
+                onCopy = {
+                    links.dismiss()
+                    copyToClipboard(context, bubble.link.url, LINK_CLIP_LABEL)
                 },
             )
         }
@@ -800,6 +856,9 @@ private const val DISABLED_ALPHA = 0.38f
 
 /** The Fit toggle's outline while off. */
 private const val OUTLINE_ALPHA = 0.5f
+
+/** No link taps: no bubble ever. */
+private val NO_LINK_BUBBLE = MutableStateFlow<LinkBubbleState?>(null)
 
 /** The top bar's opacity over the picture. */
 internal const val TOP_BAR_ALPHA = 0.8f

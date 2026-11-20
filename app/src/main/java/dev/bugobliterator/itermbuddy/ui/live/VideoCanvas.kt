@@ -52,6 +52,7 @@ import dev.bugobliterator.itermbuddy.core.stream.FlingCurve
 import dev.bugobliterator.itermbuddy.core.stream.FitNotice
 import dev.bugobliterator.itermbuddy.core.stream.HistoryTileStore
 import dev.bugobliterator.itermbuddy.core.stream.LatencyMeter
+import dev.bugobliterator.itermbuddy.core.stream.LinkLookup
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
 import dev.bugobliterator.itermbuddy.core.stream.ScrollWheelAccumulator
 import dev.bugobliterator.itermbuddy.core.stream.SelectionDriver
@@ -74,7 +75,7 @@ import kotlin.math.roundToInt
  * The app-scoped pieces the live view reads directly, outside the home model, so the decoder's
  * per-frame stats and the live top recompose only what shows them: the process's [output], the
  * stream controller's [state] and its [historyTiles] (null: no scrollback), and the app's
- * [selection] driver (null: no selection) and [browser] driver (null: no browser view).
+ * [selection] driver (null: no selection), [browser] driver (null: no browser view) and [links].
  * [latency] is the debug overlay's meter (null: no latency lines), and [ping] one diagnostics
  * ping on the active stream's link ([pingActiveLink]).
  */
@@ -88,6 +89,8 @@ class LiveVideoSource(
     val ping: suspend () -> Boolean = { false },
     /** Fit to phone's brief messages ([AutoFitter.notices][dev.bugobliterator.itermbuddy.core.stream.AutoFitter.notices]). */
     val fitNotices: Flow<FitNotice> = emptyFlow(),
+    /** The link under a tap on a terminal (null: taps find no links). */
+    val links: LinkLookup? = null,
 ) {
     /** [videoVisible] now, for the view of [sessionGuid]. */
     fun visible(sessionGuid: String): Boolean = videoVisible(state, output.stats, sessionGuid)
@@ -125,6 +128,9 @@ class LiveVideoSource(
  * @param sessionGuid the session shown: the zoom's key and the stale-frame rule's owner.
  * @param onCanvasSize the canvas size in px, on every change.
  * @param onTap a single tap anywhere on the canvas (after the double-tap timeout passes).
+ * @param onTapAt the same single tap with its screen point and the zoom and fit as shown, right
+ *   after [onTap]; for a terminal only (not with [browser]), and never for a tap that stopped a coast.
+ * @param onPanStart a drag or pinch went past the touch slop (it scrolls or zooms).
  * @param topInset the status bar and top bar drawn over the canvas's top, in px.
  * @param leftInset the system bars and display cutout over the canvas's left edge, in px.
  * @param rightInset the same over its right edge, in px.
@@ -204,6 +210,8 @@ fun VideoCanvas(
     onCanvasSize: (IntSize) -> Unit,
     modifier: Modifier = Modifier,
     onTap: () -> Unit = {},
+    onTapAt: ((x: Float, y: Float, shown: ZoomState, fit: FitRect) -> Unit)? = null,
+    onPanStart: () -> Unit = {},
     topInset: Float = 0f,
     restBottomInset: Float = 0f,
     bottomInset: () -> Float = { restBottomInset },
@@ -243,6 +251,8 @@ fun VideoCanvas(
         .collectAsStateWithLifecycle(initialValue = source.visible(sessionGuid))
     val density = LocalDensity.current
     val currentOnTap by rememberUpdatedState(onTap)
+    val currentOnTapAt by rememberUpdatedState(onTapAt)
+    val currentOnPanStart by rememberUpdatedState(onPanStart)
     val geometry by rememberUpdatedState(GestureGeometry(fit, viewW, viewH, max, topInset, restBottomInset, leftInset, rightInset, history, base))
     val currentInset by rememberUpdatedState(bottomInset)
     val wheel = remember(wheelStepPx) { wheelStepPx?.let { ScrollWheelAccumulator(it) } }
@@ -333,6 +343,7 @@ fun VideoCanvas(
                         currentBrowser?.touchDown()
                     },
                     onStart = { down, slop ->
+                        currentOnPanStart()
                         multiTouch = false
                         sawPinch = false
                         currentWheel?.reset()
@@ -407,6 +418,7 @@ fun VideoCanvas(
                                 if (point == null) page.stopFling() else page.tap(point.first.toDouble(), point.second.toDouble())
                             }
                             currentOnTap()
+                            if (page == null) currentOnTapAt?.invoke(action.x, action.y, shown, g.fit)
                         }
                         is PressAction.DoubleTap -> {
                             // Zooming out over history keeps the line under the tap rather than jump to the live band.

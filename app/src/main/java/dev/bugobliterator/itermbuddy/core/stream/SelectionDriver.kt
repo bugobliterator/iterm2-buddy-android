@@ -37,7 +37,8 @@ import kotlin.time.Duration.Companion.seconds
  * - **Failed begin.** When a gesture's begin fails or times out, its moves and end are dropped too.
  * - **Copy** asks the Mac for the selection of a session by GUID, on the active link, and answers
  *   its text (`""` when nothing is selected), or null on an error reply, a failure, no active
- *   stream, or no reply within [copyTimeout] (the request's own bound). [copyToClipboard] does it in
+ *   stream, or no reply within [copyTimeout] or the call's own bound (the request's own bound, so the
+ *   queue waits no longer). [copyToClipboard] does it in
  *   [scope], so it outlives the screen (a rotation), hands non-empty text to a clipboard writer and
  *   reports the [CopyOutcome] in [copyNotices] for the screen to show when it is there.
  *
@@ -65,7 +66,7 @@ class SelectionDriver(
     /** [gesture] is the gesture the message belongs to, or null for Select All and Clear. */
     private class Send(val key: StreamKey, val message: PhoneMessage, val gesture: Long? = null) : Item
 
-    private class Copy(val linkId: Long, val sessionGuid: String, val result: CompletableDeferred<String?>) : Item
+    private class Copy(val linkId: Long, val sessionGuid: String, val timeout: Duration, val result: CompletableDeferred<String?>) : Item
 
     /** The gesture in progress: its stream, mode and the last point sent. */
     private class Gesture(val id: Long, val key: StreamKey, val mode: SelectionMode, var lastSent: SelectionPoint)
@@ -132,15 +133,22 @@ class SelectionDriver(
 
     /**
      * The selection of session [sessionGuid] as text, after everything queued before it: `""` when
-     * nothing is selected, null on an error, a failure, no active stream or a timeout.
+     * nothing is selected, null on an error, a failure, no active stream or no reply within
+     * [timeout] (the request's own bound, so a late reply holds the queue no longer than that).
      */
-    suspend fun copy(sessionGuid: String): String? = enqueueCopy(sessionGuid)?.await()
+    suspend fun copy(sessionGuid: String, timeout: Duration = copyTimeout): String? = enqueueCopy(sessionGuid, timeout)?.await()
+
+    /**
+     * How many gestures have begun so far: a caller that selects and later clears can tell
+     * whether someone else began a selection meanwhile (a long press), and leave that one be.
+     */
+    fun gesturesBegun(): Long = synchronized(lock) { nextGestureId - 1 }
 
     /** Queues a copy now, in call order with the sends; null (nothing queued) without an active stream. */
-    private fun enqueueCopy(sessionGuid: String): CompletableDeferred<String?>? {
+    private fun enqueueCopy(sessionGuid: String, timeout: Duration = copyTimeout): CompletableDeferred<String?>? {
         val linkId = active.value?.linkId ?: return null
         val result = CompletableDeferred<String?>()
-        enqueue(Copy(linkId, sessionGuid, result))
+        enqueue(Copy(linkId, sessionGuid, timeout, result))
         return result
     }
 
@@ -235,7 +243,7 @@ class SelectionDriver(
     }
 
     private suspend fun copy(item: Copy): String? = try {
-        val reply = link.request(PhoneMessage.CopySelection(item.sessionGuid), onLink = item.linkId, timeout = copyTimeout)
+        val reply = link.request(PhoneMessage.CopySelection(item.sessionGuid), onLink = item.linkId, timeout = item.timeout)
         when (reply) {
             is MacMessage.SelectionText -> {
                 log("copy for ${item.sessionGuid}: ${reply.text.length} chars")
