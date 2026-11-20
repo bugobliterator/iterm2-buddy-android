@@ -102,6 +102,28 @@ Notes from that task:
 - Keep one project debug keystore, restored by `scripts/cloud-setup.sh`, so device installs of a new cloud build do not need an uninstall that deletes the pairing (Mythos milestone review M4). Each cloud session currently generates its own `~/.android/debug.keystore`.
 - CI (the "Android build" workflow) restores the shared debug key from the `DEBUG_KEYSTORE_BASE64` secret when it is set.
 
+## Browser sessions: scrolling and fill (2026-11-20)
+
+- **Owner report:** on a browser session, drags did nothing while taps worked, and the page sat at
+  fit with an empty band below it.
+- **Fill:** a browser page now rests zoomed to fill the screen (`browserFillZoom`, the canvas's base
+  zoom). Pinch out shows the whole page.
+- **Cause of the scrolling bug:** the phone's touch path is fine. `BrowserCanvasDeviceTest` passes
+  on the emulator (`android-device-tests.yml`). iTerm2 accepts `browserScroll` and scrolls with
+  it, but places the wheel event off by the browser window's origin on screen (real-Mac runs
+  19-20, `docs/reports/iterm2-companion-browser-scroll-offset.md`, an upstream draft). With the
+  window away from the screen's top-left corner, the wheel misses what is under the finger, or
+  the page.
+- **Owner decision: "Drags send keys, via a switch", on by default.** Settings' "Scroll web pages
+  with keys" (`ScrollKeysSetting`). While it is on and the page is not editing text,
+  `BrowserDriver` turns vertical drag and fling travel into arrows (40 CSS px a line) and
+  Page Up/Down (the view less 40 px), at most one every 120 ms, with at most two pages of backlog.
+  Horizontal travel still goes as `browserScroll`.
+- **Calibration:** the real-Mac probe's `calibrate:` and `key drag` lines measure the step sizes
+  and the gap. Set `DEFAULT_KEY_*` in `BrowserDriver.kt` from them.
+- **Open:** the on-device checks in `docs/reports/browser-sessions-on-device.md` (Fill the
+  screen, Scroll with keys).
+
 ## Plan deviations already ruled on
 
 - Plan tasks are named, not numbered. Hand each implementer only "Global Constraints", "Review Focus" and its own `### Task:` section, never the whole plan.

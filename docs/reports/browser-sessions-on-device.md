@@ -57,11 +57,40 @@ Back, Forward, Reload; Stop (⟳ shows ✕) while a slow page loads.
 
 **Result:**
 
-### Scroll and fling
+### Fill the screen
+
+The page opens zoomed to fill the screen below the bar, with no empty band. A page wider than the
+phone is cropped at both sides: a horizontal drag pans to them and a vertical drag scrolls the
+page. Pinch out shows the whole page (fit); pinch back in. Rotate: a page left at the fill fills
+the new shape; a page pinched to fit stays at fit. With the keyboard up the page stays put (its
+bottom covered); dragging up first reveals the bottom, then scrolls.
+
+**Result:**
+
+### Scroll with keys (Settings: "Scroll web pages with keys", on by default)
+
+iTerm2 3.7.7 places a `browserScroll`'s wheel event off by the browser window's origin on screen
+(`iterm2-companion-browser-scroll-offset.md`), so with the switch on, drags and flings scroll with
+arrow and Page Up/Down keys instead. Move the iTerm2 browser window to the middle of the Mac's
+screen first.
+
+- Switch on: a slow drag scrolls the page a line or so at a time, a long drag or a fling by
+  pages, and the page stops soon after the finger lifts. A tap stops it. A horizontal drag still
+  pans at the fill.
+- With a text field focused on the page (the keyboard up), a drag scrolls without moving the
+  caret (it falls back to scroll events).
+- On a page that scrolls inside a panel, tap the panel first; then drags scroll it.
+- Switch off: drags send scroll events as before. Note whether they scroll with the window in
+  the middle of the screen, and with it at the top-left corner.
+
+**Result:**
+
+### Scroll and fling (switch off)
 
 At fit, a drag scrolls the page and a fling coasts and slows. A tap stops the fling. Pinch in: no
-fling follows the pinch. Zoomed in, a horizontal drag only pans; a vertical drag pans, then
-scrolls the page once the view reaches its top or bottom edge. Leaving the view mid-fling stops it.
+fling follows the pinch. Zoomed in past the fill, a horizontal drag only pans; a vertical drag
+pans, then scrolls the page once the view reaches its top or bottom edge. Leaving the view
+mid-fling stops it.
 
 **Result:**
 
