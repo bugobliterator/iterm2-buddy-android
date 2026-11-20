@@ -82,12 +82,22 @@ internal fun linkBubbleContent(link: TappedLink, browserSession: String?): LinkB
     else -> LinkBubbleContent(note = "Mac-only link — no Browser session open", openLabel = null)
 }
 
-/** [url] in at most [max] characters: its middle replaced by `…` when longer. */
+/**
+ * [url] for the bubble: the scheme and the whole host (and port) always, then as much of the rest
+ * (path, query, fragment) as fits in [max] characters in all, its middle replaced by `…`. A host
+ * longer than [max] is shown whole with `/…` after it when there is more.
+ */
 internal fun elideLink(url: String, max: Int = LINK_ELIDE_CHARS): String {
-    if (url.length <= max || max < 3) return url
-    val keep = max - 1
-    val head = (keep * 2 + 2) / 3
-    return url.take(head) + "…" + url.takeLast(keep - head)
+    if (url.length <= max) return url
+    val start = url.indexOf("://").let { if (it < 0) 0 else it + 3 }
+    val end = url.indexOfAny(charArrayOf('/', '?', '#'), start).let { if (it < 0) url.length else it }
+    val origin = url.substring(0, end)
+    val rest = url.substring(end)
+    val room = max - origin.length
+    if (room < 3) return if (rest.isEmpty()) origin else "$origin${rest.first()}…"
+    val keep = room - 1
+    val head = (keep + 1) / 2
+    return origin + rest.take(head) + "…" + rest.takeLast(keep - head)
 }
 
 private const val LINK_ELIDE_CHARS = 44
@@ -96,7 +106,7 @@ private const val LINK_ELIDE_CHARS = 44
 internal const val LINK_CLIP_LABEL = "Link"
 
 /**
- * The small bubble for a tapped link: the link elided ([elideLink]) on one line, a note when it
+ * The small bubble for a tapped link: the link elided ([elideLink], the host always whole), a note when it
  * is Mac-only, then **Open** (as [linkBubbleContent] labels it) and **Copy**. Placed as the
  * selection menu ([menuPosition]) for the tap at [anchor] inside [bounds] (read at layout).
  */
@@ -127,7 +137,8 @@ internal fun LinkBubble(
             Text(
                 text = elideLink(link.url),
                 style = MaterialTheme.typography.bodySmall,
-                maxLines = 1,
+                // The host is always whole (elideLink); a long one wraps rather than being cut.
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 8.dp),
             )

@@ -228,7 +228,8 @@ interface LiveSessionActions {
  * **Open** and **Copy**. A phone link opens in the phone's browser ([LiveSessionActions.openLink]);
  * a Mac-local one (localhost and loopback) in the most recently viewed Browser session
  * ([LiveSessionActions.openLinkInBrowserSession]), or the bubble says there is none. A tap
- * elsewhere, a drag, a long press or a stream change hides it (that tap does nothing else); a tap
+ * elsewhere, a drag, a double-tap zoom, wheel notches, typing or a paste, a long press or a stream
+ * change hides it (that tap does nothing else); a tap
  * that stopped a coast, a double tap and a tap while a selection shows never look one up.
  *
  * **Edge to edge** (iOS `SessionView.swift:870-889, 1985-2005`). The canvas is the whole window
@@ -381,6 +382,7 @@ private fun LiveSessionContent(
             emit = { event ->
                 // Typing stops a coasting flick (vim, less: the next key acts where the view is).
                 scrollback.stopCoast()
+                links?.dismiss()
                 currentTarget?.let { currentActions.key(it, event) }
             },
             onComposingFlushed = keyboard::restartInput,
@@ -448,12 +450,14 @@ private fun LiveSessionContent(
                 control = scrollback,
                 onCanvasSize = {},
                 onWheel = { up, lines ->
+                    links?.dismiss()
                     val wheelTarget = currentTarget
                     val wheelStream = currentStreamID
                     if (wheelTarget != null && wheelStream != null) currentActions.scrollWheel(wheelTarget, wheelStream, up, lines)
                 },
                 onTapAt = canvasTap,
                 onPanStart = { links?.dismiss() },
+                onDoubleTap = { links?.dismiss() },
                 topInset = topChrome.toFloat(),
                 restBottomInset = navigationBottom.toFloat(),
                 bottomInset = bottomCover,
@@ -572,6 +576,7 @@ private fun LiveSessionContent(
                     val pasteTarget = currentTarget
                     if (text != null && pasteTarget != null) {
                         scrollback.stopCoast()
+                        links?.dismiss()
                         currentActions.paste(pasteTarget, text)
                     }
                 },
@@ -678,6 +683,7 @@ private fun LiveSessionContent(
             onPaste = {
                 currentTarget?.let {
                     scrollback.stopCoast()
+                    links?.dismiss()
                     actions.paste(it, draft)
                     updateDraft("")
                     composerOpen = false
@@ -686,6 +692,7 @@ private fun LiveSessionContent(
             onPasteThenReturn = {
                 currentTarget?.let {
                     scrollback.stopCoast()
+                    links?.dismiss()
                     actions.typeThenReturn(it, draft)
                     updateDraft("")
                     composerOpen = false

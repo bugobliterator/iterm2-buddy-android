@@ -192,8 +192,10 @@ URL highlight on the Mac for a moment); with no answer within a second nothing s
   it. **Open link** opens it in the phone's browser; **Copy** puts it on the clipboard.
 - Tap plain text (the prompt, a word): no bubble, and the tap raises the keyboard as before.
 - Tap a URL with the keyboard hidden: the keyboard comes up as before and the bubble shows too.
-- With the bubble shown, tap elsewhere: it goes, and that tap does nothing else. A drag, a pinch
-  or a long press also hides it.
+- With the bubble shown, tap elsewhere: it goes, and that tap does nothing else. A drag, a pinch,
+  a double tap, typing or a long press also hides it. A long URL shows its whole host.
+- Open a Mac-local link into a Browser session and press Back before the page loads: a brief
+  notice says the link was not opened.
 - Double-tap a URL: it only zooms (no bubble). Flick the scrollback and tap to stop it: it only
   stops (no bubble). Long-press to select: the selection menu works as before.
 - A URL followed by a full stop or in brackets, `(https://example.com/a).`, opens without the

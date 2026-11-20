@@ -99,7 +99,8 @@ import kotlin.time.Duration.Companion.seconds
  * stream, app-scoped like [input] so a drag's end is still sent across activity recreation.
  * [links] finds the link under a tap through it (the Mac's smart selection); [browserLinks] opens
  * a Mac-local one in the most recently viewed Browser session (each one the navigator shows is
- * recorded), sending its `browserLoad` through [browser] once that session's stream takes input.
+ * recorded), sending its `browserLoad` through [browser] once that session's stream takes input;
+ * leaving that view first drops it, and the activity shows its drop notices.
  *
  * [video] is never closed: it lives as long as the process. An Application has no reliable end
  * (`onTerminate` never runs on a device), and process death takes the codec and the decoder
@@ -328,7 +329,8 @@ class CompanionApp : Application() {
         )
         scope.launch {
             home.navigator.state.collect { nav ->
-                (nav.destination as? HomeDestination.BrowserSession)?.let { browserLinks.shown(it.session.guid) }
+                // Also drops a waiting link whose browser view was left before it was sent.
+                browserLinks.viewing((nav.destination as? HomeDestination.BrowserSession)?.session?.guid)
             }
         }
         autoFit = AutoFitter(

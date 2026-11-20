@@ -126,13 +126,17 @@ class LinkTapsTest {
     }
 
     @Test
-    fun linksAreElidedInTheMiddle() {
+    fun linksAreElidedInThePathWithTheHostWhole() {
         assertEquals("https://example.com/path", elideLink("https://example.com/path"))
         val long = "https://example.com/" + "a".repeat(60) + "/end"
-        val elided = elideLink(long, max = 20)
-        assertEquals(20, elided.length)
-        assertTrue(elided, elided.startsWith("https://exam") && elided.endsWith("a/end") && "…" in elided)
-        assertEquals(long, elideLink(long, max = 2))
+        val elided = elideLink(long, max = 30)
+        assertEquals(30, elided.length)
+        assertTrue(elided, elided.startsWith("https://example.com/aaaa") && elided.endsWith("a/end") && "…" in elided)
+        // A host longer than the room is shown whole, never cut.
+        val host = "https://" + "sub.".repeat(10) + "example.com"
+        assertEquals("$host/…", elideLink("$host/some/long/path", max = 20))
+        assertEquals("$host:8080", elideLink("$host:8080", max = 20))
+        assertEquals("http://localhost:3000?…", elideLink("http://localhost:3000?" + "q".repeat(40), max = 22))
     }
 
     private companion object {

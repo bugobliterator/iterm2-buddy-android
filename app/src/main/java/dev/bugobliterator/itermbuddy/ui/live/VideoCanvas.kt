@@ -131,6 +131,7 @@ class LiveVideoSource(
  * @param onTapAt the same single tap with its screen point and the zoom and fit as shown, right
  *   after [onTap]; for a terminal only (not with [browser]), and never for a tap that stopped a coast.
  * @param onPanStart a drag or pinch went past the touch slop (it scrolls or zooms).
+ * @param onDoubleTap a double tap toggled the zoom.
  * @param topInset the status bar and top bar drawn over the canvas's top, in px.
  * @param leftInset the system bars and display cutout over the canvas's left edge, in px.
  * @param rightInset the same over its right edge, in px.
@@ -212,6 +213,7 @@ fun VideoCanvas(
     onTap: () -> Unit = {},
     onTapAt: ((x: Float, y: Float, shown: ZoomState, fit: FitRect) -> Unit)? = null,
     onPanStart: () -> Unit = {},
+    onDoubleTap: () -> Unit = {},
     topInset: Float = 0f,
     restBottomInset: Float = 0f,
     bottomInset: () -> Float = { restBottomInset },
@@ -253,6 +255,7 @@ fun VideoCanvas(
     val currentOnTap by rememberUpdatedState(onTap)
     val currentOnTapAt by rememberUpdatedState(onTapAt)
     val currentOnPanStart by rememberUpdatedState(onPanStart)
+    val currentOnDoubleTap by rememberUpdatedState(onDoubleTap)
     val geometry by rememberUpdatedState(GestureGeometry(fit, viewW, viewH, max, topInset, restBottomInset, leftInset, rightInset, history, base))
     val currentInset by rememberUpdatedState(bottomInset)
     val wheel = remember(wheelStepPx) { wheelStepPx?.let { ScrollWheelAccumulator(it) } }
@@ -421,6 +424,7 @@ fun VideoCanvas(
                             if (page == null) currentOnTapAt?.invoke(action.x, action.y, shown, g.fit)
                         }
                         is PressAction.DoubleTap -> {
+                            currentOnDoubleTap()
                             // Zooming out over history keeps the line under the tap rather than jump to the live band.
                             val next = if (g.history > 0f && shown.scale > 1f) {
                                 applyGesture(shown, action.x, action.y, 1f / shown.scale, 0f, 0f, g.docFit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right)

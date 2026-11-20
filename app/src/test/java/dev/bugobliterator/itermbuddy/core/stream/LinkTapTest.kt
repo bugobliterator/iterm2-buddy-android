@@ -56,7 +56,7 @@ class LinkTapTest {
             "https://example.com/a[1]" to "https://example.com/a[1]",
             // Hosts, ports, user info, IP literals.
             "http://localhost:8080/x" to "http://localhost:8080/x",
-            "http://user@host.example:22/" to "http://user@host.example:22/",
+            "http://host.example:22/" to "http://host.example:22/",
             "http://[::1]:3000/" to "http://[::1]:3000/",
             "http://127.0.0.1" to "http://127.0.0.1",
         )
@@ -71,6 +71,11 @@ class LinkTapTest {
             "https://ex%ample.com", "https://host:port/", "https://host:/", "https://.example.com", "https://a..b",
             "http://[::1", "http://[::1]x/", "two https://example.com words", "https://exa\u0007mple.com",
             "https://" + "a".repeat(MAX_LINK_CHARS),
+            // User info and backslashes: WHATWG would open another host than the one shown.
+            "http://user@host.example:22/", "http://evil.example\\@localhost/x", "http://localhost\\@evil.example",
+            "http://evil.example\\.localhost/", "https://example.com/a\\b", "http://a%40b@localhost/", "http://ex%61mple.com/",
+            // Unicode format characters (bidi overrides, zero-width).
+            "https://exa\u202Emple.com", "https://example.com/\u200Bpath", "https://example.com/\u2066x\u2069",
         )
         for (text in cases) assertNull("for <$text>", linkFromSelection(text))
     }
@@ -81,11 +86,19 @@ class LinkTapTest {
             "http://localhost", "http://LOCALHOST:3000/x", "http://app.localhost/", "http://127.0.0.1:8000",
             "http://127.1.2.3/", "http://[::1]:5173/", "http://0.0.0.0:8080", "http://localhost./",
             "http://[::ffff:127.0.0.1]/", "http://[0:0:0:0:0:0:0:1]/",
+            // Every IPv4 form a browser reads as loopback.
+            "http://127.1/", "http://127.0.0/", "http://0x7f.0.0.1/", "http://0X7F.1/", "http://0177.0.0.1/", "http://2130706433/",
+            "http://0x7f000001/", "http://0/", "http://0x/",
         )
         val phone = listOf(
             "https://example.com", "http://128.0.0.1", "http://10.0.0.5:8080", "http://192.168.1.2", "http://[::2]/",
-            "http://localhost.example.com", "http://127.0.0.256/", "http://127.0.0/", "http://mac.local/", "http://my-mac/",
+            "http://localhost.example.com", "http://127.0.0.256/", "http://mac.local/", "http://my-mac/",
+            "http://128.1/", "http://0x80.0.0.1/", "http://3232235777/", "http://1.2.3.4.5/", "http://127.0.0.1.example/",
+            "http://08.0.0.1/",
         )
+        // Refused links are never Mac-local either.
+        assertFalse(isMacLocalLink("http://evil.example\\@localhost/x"))
+        assertFalse(isMacLocalLink("http://localhost\\@evil.example"))
         for (url in local) assertTrue(url, isMacLocalLink(url))
         for (url in phone) assertFalse(url, isMacLocalLink(url))
         // The Mac's own names, when known, with or without .local.
@@ -96,7 +109,11 @@ class LinkTapTest {
 
     @Test
     fun hostsAreParsed() {
-        assertEquals("example.com", linkHost("https://user:pw@Example.COM:443/a?b#c"))
+        assertEquals("example.com", linkHost("https://Example.COM:443/a?b#c"))
+        assertNull("no user info", linkHost("https://user:pw@example.com/"))
+        assertNull("a backslash anywhere", linkHost("http://evil.example\\path"))
+        assertNull(linkHost("http://localhost\\@evil.example"))
+        assertNull(linkHost("http://evil.example\\@localhost/x"))
         assertEquals("::1", linkHost("http://[::1]:80"))
         assertEquals("example.com", linkHost("https://example.com?x"))
         assertNull(linkHost("example.com"))
@@ -186,14 +203,56 @@ class LinkTapTest {
     }
 
     @Test
-    fun aStreamChangeDuringTheLookupFindsNothingAndClearsNothing() = runTest {
+    fun aStreamChangeDuringTheLookupFindsNothingButStillClearsTheSession() = runTest {
+        // The same session on a new stream (a restart): cleared through it.
         val rig = Rig(this)
         val found = async { rig.lookup.lookup(GUID, POINT) }
         val request = rig.link.requests.receive()
         rig.active.value = ActiveStream(1, 8, GUID, 2, null, 100)
         request.reply.complete(MacMessage.SelectionText("https://example.com"))
         assertNull(found.await())
-        assertTrue("no clear for the new stream", rig.sent().none { it is PhoneMessage.ClearSelection })
+        assertEquals(PhoneMessage.ClearSelection(8), rig.sent().last())
+    }
+
+    @Test
+    fun leavingTheSessionMidLookupStillClearsItsOldStream() = runTest {
+        for (next in listOf(null, ActiveStream(1, 9, "guid-other", 3, null, 0))) {
+            // Back (no stream), or another session's stream.
+            val rig = Rig(this)
+            val found = async { rig.lookup.lookup(GUID, POINT) }
+            val request = rig.link.requests.receive()
+            rig.active.value = next
+            request.reply.complete(MacMessage.SelectionText("https://example.com"))
+            assertNull(found.await())
+            assertEquals(PhoneMessage.ClearSelection(7), rig.sent().last())
+            assertEquals("on its own link", 1L, rig.link.sent.last().onLink)
+        }
+        // Its link gone too: the clear fails, logged, and the queue goes on.
+        val rig = Rig(this)
+        val found = async { rig.lookup.lookup(GUID, POINT) }
+        val request = rig.link.requests.receive()
+        rig.active.value = null
+        rig.link.currentLink = 2
+        request.reply.complete(MacMessage.SelectionText("https://example.com"))
+        assertNull(found.await())
+        assertTrue(rig.sent().none { it is PhoneMessage.ClearSelection })
+    }
+
+    @Test
+    fun whatwgIpv4Forms() {
+        assertEquals(0x7f000001L, whatwgIpv4("127.0.0.1"))
+        assertEquals(0x7f000001L, whatwgIpv4("127.1"))
+        assertEquals(0x7f000001L, whatwgIpv4("0x7f.1"))
+        assertEquals(0x7f000001L, whatwgIpv4("0177.0.0.01"))
+        assertEquals(0x7f000001L, whatwgIpv4("2130706433"))
+        assertEquals(0x01010000L + 65535, whatwgIpv4("1.1.65535"))
+        assertNull(whatwgIpv4("1.1.65536"))
+        assertNull(whatwgIpv4("256.0.0.1"))
+        assertNull(whatwgIpv4("4294967296"))
+        assertNull(whatwgIpv4("1.2.3.4.5"))
+        assertNull(whatwgIpv4("1..2"))
+        assertNull(whatwgIpv4("example.com"))
+        assertNull(whatwgIpv4("09"))
     }
 
     @Test
