@@ -65,8 +65,16 @@ case "$kind" in
         ;;
 esac
 
-# Whatever the program left on: kitty flags (reset to 0 and pop), bracketed paste,
-# modifyOtherKeys, focus reporting, the alternate screen; a visible cursor; a sane tty.
-printf '\033[=0;1u\033[<u\033[<u\033[<u\033[?2004l\033[>4m\033[?1004l\033[?1049l\033[?25h'
+# Whatever the program left on: kitty flags, bracketed paste, modifyOtherKeys, focus reporting,
+# the alternate screen; a visible cursor; a sane tty. Kitty flags are popped first (all of them,
+# CSI < 99 u) and only then zeroed (CSI = 0 ; 1 u): zeroing first and then popping restored the
+# flags Claude Code had pushed, and the steps after this one typed into kitty mode (run 27). Each
+# screen keeps its own flags, so the alternate screen is reset too before leaving it.
+reset_keys='\033[<99u\033[=0;1u\033[>4m'
+printf "\033[?1049h${reset_keys}\033[?1049l${reset_keys}\033[?2004l\033[?1004l\033[?25h"
+stty sane 2>/dev/null
+sleep 0.2
+# Once more after the tty settles: a program killed mid-write can leave bytes in flight.
+printf "${reset_keys}"
 stty sane 2>/dev/null
 echo "$status" > "$dir/done"

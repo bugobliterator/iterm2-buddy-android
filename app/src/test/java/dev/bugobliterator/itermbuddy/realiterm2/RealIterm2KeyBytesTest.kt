@@ -120,7 +120,14 @@ class RealIterm2KeyBytesTest {
             val started = captureMode(probe, keyBytesDir.resolve(mode.label), mode)
             if (mode.modes.isEmpty()) plainStarted = started
         }
-        claudeMode(probe, keyBytesDir.resolve("claude"), installed = env["KEY_BYTES_CLAUDE"] != null)
+        try {
+            claudeMode(probe, keyBytesDir.resolve("claude"), installed = env["KEY_BYTES_CLAUDE"] != null)
+        } finally {
+            // Plain keys for the steps after this one, whatever Claude Code or its stop left on
+            // (key-probe.sh resets too; pasted here as well, past the key mapper).
+            RealIterm2Rig.restoreTerminal(sender, target)
+            line("terminal restored: kitty flags popped and zeroed, modifyOtherKeys and bracketed paste off, stty sane")
+        }
         if (senderLog.isNotEmpty()) line("input sender: ${senderLog.toList()}")
 
         val diagnostics = workDir.resolve("diagnostics").also { it.mkdirs() }

@@ -125,11 +125,14 @@ class RealIterm2LatencyTest {
         rig.poll { frames.media.firstOrNull { it.keyframe } } ?: failWith("no keyframe for stream ${active.streamID}")
         val keys = KeySender(client, session.guid, linkId)
 
-        // A clean prompt: whatever an earlier step left running is interrupted, the screen cleared.
+        // A clean prompt: whatever an earlier step left running is interrupted, plain keys again (the
+        // key-bytes probe can leave kitty flags on, which mangles typed commands), the screen cleared.
+        // The restore is pasted, not typed, so the keyboard mode left on cannot mangle it.
         keys.key("c", KeyModifiers(control = true))
         delay(200)
         keys.key("c", KeyModifiers(control = true))
-        keys.text("clear")
+        keys.text("\n")
+        keys.paste(RealIterm2Rig.RESTORE_TERMINAL)
         keys.text("\n")
         frames.awaitQuiet(QUIET_BEFORE_KEYS, SETTLE_CAP)
 
@@ -207,7 +210,7 @@ class RealIterm2LatencyTest {
     /** Runs a command that prints a line every 10 ms and measures the frames that arrive meanwhile. */
     private suspend fun scrollThroughput(keys: KeySender, frames: FrameLog, client: CompanionClient, scope: CoroutineScope): ScrollResult {
         val firstIndex = frames.media.size
-        keys.text(SCROLL_COMMAND)
+        keys.paste(SCROLL_COMMAND)
         val start = keys.text("\n")
         val pings = CopyOnWriteArrayList<Double>()
         val pinger = scope.launch {
@@ -282,6 +285,12 @@ class RealIterm2LatencyTest {
     /** Sends keys to [guid] on [linkId]; each call returns when the send returned, in [System.nanoTime]. */
     private class KeySender(private val client: CompanionClient, private val guid: String, private val linkId: Long) {
         suspend fun text(text: String): Long = key(text, KeyModifiers())
+
+        /** [text] as `pasteText`: past iTerm2's key mapper, whatever keyboard mode is on. */
+        suspend fun paste(text: String): Long {
+            client.send(PhoneMessage.PasteText(guid, text), onLink = linkId)
+            return System.nanoTime()
+        }
 
         suspend fun key(text: String, modifiers: KeyModifiers): Long {
             client.send(PhoneMessage.SendKey(guid, KeyEvent(Key.Text(text), modifiers)), onLink = linkId)

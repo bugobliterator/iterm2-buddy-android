@@ -164,7 +164,10 @@ class RealIterm2FitTest {
             var split = rig.poll { controller.activeStream.value?.config?.takeIf { it.rows < rowsBefore } }
             if (split == null) {
                 val stderr = diagnosticsDir().resolve(IT2_STDERR_FILE).also { it.delete() }
-                sender.typeThenReturn(InputTarget(linkId, watchEpoch = 0, sessionGuid = guid), "\"$IT2\" session split --session $guid 2>>\"${stderr.path}\"")
+                // Pasted, not typed: the key-bytes probe can leave kitty flags on, which mangles typed keys.
+                val typedTarget = InputTarget(linkId, watchEpoch = 0, sessionGuid = guid)
+                RealIterm2Rig.restoreTerminal(sender, typedTarget)
+                RealIterm2Rig.pasteCommand(sender, typedTarget, "\"$IT2\" session split --session $guid 2>>\"${stderr.path}\"")
                 split = rig.poll { controller.activeStream.value?.config?.takeIf { it.rows < rowsBefore } }
                 if (split == null) report("fit: split pane: typed it2 did not shrink the grid either (it2 stderr: ${stderrSummary(stderr)})")
             }
