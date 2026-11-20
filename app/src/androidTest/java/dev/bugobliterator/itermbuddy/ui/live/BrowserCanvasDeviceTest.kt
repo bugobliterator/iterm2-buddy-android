@@ -31,6 +31,7 @@ import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.ui.browser.BrowserSessionScreen
 import dev.bugobliterator.itermbuddy.video.HevcVideoOutput
 import dev.bugobliterator.itermbuddy.video.MediaCodecCatalog
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -52,9 +53,12 @@ import kotlin.time.Duration
  * driver and [InputSender] on a recording link; with Settings' "Scroll web pages with keys" on, a
  * swipe goes to the page as keys. Swipes at fit and at the fill base, fast and
  * slow, with and without the keyboard's inset, must reach the link as `browserScroll` with the
- * right sign; a tap must still click the right page pixel. The driver's 40 ms ticker runs in
+ * right sign; a tap must still click the right page pixel. With keys, a flick back stops the old
+ * fling's keys, a swipe straight after a tap scrolls raw, and a wobbly vertical swipe sends nothing
+ * sideways. The driver's 40 ms ticker runs in
  * virtual time ([scheduler]), advanced by hand once a gesture is over.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(AndroidJUnit4::class)
 class BrowserCanvasDeviceTest {
     @get:Rule
@@ -190,6 +194,55 @@ class BrowserCanvasDeviceTest {
         // A tap still clicks.
         rule.onNodeWithTag(TAG).performTouchInput { click(center) }
         assertEquals(1, sent().count { it is PhoneMessage.BrowserTap })
+    }
+
+    private fun keys(): List<SpecialKey> = sent().filterIsInstance<PhoneMessage.SendKey>().map { (it.event.key as Key.Special).key }
+
+    @Test
+    fun withScrollKeysOnAFlickBackStopsTheOldFlingsKeys() {
+        keysOn = true
+        show(fill = true)
+        // A hard flick up: the page coasts down in keys.
+        swipe(0.5f, 0.8f, 0.5f, 0.2f, 80)
+        rule.waitForIdle()
+        scheduler.advanceTimeBy(200)
+        scheduler.runCurrent()
+        val before = link.sent.size
+        // Straight away a slow swipe back down: nothing more goes down, only up.
+        swipe(0.5f, 0.3f, 0.5f, 0.6f, 600)
+        val after = sent().drop(before).filterIsInstance<PhoneMessage.SendKey>().map { (it.event.key as Key.Special).key }
+        assertTrue("keys after the reversal: $after", after.isNotEmpty() && after.all { it == SpecialKey.UP || it == SpecialKey.PAGE_UP })
+    }
+
+    @Test
+    fun withScrollKeysOnASwipeRightAfterATapScrollsRaw() {
+        keysOn = true
+        show(fill = true)
+        // Tap (a field, perhaps) and swipe at once, before the page could answer: no arrows into it.
+        rule.onNodeWithTag(TAG).performTouchInput { click(center) }
+        swipe(0.5f, 0.7f, 0.5f, 0.4f, 200)
+        rule.waitForIdle()
+        scheduler.advanceTimeBy(100)
+        scheduler.runCurrent()
+        val sent = link.sent.toList()
+        assertEquals(1, sent.count { it is PhoneMessage.BrowserTap })
+        assertTrue("no keys: $sent", sent.none { it is PhoneMessage.SendKey })
+        assertTrue("a raw scroll instead", sent.filterIsInstance<PhoneMessage.BrowserScroll>().sumOf { it.deltaY } < 0.0)
+        // Once the hold is over, swipes go as keys again.
+        scheduler.advanceTimeBy(1_000)
+        swipe(0.5f, 0.7f, 0.5f, 0.4f, 300)
+        assertTrue(keys().isNotEmpty())
+    }
+
+    @Test
+    fun withScrollKeysOnAVerticalSwipeWithAWobbleSendsNothingSideways() {
+        keysOn = true
+        show(fill = false)
+        // At fit a drag scrolls both ways; this one is mostly down with a sideways drift.
+        swipe(0.4f, 0.8f, 0.55f, 0.2f, 400)
+        val sent = sent()
+        assertTrue(keys().isNotEmpty())
+        assertTrue("no sideways scroll: $sent", sent.filterIsInstance<PhoneMessage.BrowserScroll>().all { it.deltaX == 0.0 })
     }
 
     @Test

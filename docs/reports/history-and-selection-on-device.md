@@ -29,6 +29,16 @@ continuous across tile boundaries and into the live area, and **↓ Live** retur
 
 **Result:**
 
+### Flick the scrollback
+
+In a session with long output (`seq 1 20000`), flick down and lift: the history keeps coasting
+and slows smoothly to a stop, as an Android list does. A hard flick stops at the top of the
+history with no bounce; a flick back down stops at the live bottom. Touching the screen while it
+coasts stops it where it is. Tiles ahead of the coast are already drawn, or fill in quickly
+(dark placeholders at most for a moment). Zoomed in, a flick pans and coasts too.
+
+**Result:**
+
 ### Growing output while scrolled up
 
 Run `while true; do date; sleep 1; done` and scroll up: the view stays put. Scroll back to the
@@ -47,6 +57,10 @@ left behind.
 
 In `less`, and in `vim` with `:set mouse=a`, dragging scrolls the app. In `htop` it scrolls the
 process list.
+
+Flick in each (and in Claude Code's transcript): after the lift the app keeps scrolling, fast at
+first and then slower, and stops within a few screens however hard the flick (at most 120 lines).
+A touch or any key stops it at once. A slow drag still moves one line per line of finger travel.
 
 **Result:**
 

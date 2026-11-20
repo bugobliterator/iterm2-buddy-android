@@ -217,4 +217,15 @@ class ScrollbackTilesTest {
         // The live band is wanted too; the store asks only for history.
         assertEquals(2760L..3179L, wantedLines(layout, DocumentView(19_000f, 20_400f, atLiveBottom = true)))
     }
+
+    @Test
+    fun aCoastFetchesEverythingUpToWhereItWillRest() {
+        val layout = ScrollbackLayout(firstAbsLine = 1000, liveTop = 3000, totalLines = 2040, rows = 40, lineHeightPx = 10f, altScreen = false)
+        val view = DocumentView(5000f, 6000f, atLiveBottom = false)
+        assertEquals("no coast: what is wanted", wantedLines(layout, view), prefetchLines(layout, view, null))
+        // Flung up to document y 1000..2000 (lines 1100..1200): from that viewport's top margin to this one's bottom.
+        assertEquals(999L..1701L, prefetchLines(layout, view, DocumentView(1000f, 2000f, atLiveBottom = false)))
+        // Flung down: the other way round.
+        assertEquals(1399L..2101L, prefetchLines(layout, view, DocumentView(9000f, 10_000f, atLiveBottom = false)))
+    }
 }

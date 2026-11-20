@@ -338,7 +338,11 @@ private fun LiveSessionContent(
     val translator = remember(session.guid) {
         ImeTranslator(
             modifiers,
-            emit = { event -> currentTarget?.let { currentActions.key(it, event) } },
+            emit = { event ->
+                // Typing stops a coasting flick (vim, less: the next key acts where the view is).
+                scrollback.stopCoast()
+                currentTarget?.let { currentActions.key(it, event) }
+            },
             onComposingFlushed = keyboard::restartInput,
             toComposer = { text ->
                 // Dictation or a multi-line or long commit: the owner confirms it in the composer.
