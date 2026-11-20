@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy.video
 
+import android.os.Build
 import android.os.SystemClock
 import android.view.Surface
 import androidx.annotation.VisibleForTesting
@@ -19,9 +20,14 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * Decoder counters for diagnostics. [lastLatencyMillis] is accept to output of the latest output
- * frame. [decoderName] is the running decoder (null while there is none); [lastDecoderName] the
- * most recent one started, kept after it is released (Settings shows it).
+ * Decoder counters for diagnostics. [lastLatencyMillis] is accept (by [HevcVideoOutput.submit])
+ * to output of the latest output frame, matched by presentation time: the frame's own accept
+ * time, never one carried over from dropped frames, and no sample when the output matches no
+ * accepted frame. [medianLatencyMillis] is the median of the last [LATENCY_WINDOW] such samples
+ * of the running decoder (null until its first). [lowLatency] is how the running (or last)
+ * decoder was configured ([LowLatencyState]). [decoderName] is the running decoder (null while
+ * there is none); [lastDecoderName] the most recent one started, kept after it is released
+ * (Settings shows it).
  * [framesOutSinceReset] counts frames rendered since the last [HevcVideoOutput.reset] or decoder
  * rebuild for a new config: the live view's stale-frame signal. It is zeroed under the output's
  * lock in the same step that retires the old decoder's frames, so an output of a decoder that is
@@ -34,7 +40,12 @@ data class VideoStats(
     val lastLatencyMillis: Long?,
     val framesOutSinceReset: Long = 0,
     val lastDecoderName: String? = null,
+    val medianLatencyMillis: Long? = null,
+    val lowLatency: LowLatencyState? = null,
 )
+
+/** How many recent accept-to-output samples [VideoStats.medianLatencyMillis] is the median of. */
+const val LATENCY_WINDOW = 31
 
 /** How long [HevcVideoOutput.detachSurface] and [HevcVideoOutput.close] wait for the decoder thread. */
 const val DEFAULT_SURFACE_CALL_TIMEOUT_MILLIS: Long = 1_000
@@ -76,6 +87,14 @@ private const val TAG = "HevcVideoOutput"
  * the limit are refused. Attaching a new surface builds one and requests a keyframe; attaching the
  * same surface again does nothing. Until a codec's first keyframe, [submit] refuses non-keyframes.
  *
+ * **Low latency.** Each decoder is first configured with [LowLatencyRequest.REQUESTED]
+ * ([decoderIntegerKeys]: `KEY_LOW_LATENCY` whether or not advertised, plus its vendor's keys). If
+ * configure or start throws (other than [InsufficientResourceException]), the same codec is reset
+ * and configured once more with [LowLatencyRequest.MINIMAL] (the earlier format); when that works,
+ * the decoder is remembered in [lowLatencyFallbacks] and gets the minimal format straight away
+ * from then on. Which path ran is logged, key names only. [setLowLatencyKeys] (the debug switch)
+ * turns the requested format off and on, rebuilding the decoder.
+ *
  * **Failures and fallback.** Any exception from a codec call or callback releases the codec,
  * empties the pending queue and requests a keyframe; the next keyframe [submit] accepts rebuilds
  * the codec. The candidates are [decoderCandidates] for the size; after
@@ -106,6 +125,8 @@ class HevcVideoOutput(
     private val decoderThread: DecoderThread = HandlerDecoderThread(),
     private val surfaceCallTimeoutMillis: Long = DEFAULT_SURFACE_CALL_TIMEOUT_MILLIS,
     private val log: (String) -> Unit = { AppLog.i(TAG, it) },
+    private val sdkInt: Int = Build.VERSION.SDK_INT,
+    private val lowLatencyFallbacks: LowLatencyFallbacks = LowLatencyFallbacks.process,
 ) : VideoOutput, AutoCloseable {
 
     /**
@@ -129,7 +150,21 @@ class HevcVideoOutput(
         fun current(): DecoderInfo? = if (complete && choice is DecoderChoice.Use) candidates.getOrNull(candidate) else null
     }
 
-    private class Accepted(val presentationTimeUs: Long, val acceptedAt: Long)
+    /**
+     * One accepted frame: [acceptedAt] is the overdue clock's time (possibly carried from frames
+     * dropped before it), [ownAcceptedAt] when this frame itself was accepted (the latency's start).
+     */
+    private class Accepted(val presentationTimeUs: Long, val acceptedAt: Long, val ownAcceptedAt: Long)
+
+    /** What the decoder thread builds: [info] for the plan's size, with the debug switch's [lowLatencyKeys]. */
+    private class Wanted(
+        val info: DecoderInfo,
+        val width: Int,
+        val height: Int,
+        val csd: ByteArray,
+        val maxInputSize: Int,
+        val lowLatencyKeys: Boolean,
+    )
 
     // ---- Guarded by lock: the wanted state, the pending queue and the overdue clock ----
     private val lock = Any()
@@ -142,6 +177,10 @@ class HevcVideoOutput(
 
     /** After a codec failure: no codec until a keyframe is accepted. */
     private var rebuildOnKeyframe = false
+
+    /** The debug switch "Decoder low-latency keys"; always true in release builds. */
+    private var lowLatencyKeys = true
+
     private val queue = PendingInputQueue(maxPendingInputBytes)
     private val accepted = ArrayDeque<Accepted>()
     private var carriedSince: Long? = null
@@ -151,6 +190,9 @@ class HevcVideoOutput(
     private var codecEpoch = -1L
     private var codecHasOutput = false
     private val freeInputs = ArrayDeque<Int>()
+
+    /** The running decoder's recent accept-to-output samples, oldest first (at most [LATENCY_WINDOW]). */
+    private val latencies = ArrayDeque<Long>()
 
     @Volatile private var keyframeRequester: (() -> Unit)? = null
 
@@ -245,7 +287,7 @@ class HevcVideoOutput(
                 val now = nowMillis()
                 val since = carriedSince?.let { minOf(it, now) } ?: now
                 carriedSince = null
-                accepted.addLast(Accepted(presentationTimeUs(frame), since))
+                accepted.addLast(Accepted(presentationTimeUs(frame), since, now))
                 rebuildOnKeyframe = false
             }
             ok
@@ -302,6 +344,30 @@ class HevcVideoOutput(
         }
         decoderThread.post(reconcileTask)
         keyframeRequester?.invoke()
+    }
+
+    /**
+     * The debug switch "Decoder low-latency keys": off configures decoders with
+     * [LowLatencyRequest.MINIMAL] (the earlier format), on with [LowLatencyRequest.REQUESTED].
+     * A change rebuilds a running decoder (the queue empties and a keyframe is requested, as for a
+     * new surface). On by default.
+     */
+    fun setLowLatencyKeys(enabled: Boolean) = guarded("setLowLatencyKeys") {
+        val rebuild = synchronized(lock) {
+            if (closed || lowLatencyKeys == enabled) return@guarded
+            lowLatencyKeys = enabled
+            val attached = surface != null
+            if (attached) {
+                discardWanted()
+                rebuildOnKeyframe = false
+            }
+            attached
+        }
+        log("decoder low-latency keys turned ${if (enabled) "on" else "off"}")
+        if (rebuild) {
+            decoderThread.post(reconcileTask)
+            keyframeRequester?.invoke()
+        }
     }
 
     /**
@@ -372,7 +438,7 @@ class HevcVideoOutput(
     // ---- Decoder thread ----
 
     private fun reconcile() {
-        var wanted: Pair<DecoderInfo, CodecFormat>? = null
+        var wanted: Wanted? = null
         var wantedSurface: Surface? = null
         var wantedEpoch = 0L
         synchronized(lock) {
@@ -380,7 +446,7 @@ class HevcVideoOutput(
             val info = current?.current()
             val csd = current?.csd
             if (!closed && !rebuildOnKeyframe && surface != null && current != null && info != null && csd != null) {
-                wanted = info to CodecFormat(current.width, current.height, csd, info.supportsLowLatency, current.maxInputSize)
+                wanted = Wanted(info, current.width, current.height, csd, current.maxInputSize, lowLatencyKeys)
                 wantedSurface = surface
             }
             wantedEpoch = epoch
@@ -388,11 +454,17 @@ class HevcVideoOutput(
         if (codec != null && (codecEpoch != wantedEpoch || wanted == null)) releaseCodec()
         val build = wanted
         val target = wantedSurface
-        if (codec == null && build != null && target != null) buildCodec(build.first, build.second, target, wantedEpoch)
+        if (codec == null && build != null && target != null) buildCodec(build, target, wantedEpoch)
         feed()
     }
 
-    private fun buildCodec(info: DecoderInfo, format: CodecFormat, target: Surface, forEpoch: Long) {
+    private fun formatFor(wanted: Wanted, request: LowLatencyRequest) = CodecFormat(
+        wanted.width, wanted.height, wanted.csd, request,
+        decoderIntegerKeys(wanted.info.name, wanted.info.supportsLowLatency, request, sdkInt, wanted.maxInputSize),
+    )
+
+    private fun buildCodec(wanted: Wanted, target: Surface, forEpoch: Long) {
+        val info = wanted.info
         val handle = try {
             codecFactory(info)
         } catch (e: Exception) {
@@ -403,15 +475,43 @@ class HevcVideoOutput(
         codecEpoch = forEpoch
         codecHasOutput = false
         freeInputs.clear()
+        val minimal = formatFor(wanted, LowLatencyRequest.MINIMAL)
+        val first = if (!wanted.lowLatencyKeys || info.name in lowLatencyFallbacks) minimal else formatFor(wanted, LowLatencyRequest.REQUESTED)
         try {
-            handle.setCallback(Events(handle))
-            handle.configure(format, target)
-            handle.start()
-            log("decoder ${info.name} started for ${format.width}x${format.height}, lowLatency=${format.lowLatency}")
-            statsFlow.update { it.copy(decoderName = info.name, lastDecoderName = info.name) }
+            var used = first
+            try {
+                startCodec(handle, first, target)
+            } catch (e: RuntimeException) {
+                if (first === minimal || e is InsufficientResourceException || first.integerKeys == minimal.integerKeys) throw e
+                log("decoder ${info.name} rejected the low-latency keys (${e.javaClass.simpleName}); retrying with the minimal format")
+                handle.reset()
+                startCodec(handle, minimal, target)
+                lowLatencyFallbacks.add(info.name)
+                used = minimal
+            }
+            val state = when {
+                used.request == LowLatencyRequest.REQUESTED -> LowLatencyState.ON
+                !wanted.lowLatencyKeys -> LowLatencyState.OFF
+                else -> LowLatencyState.FALLBACK
+            }
+            log(
+                "decoder ${info.name} started for ${used.width}x${used.height}, low latency ${lowLatencyLabel(state)}: " +
+                    used.integerKeys.keys.joinToString(),
+            )
+            latencies.clear()
+            statsFlow.update {
+                it.copy(decoderName = info.name, lastDecoderName = info.name, lowLatency = state, medianLatencyMillis = null)
+            }
         } catch (e: RuntimeException) {
             fail(handle, forEpoch, e)
         }
+    }
+
+    private fun startCodec(handle: CodecHandle, format: CodecFormat, target: Surface) {
+        freeInputs.clear()
+        handle.setCallback(Events(handle))
+        handle.configure(format, target)
+        handle.start()
     }
 
     /** Moves pending frames into free input buffers, in order. */
@@ -480,8 +580,13 @@ class HevcVideoOutput(
             while (accepted.isNotEmpty() && accepted.first().presentationTimeUs <= presentationTimeUs) {
                 popped = accepted.removeFirst()
             }
-            if (popped == null) popped = accepted.removeFirstOrNull()
-            if (popped != null) latency = now - popped.acceptedAt
+            if (popped == null) {
+                // No accepted frame at or before this output: pop one for the clock, but no sample.
+                accepted.removeFirstOrNull()
+            } else if (popped.presentationTimeUs == presentationTimeUs) {
+                latency = now - popped.ownAcceptedAt
+            }
+            val median = latency?.let { addLatencySample(it) }
             // Under the lock, so a reset racing this output either sees it counted and zeroes it,
             // or retires this codec first and it does not count.
             statsFlow.update {
@@ -489,9 +594,17 @@ class HevcVideoOutput(
                     framesOut = it.framesOut + 1,
                     framesOutSinceReset = it.framesOutSinceReset + 1,
                     lastLatencyMillis = latency ?: it.lastLatencyMillis,
+                    medianLatencyMillis = median ?: it.medianLatencyMillis,
                 )
             }
         }
+    }
+
+    /** Adds a sample to the window and returns the window's median (the upper one for an even count). */
+    private fun addLatencySample(sample: Long): Long {
+        latencies.addLast(sample)
+        while (latencies.size > LATENCY_WINDOW) latencies.removeFirst()
+        return latencies.sorted()[latencies.size / 2]
     }
 
     /**

@@ -116,6 +116,8 @@ class MainActivity : ComponentActivity() {
 
         override fun setKeyTrace(enabled: Boolean) = app.keyTrace.set(enabled)
 
+        override fun setDecoderLowLatency(enabled: Boolean) = app.setDecoderLowLatency(enabled)
+
         override fun reconnect() {
             app.clearNotices()
             app.client.start()
@@ -170,6 +172,7 @@ class MainActivity : ComponentActivity() {
             val pasteKeys by sessions.pasteKeys.enabled.collectAsStateWithLifecycle()
             val scrollKeys by sessions.scrollKeys.enabled.collectAsStateWithLifecycle()
             val keyTrace by app.keyTrace.enabled.collectAsStateWithLifecycle()
+            val decoderLowLatency by app.decoderLowLatency.collectAsStateWithLifecycle()
             AppTheme {
                 AppRoot(
                     paired = paired,
@@ -177,6 +180,7 @@ class MainActivity : ComponentActivity() {
                         state, nav.destination, tree, live, unpairing, unpairFailed, version, relayOrigin,
                         activeStream, video, debugBuild, videoStatsShown, query, macStatus, nav.tab, chatsAttention,
                         nav.key, nav.stackKeys, claudeTip, pasteKeys, scrollKeys, keyTrace,
+                        decoderLowLatency,
                     ),
                     homeActions = homeActions,
                     chats = sessions.chatsHome,

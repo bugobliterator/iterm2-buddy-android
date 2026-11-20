@@ -97,6 +97,7 @@ import dev.bugobliterator.itermbuddy.core.stream.latencyStatsText
 import dev.bugobliterator.itermbuddy.core.wire.SelectionPhase
 import dev.bugobliterator.itermbuddy.ui.LiveSessionTheme
 import dev.bugobliterator.itermbuddy.video.VideoStats
+import dev.bugobliterator.itermbuddy.video.lowLatencyLabel
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -868,7 +869,16 @@ internal fun VideoStatsOverlay(source: LiveVideoSource, modifier: Modifier) {
     }
 }
 
-/** The debug stats line: counters and the decoder's name only, never content. */
-internal fun videoStatsText(stats: VideoStats): String =
-    "${stats.decoderName ?: "no decoder"}\nin ${stats.framesIn} · out ${stats.framesOut} · " +
-        "latency ${stats.lastLatencyMillis?.let { "$it ms" } ?: "—"}"
+/**
+ * The debug stats lines: the decoder's name and whether it runs with the low-latency keys
+ * ("LL on", "LL fallback" when it rejected them, "LL off" by the debug switch), then the
+ * counters and the accept-to-output latency, last and median of the recent frames. Counters
+ * and the decoder's name only, never content.
+ */
+internal fun videoStatsText(stats: VideoStats): String {
+    val name = stats.decoderName ?: "no decoder"
+    val lowLatency = stats.lowLatency?.takeIf { stats.decoderName != null }?.let { " · LL ${lowLatencyLabel(it)}" } ?: ""
+    fun ms(value: Long?) = value?.let { "$it ms" } ?: "—"
+    return "$name$lowLatency\nin ${stats.framesIn} · out ${stats.framesOut} · " +
+        "latency ${ms(stats.lastLatencyMillis)} · median ${ms(stats.medianLatencyMillis)}"
+}
