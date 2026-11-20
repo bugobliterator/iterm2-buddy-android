@@ -2,6 +2,7 @@ package dev.bugobliterator.itermbuddy.core.stream
 
 import dev.bugobliterator.itermbuddy.core.wire.SelectionMode
 import dev.bugobliterator.itermbuddy.core.wire.SelectionPoint
+import dev.bugobliterator.itermbuddy.core.wire.SelectionSpan
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Duration
@@ -16,7 +17,7 @@ data class TappedLink(val url: String, val macLocal: Boolean) {
     override fun toString(): String = "TappedLink(url(len=${url.length}), macLocal=$macLocal)"
 }
 
-/** Longer than any link worth a bubble; a smart selection this long is not one. */
+/** Longer than any link worth a bubble; a selection or token this long is not one. */
 internal const val MAX_LINK_CHARS = 4096
 
 /** Trailing punctuation a sentence leaves after a link (`)` and `]` only when unbalanced). */
@@ -145,17 +146,135 @@ internal fun whatwgIpv4(host: String): Long? {
 /** [this] in [radix], or null when it is not one or longer than an IPv4 part can be. */
 private fun String.toLongOrNullBounded(radix: Int): Long? = if (length > 12) null else toLongOrNull(radix)?.takeIf { it >= 0 }
 
+/** One link in a line of text: [url] ([linkFromSelection]) found at string indices [start] until [end]. */
+data class LineLink(val start: Int, val end: Int, val url: String) {
+    override fun toString(): String = "LineLink(start=$start, end=$end, url(len=${url.length}))"
+}
+
+/** Ends a link token in a line: whitespace and characters no URL holds unescaped. */
+private const val TOKEN_STOPS = "\"<>`{}|^"
+
 /**
- * Finds the link under a tap on a terminal stream, with the Mac's own smart selection (the phone
- * has video, no text): `selectionGesture` begin and end in [SelectionMode.SMART] at the tapped
- * cell, `copySelection`, then `clearSelection`, all through the app's [selection] driver (one
- * ordered queue with the long-press selection). The Mac's selection is replaced and then cleared.
+ * Every link in [line]: tokens starting at an `http://`, `https://` or `ftp://` (not inside a
+ * word) or a bare `www.` (not after a host or path character), running to whitespace or one of
+ * `"<>`{}|^`, each cleaned by [linkFromSelection] (trailing punctuation, unbalanced brackets) and
+ * kept when it is a link. [LineLink.start] and [LineLink.end] span the link as written in [line]
+ * (a bare `www.` without the `https://` it gains).
+ */
+fun linksInLine(line: String): List<LineLink> {
+    val found = ArrayList<LineLink>()
+    var i = 0
+    while (i < line.length) {
+        val scheme = SCHEMES.firstOrNull { line.startsWith(it, i, ignoreCase = true) }
+        val previous = if (i > 0) line[i - 1] else ' '
+        val starts = when {
+            scheme != null -> !previous.isLetterOrDigit()
+            line.startsWith("www.", i, ignoreCase = true) -> !(previous.isLetterOrDigit() || previous in ".-/:@_")
+            else -> false
+        }
+        if (!starts) {
+            i++
+            continue
+        }
+        var end = i
+        while (end < line.length && !line[end].isWhitespace() && line[end] !in TOKEN_STOPS) end++
+        val url = linkFromSelection(line.substring(i, end))
+        if (url != null) {
+            val written = if (scheme == null) url.length - "https://".length else url.length
+            found += LineLink(i, i + written, url)
+        }
+        i = maxOf(end, i + 1)
+    }
+    return found
+}
+
+/**
+ * Cells a code point takes on a terminal grid, as best as can be told without the font: 0 for
+ * combining and format characters, 2 for East Asian wide and emoji ranges, else 1.
+ */
+internal fun cellWidth(codePoint: Int): Int {
+    val type = Character.getType(codePoint)
+    if (type == Character.NON_SPACING_MARK.toInt() || type == Character.ENCLOSING_MARK.toInt() || type == Character.FORMAT.toInt()) return 0
+    val wide = codePoint in 0x1100..0x115F || codePoint in 0x2E80..0x303E || codePoint in 0x3041..0xA4CF ||
+        codePoint in 0xAC00..0xD7A3 || codePoint in 0xF900..0xFAFF || codePoint in 0xFE30..0xFE4F ||
+        codePoint in 0xFF00..0xFF60 || codePoint in 0xFFE0..0xFFE6 || codePoint in 0x1F300..0x1F64F ||
+        codePoint in 0x1F900..0x1F9FF || codePoint in 0x20000..0x3FFFD
+    return if (wide) 2 else 1
+}
+
+/** Where cell [cell] of [line] falls: its string index ([line]'s length past the end), and whether every width was plain (1). */
+internal fun indexAtCell(line: String, cell: Int): Pair<Int, Boolean> {
+    var cells = 0
+    var i = 0
+    var plain = true
+    while (i < line.length) {
+        val codePoint = line.codePointAt(i)
+        val width = cellWidth(codePoint)
+        if (width != 1) plain = false
+        if (cell < cells + maxOf(width, 1) && width > 0) return i to plain
+        cells += width
+        i += Character.charCount(codePoint)
+    }
+    return line.length to plain
+}
+
+/** [line]'s width in cells ([cellWidth]). */
+internal fun cellsOf(line: String): Int {
+    var cells = 0
+    var i = 0
+    while (i < line.length) {
+        val codePoint = line.codePointAt(i)
+        cells += cellWidth(codePoint)
+        i += Character.charCount(codePoint)
+    }
+    return cells
+}
+
+/**
+ * The link under the tap at [point] in [line], the Mac's whole (soft-wrapped, logical) line there.
+ * The tapped cell's offset into the line is its rows below the line's first row (from [span], the
+ * Mac's report of that selection, when it covers [point]) times [columns], plus its column; with
+ * no usable span the line is taken to start on the tapped row when it fits in one. The offset
+ * becomes a string index through [indexAtCell]. When that mapping is sure (a span or one row, and
+ * only plain-width characters before the tap) the link must cover the index, give or take one
+ * cell; when it is not, the nearest link on the line is taken. Null when there is none.
+ */
+fun linkAtTap(line: String, point: SelectionPoint, span: SelectionSpan?, columns: Int): String? {
+    val links = linksInLine(line)
+    if (links.isEmpty()) return null
+    val usableSpan = span?.takeIf { point.absLine in it.start.absLine..it.end.absLine }
+    val fitsOneRow = columns > 0 && cellsOf(line.trimEnd('\n', '\r')) <= columns
+    val cell = when {
+        usableSpan != null && columns > 0 -> (point.absLine - usableSpan.start.absLine) * columns + point.column - usableSpan.start.column
+        else -> point.column.toLong()
+    }
+    val (index, plain) = indexAtCell(line, cell.coerceIn(0, Int.MAX_VALUE.toLong()).toInt())
+    val sure = plain && (usableSpan != null || fitsOneRow)
+    fun distance(link: LineLink): Int = when {
+        index < link.start -> link.start - index
+        index >= link.end -> index - link.end + 1
+        else -> 0
+    }
+    val nearest = links.minBy(::distance)
+    return if (!sure || distance(nearest) <= 1) nearest.url else null
+}
+
+/**
+ * Finds the link under a tap on a terminal stream with the Mac's help (the phone has video, no
+ * text), through the app's [selection] driver (one ordered queue with the long-press selection):
+ * `selectionGesture` begin and end in [SelectionMode.LINE] at the tapped cell (iTerm2's whole
+ * line: the soft-wrapped logical line, `kiTermSelectionModeWholeLine`), `copySelection`, and the
+ * link covering the tapped cell in that text ([linkAtTap], placed with the Mac's selection report,
+ * [SelectionDriver.range]). Failing that, a [SelectionMode.SMART] selection at the cell, taken
+ * only when it is a whole link (iTerm2's smart selection stops at the scheme's `:`, so it often
+ * gives `example.com/path`, which is not). Then `clearSelection`. The Mac's selection is replaced
+ * and then cleared.
  *
- * - **Bounded.** The copy is bounded by [timeout] (its request too, so a late reply holds the
- *   queue no longer); late, it finds nothing.
+ * - **Bounded.** Everything is bounded by [timeout] together (each copy request too, so a late
+ *   reply holds the queue no longer); late, it finds nothing.
  * - **Only when free.** Nothing is sent while the Mac reports a selection ([SelectionDriver.range])
  *   or when the active stream is not [sessionGuid]'s terminal stream.
- * - **Clear.** Always queued after the copy (also on a timeout, a failure or a cancel), unless
+ * - **Clear.** Always queued at the end (also on a timeout, a failure or a cancel), unless
  *   another gesture began meanwhile (a long press: its selection is the owner's). The selection
  *   is the session's, so when the stream changed it still goes: through the active stream when
  *   that is still [sessionGuid]'s (a restart or reconnect), else for the old stream on its own
@@ -176,13 +295,29 @@ class LinkLookup(
     suspend fun lookup(sessionGuid: String, point: SelectionPoint): TappedLink? {
         val stream = active.value?.takeIf { it.sessionGuid == sessionGuid && it.config?.isBrowser != true } ?: return null
         if (selection.range.value != null) return null
+        val columns = stream.config?.columns ?: 0
+        fun sameStream(): Boolean = active.value.let { it != null && it.linkId == stream.linkId && it.streamID == stream.streamID }
         // Begin and end with no suspension between them: nothing can slip into the gesture.
-        if (!selection.begin(point, SelectionMode.SMART)) return null
-        val begun = selection.gesturesBegun()
+        if (!selection.begin(point, SelectionMode.LINE)) return null
+        var begun = selection.gesturesBegun()
         selection.end(point)
-        var text: String? = null
+        var lineChars = -1
+        var smartChars = -1
+        var url: String? = null
         try {
-            text = withTimeoutOrNull(timeout) { selection.copy(sessionGuid, timeout) }
+            url = withTimeoutOrNull(timeout) {
+                val line = selection.copy(sessionGuid, timeout) ?: return@withTimeoutOrNull null
+                lineChars = line.length
+                if (line.length <= MAX_LINE_CHARS) linkAtTap(line, point, selection.range.value, columns)?.let { return@withTimeoutOrNull it }
+                // Not when the stream moved on or the owner began a selection.
+                if (!sameStream() || selection.gesturesBegun() != begun) return@withTimeoutOrNull null
+                if (!selection.begin(point, SelectionMode.SMART)) return@withTimeoutOrNull null
+                begun = selection.gesturesBegun()
+                selection.end(point)
+                val smart = selection.copy(sessionGuid, timeout) ?: return@withTimeoutOrNull null
+                smartChars = smart.length
+                linkFromSelection(smart)
+            }
         } finally {
             val now = active.value
             when {
@@ -194,18 +329,18 @@ class LinkLookup(
                 }
             }
         }
-        val now = active.value
-        if (now == null || now.linkId != stream.linkId || now.streamID != stream.streamID) return null
-        if (text == null) {
-            log("link lookup: no answer")
-            return null
-        }
-        val url = linkFromSelection(text)
+        if (!sameStream()) return null
         val link = url?.let { TappedLink(it, isMacLocalLink(it, macHosts())) }
-        log("link lookup: ${text.length} chars, ${if (link == null) "no link" else "a link of ${link.url.length} chars${if (link.macLocal) ", Mac-local" else ""}"}")
+        val answered = if (lineChars < 0) "no answer" else "line $lineChars chars" + (if (smartChars >= 0) ", smart $smartChars chars" else "")
+        log("link lookup: $answered, ${if (link == null) "no link" else "a link of ${link.url.length} chars${if (link.macLocal) ", Mac-local" else ""}"}")
         return link
+    }
+
+    private companion object {
+        /** A line longer than this is not searched (a minified file): only the smart selection is tried. */
+        const val MAX_LINE_CHARS = 65_536
     }
 }
 
-/** How long a tap waits for the Mac's smart selection before showing nothing. */
+/** How long a tap waits for the Mac's answer before showing nothing. */
 val DEFAULT_LINK_LOOKUP_TIMEOUT: Duration = 1.seconds

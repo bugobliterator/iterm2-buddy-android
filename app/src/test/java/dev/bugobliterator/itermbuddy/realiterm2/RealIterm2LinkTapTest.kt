@@ -11,7 +11,6 @@ import dev.bugobliterator.itermbuddy.core.stream.SelectionDriver
 import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.core.stream.StreamInput
 import dev.bugobliterator.itermbuddy.core.stream.StreamSink
-import dev.bugobliterator.itermbuddy.core.stream.TappedLink
 import dev.bugobliterator.itermbuddy.core.stream.VideoReadiness
 import dev.bugobliterator.itermbuddy.core.stream.hasCompleteHevcParameterSets
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
@@ -32,12 +31,14 @@ import kotlin.time.Duration.Companion.seconds
 
 /**
  * The link tap against a real iTerm2 3.7.7 (the real-Mac CI's report-only step): with a live
- * stream of the first terminal session in the app's [StreamController], it types
- * `clear; echo https://example.com/path` into the session, then taps the URL's cell through the
- * app's own path: the screen point of a cell on the stream's grid (the picture at fit, with no
- * history) mapped by [selectionPointAt], then [LinkLookup] (smart select begin and end, copy,
+ * stream of the first terminal session in the app's [StreamController], it types `clear` and
+ * three `echo`s into the session: a plain URL, a URL inside other text with brackets and a full
+ * stop (`see (https://example.com/a_(b)). ok`), and a bare `www.` link. For each it taps a cell
+ * of the link through the app's own path: the screen point of a cell on the stream's grid (the
+ * picture at fit, with no history) mapped by [selectionPointAt], then [LinkLookup] (the line
+ * selected and copied, the link under the tapped column, the smart selection as a fallback, then
  * clear, through a [SelectionDriver]). It tries the top rows in turn, as the prompt can take a
- * line, and asserts that a tap found exactly that URL, that the Mac's selection is cleared
+ * line, and asserts that every link was found exactly, and that the Mac's selection is cleared
  * afterwards (the stream's selection report goes back to none, and `copySelection` answers `""`).
  *
  * Reports lengths, rows and yes/no (`link-tap:` lines); the URL is the test's own.
@@ -80,39 +81,45 @@ class RealIterm2LinkTapTest {
                 isCurrent = { target -> target.linkId == rig.linkId.value && client.state.value is ClientState.Connected },
                 log = { report("link-tap: input: $it") },
             )
-            sender.typeThenReturn(InputTarget(linkId, watchEpoch = 0, sessionGuid = session.guid), "clear; echo $URL")
+            val command = CASES.joinToString("; ", prefix = "clear; ") { "echo ${it.printed}" }
+            sender.typeThenReturn(InputTarget(linkId, watchEpoch = 0, sessionGuid = session.guid), command)
             // The command runs and the next frames carry the new live top.
             delay(SETTLE)
 
-            var found: TappedLink? = null
-            var foundRow = -1
-            for (row in 0 until ROWS_TRIED) {
-                val stream = controller.activeStream.value ?: failWith("the stream went away")
-                val config = stream.config ?: failWith("no config")
-                val cell = config.cellGeometry ?: failWith("the config has no cell geometry")
-                val liveTop = stream.liveTop ?: failWith("no live top yet")
-                // The picture at fit, screen px = image px, no history: the live band alone.
-                val fit = FitRect(0f, 0f, config.pixelWidth.toFloat(), config.pixelHeight.toFloat())
-                val layout = ScrollbackLayout(liveTop, liveTop, config.rows, config.rows, config.pixelHeight.toFloat() / config.rows, altScreen = false)
-                val x = (cell.leftMargin + (TAP_COLUMN + 0.5) * cell.cellWidth).toFloat()
-                val y = (cell.topMargin + (row + 0.5) * cell.cellHeight).toFloat()
-                val point = selectionPointAt(x, y, ZoomState.FIT, fit, layout, config) ?: failWith("the tap maps to no cell")
-                val link = lookup.lookup(session.guid, point)
-                report("link-tap: row $row (line ${point.absLine}, column ${point.column}): ${if (link == null) "no link" else "a link of ${link.url.length} chars, ${if (link.url == URL) "the printed URL" else "ANOTHER link"}"}")
-                // Each lookup clears; wait for the Mac to report it before the next.
-                rig.poll { (controller.selection.value == null).takeIf { it } }
-                if (link != null) {
-                    found = link
-                    foundRow = row
-                    break
+            val found = LinkedHashMap<String, Int>()
+            for (case in CASES) {
+                for (row in 0 until ROWS_TRIED) {
+                    val stream = controller.activeStream.value ?: failWith("the stream went away")
+                    val config = stream.config ?: failWith("no config")
+                    val cell = config.cellGeometry ?: failWith("the config has no cell geometry")
+                    val liveTop = stream.liveTop ?: failWith("no live top yet")
+                    // The picture at fit, screen px = image px, no history: the live band alone.
+                    val fit = FitRect(0f, 0f, config.pixelWidth.toFloat(), config.pixelHeight.toFloat())
+                    val layout = ScrollbackLayout(liveTop, liveTop, config.rows, config.rows, config.pixelHeight.toFloat() / config.rows, altScreen = false)
+                    val x = (cell.leftMargin + (case.column + 0.5) * cell.cellWidth).toFloat()
+                    val y = (cell.topMargin + (row + 0.5) * cell.cellHeight).toFloat()
+                    val point = selectionPointAt(x, y, ZoomState.FIT, fit, layout, config) ?: failWith("the tap maps to no cell")
+                    val link = lookup.lookup(session.guid, point)
+                    val what = when {
+                        link == null -> "no link"
+                        link.url == case.url -> "the expected link (${case.label})"
+                        else -> "another link of ${link.url.length} chars"
+                    }
+                    report("link-tap: ${case.label}: row $row (line ${point.absLine}, column ${point.column}): $what")
+                    // Each lookup clears; wait for the Mac to report it before the next.
+                    rig.poll { (controller.selection.value == null).takeIf { it } }
+                    if (link?.url == case.url && !link.macLocal) {
+                        found[case.label] = row
+                        break
+                    }
                 }
             }
             val cleared = rig.poll { (controller.selection.value == null).takeIf { it } } == true
             val copied = client.request(PhoneMessage.CopySelection(session.guid))
             val leftText = (copied as? MacMessage.SelectionText)?.text
-            report("link-tap: found on row $foundRow; selection report cleared: $cleared; copySelection afterwards: ${leftText?.let { "${it.length} chars" } ?: copied.javaClass.simpleName}")
+            report("link-tap: found ${found.size}/${CASES.size} ($found); selection report cleared: $cleared; copySelection afterwards: ${leftText?.let { "${it.length} chars" } ?: copied.javaClass.simpleName}")
             report("link-tap: summary: ${logs.size} lookup log lines")
-            assertEquals("the tap found the printed URL", TappedLink(URL, macLocal = false), found)
+            assertEquals("every printed link was found by a tap", CASES.map { it.label }, found.keys.toList())
             assertEquals("the selection is cleared afterwards (copySelection)", "", leftText)
             assertEquals("the stream's selection report is cleared", true, cleared)
         } finally {
@@ -131,13 +138,17 @@ class RealIterm2LinkTapTest {
 
     private companion object {
         const val NANOS_PER_MILLI = 1_000_000L
-        const val URL = "https://example.com/path"
+        /** What is printed (shell-quoted), the column tapped on its row, and the link a tap must find. */
+        class Case(val label: String, val printed: String, val column: Int, val url: String)
+
+        val CASES = listOf(
+            Case("plain URL", "https://example.com/path", 10, "https://example.com/path"),
+            Case("URL in text", "'see (https://example.com/a_(b)). ok'", 12, "https://example.com/a_(b)"),
+            Case("bare www", "www.example.com/w", 4, "https://www.example.com/w"),
+        )
         val SETTLE = 3.seconds
 
-        /** After `clear` the output is on the first row, or the next when the prompt takes one. */
-        const val ROWS_TRIED = 4
-
-        /** Inside the URL on its row: "https://exa|mple…". */
-        const val TAP_COLUMN = 10
+        /** After `clear` the three outputs are on the first rows, a row lower each if the prompt takes one. */
+        const val ROWS_TRIED = 5
     }
 }

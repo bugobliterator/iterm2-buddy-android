@@ -222,9 +222,9 @@ interface LiveSessionActions {
  * the menu instead of raising the keyboard.
  *
  * **Links** ([LiveVideoSource.links]). Any other single tap on a terminal does what it always did
- * (raises the keyboard while input is offered) and also asks the Mac what its smart selection is at
- * the tapped cell ([LinkTaps], [LinkLookup][dev.bugobliterator.itermbuddy.core.stream.LinkLookup]:
- * select, copy, clear, within 1 s); when that is a link, a [LinkBubble] shows by the tap with
+ * (raises the keyboard while input is offered) and also asks the Mac for the text of the tapped
+ * line ([LinkTaps], [LinkLookup][dev.bugobliterator.itermbuddy.core.stream.LinkLookup]: select
+ * the line, copy, clear, within 1 s); when a link covers the tapped cell, a [LinkBubble] shows by the tap with
  * **Open** and **Copy**. A phone link opens in the phone's browser ([LiveSessionActions.openLink]);
  * a Mac-local one (localhost and loopback) in the most recently viewed Browser session
  * ([LiveSessionActions.openLinkInBrowserSession]), or the bubble says there is none. A tap

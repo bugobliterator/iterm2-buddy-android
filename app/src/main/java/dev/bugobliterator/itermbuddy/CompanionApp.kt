@@ -97,7 +97,7 @@ import kotlin.time.Duration.Companion.seconds
  *
  * [selection] drives the live view's terminal selection and copy on the controller's active
  * stream, app-scoped like [input] so a drag's end is still sent across activity recreation.
- * [links] finds the link under a tap through it (the Mac's smart selection); [browserLinks] opens
+ * [links] finds the link under a tap through it (the Mac's line selection); [browserLinks] opens
  * a Mac-local one in the most recently viewed Browser session (each one the navigator shows is
  * recorded), sending its `browserLoad` through [browser] once that session's stream takes input;
  * leaving that view first drops it, and the activity shows its drop notices.
