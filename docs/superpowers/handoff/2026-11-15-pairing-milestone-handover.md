@@ -202,6 +202,37 @@ Notes from that task:
   `history-and-selection-on-device.md`; Scroll with keys, Scroll and fling in
   `browser-sessions-on-device.md`) and the first real-Mac `slow key drag` line.
 
+## Tappable links (2026-11-20)
+
+- **Owner decisions:** a single tap on a URL in a terminal shows an "Open link" bubble by the tap
+  with the URL elided, and Copy; taps on other text behave as before. Phone links open in the
+  phone's browser (`ACTION_VIEW`); Mac-local ones (localhost, `*.localhost`, 127.0.0.0/8, `::1`,
+  `0.0.0.0`) load in the most recently viewed iTerm2 Browser session, or the bubble says there is
+  none and offers Copy only.
+- **Mechanism:** `LinkLookup` (`core/stream/LinkTap.kt`) runs on a single tap through the app's
+  `SelectionDriver` (one ordered queue with the long-press selection): `selectionGesture` begin and
+  end in `smart` mode at the tapped cell, `copySelection` bounded at 1 s (request and wait), then
+  `clearSelection` (also on a timeout or a cancel; not when the stream changed or a long press
+  began meanwhile). `linkFromSelection` trims, unwraps `<…>`, `(…)` and quotes, drops trailing
+  `.,;:)]>'"` (`)` and `]` only when unbalanced), and accepts http, https, ftp or a bare `www.`
+  (made https). Nothing is sent while the Mac reports a selection or for a browser stream.
+  `SelectionDriver.copy` takes a per-call timeout and `gesturesBegun()` (small driver change).
+- **UI:** `ScrollbackCanvas`/`VideoCanvas` give the tap with its terminal point (`onTapAt`, mapped
+  as a selection's) only once the tap is known single (after the double-tap window), never for a
+  tap that stopped a coast; `LinkTaps` holds one lookup and the bubble (`LinkBubble`). The tap
+  still raises the keyboard as before; the bubble is anchored at the tap and kept inside the
+  visible area. A tap elsewhere (only hides it), a drag or pinch, a long press and a stream change
+  hide it.
+- **Mac-local:** `BrowserLinkOpener` records each Browser session the navigator shows; the target
+  is the most recently viewed one still in the tree, else the first in the tree (only on a
+  revision 15 Mac). Open pushes that session's browser view and sends `browserLoad` through the
+  `BrowserDriver` once its stream takes input (dropped after 20 s). The Mac's own hostname is not
+  in the protocol, so only loopback names count as Mac-local today.
+- **Tests:** `LinkTapTest`, `BrowserLinkOpenerTest`, `LinkTapsTest` (virtual time),
+  `LinkBubbleDeviceTest` (device), `RealIterm2LinkTapTest` (real-Mac CI, report-only step).
+- **Open:** the on-device check (Links in `docs/reports/live-session-on-device.md`) and the first
+  real-Mac `link-tap:` lines.
+
 ## Plan deviations already ruled on
 
 - Plan tasks are named, not numbered. Hand each implementer only "Global Constraints", "Review Focus" and its own `### Task:` section, never the whole plan.

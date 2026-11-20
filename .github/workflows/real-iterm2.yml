@@ -271,6 +271,29 @@ jobs:
           cp -R app/build/test-results/realIterm2Test "$kept/test-results" 2>/dev/null || true
           cp -R app/build/reports/tests/realIterm2Test "$kept/reports" 2>/dev/null || true
 
+      # The link tap report (RealIterm2LinkTapTest): prints https://example.com/path in the first
+      # session, taps its cell through the app's path (smart select, copySelection, clearSelection)
+      # and checks the tap found that URL and the selection is cleared afterwards. Report-only.
+      - name: Tap a printed URL
+        if: success() || failure()
+        continue-on-error: true
+        timeout-minutes: 8
+        env:
+          REAL_ITERM2: '1'
+          REAL_ITERM2_PAIRING_FILE: ${{ runner.temp }}/real-iterm2/pairing.env
+          REAL_ITERM2_RELAY_URL: ws://127.0.0.1:8787/
+          REAL_ITERM2_CONNECT_TIMEOUT_SECONDS: '180'
+          REAL_ITERM2_REQUEST_TIMEOUT_SECONDS: '30'
+        run: ./gradlew realIterm2Test --tests '*.RealIterm2LinkTapTest'
+
+      - name: Keep the link tap results
+        if: success() || failure()
+        run: |
+          kept="$RUNNER_TEMP/real-iterm2/diagnostics/link-tap"
+          mkdir -p "$kept"
+          cp -R app/build/test-results/realIterm2Test "$kept/test-results" 2>/dev/null || true
+          cp -R app/build/reports/tests/realIterm2Test "$kept/reports" 2>/dev/null || true
+
       # Stage 3 (RealIterm2AgentChatTest), last and in its own step: an Agent Chat turn can leave
       # iTerm2's main thread blocked, which must not fail stages 1 and 2. It creates an
       # orchestrator chat, gets the fake model's streamed reply, then its tool call parked on

@@ -213,6 +213,18 @@ grid did not change) and the final config (grid, pixel size, cell, `canResize`).
 longer has it, resizes the session back to its first grid, and stops the stream. The report is `fit:` lines in the job log, numbers only;
 it fails only when the stream could not start.
 
+## The link tap report
+
+A single tap on a URL in a terminal shows an "Open link" bubble; the phone has only video, so it
+asks the Mac: `selectionGesture` begin and end in `smart` mode at the tapped cell, `copySelection`,
+then `clearSelection` (`LinkLookup`). `RealIterm2LinkTapTest` checks that on the runner, after the
+Fit to phone report, in its own step that continues on error. It streams the first terminal
+session in the app's `StreamController`, types `clear; echo https://example.com/path`, and taps the
+top rows in turn through the app's own mapping (`selectionPointAt` at fit) and `LinkLookup`, until
+one finds a link. It asserts that the link is exactly that URL, that the stream's selection report
+goes back to none, and that `copySelection` then answers `""` (nothing left selected). The report
+is `link-tap:` lines: rows, lengths and yes/no.
+
 ## The browser probe
 
 The owner's report: on a browser session (a local web app shown in iTerm2's built-in browser), a
@@ -358,7 +370,7 @@ what was typed.
 | Start the relay | `start-relay.sh` | Fetches the relay at `b8aa2f9` the way `scripts/relay-it.sh` does and makes a throwaway CA and a `localhost` certificate. It trusts the CA system-wide and starts the relay on `127.0.0.1:8787` (open mode, `RELAY_ORIGIN=https://localhost:8443`). Then it starts `tls-proxy.mjs` on `localhost:8443`. |
 | Start the fake model | `start-fake-model.sh` | Starts `fake-model.mjs` on `127.0.0.1:8790` and waits for `/health`. |
 | Launch iTerm2 | `launch-iterm2.sh` | Runs `open -a iTerm`, then waits for the relay to log `hello role=mac` (iTerm2 parked) and takes a screenshot. |
-| Test | `./gradlew realIterm2Test --tests …` | Runs stages 1 and 2, then, each in its own step that runs even when the ones before fail, the Claude Code status probe, the key-bytes probe, the latency report, the browser probe and the Fit to phone report (the last four continue on error) and stage 3, so a main thread that Agent Chat leaves blocked cannot fail the others. The phone connects to the relay directly at `ws://127.0.0.1:8787/` and signs for `https://localhost:8443`. |
+| Test | `./gradlew realIterm2Test --tests …` | Runs stages 1 and 2, then, each in its own step that runs even when the ones before fail, the Claude Code status probe, the key-bytes probe, the latency report, the browser probe, the Fit to phone report and the link tap report (the last five continue on error) and stage 3, so a main thread that Agent Chat leaves blocked cannot fail the others. The phone connects to the relay directly at `ws://127.0.0.1:8787/` and signs for `https://localhost:8443`. |
 | Diagnostics | `collect-diagnostics.sh` | Always runs. It collects screenshots, the relay, proxy and fake model logs, the companion and AI defaults, both secure settings, the status probe's defaults and files (the profile, `disable-automation-auth`, the API socket, it2), which seeded keychain items were migrated, both plugin lookups, the fake model's counts and captured request shape, iTerm2's unified log and crash reports. They are uploaded with the test reports as `real-iterm2-<run>-<attempt>`. |
 
 `dump-iterm2-state.sh <label>` prints, as text in the job log, what a screenshot would show:
