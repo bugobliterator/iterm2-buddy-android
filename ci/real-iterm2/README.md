@@ -237,6 +237,10 @@ and drives it through the app's `BrowserDriver` and `InputSender`. Each step loa
   scale (image px per CSS px).
 - **raw**: one `browserScroll` straight to the link, deltaY −300, then −1200, then +600 encoded px
   (negative moves the content up, so the page scrolls down).
+- **moved**: the window moved to origins (0, 0), (200, 150) and (400, 300) with `it2 window move`,
+  then one raw scroll at the centre each, to see whether the wheel's location offset follows the
+  window (run 19 found every wheel event 60 CSS px above the aimed point, x exact;
+  `docs/reports/iterm2-companion-browser-scroll-offset.md`).
 - **drag**: `BrowserDriver.scroll` as a phone drag makes it (one event every 16 ms at a 1080 px
   phone's fit density, flushed every 40 ms), then a fling.
 - **small**: 20 steps each of 1, 2, 3 and 4 px, for the Mac's rounding (iTerm2 divides by the

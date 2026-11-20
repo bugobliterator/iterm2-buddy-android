@@ -77,6 +77,8 @@ import org.junit.Test
  *   fit density, flushed every 40 ms), then a fling;
  * - **small**: runs of `browserScroll` steps of 1, 2, 3 and 4 encoded px, for the Mac's rounding
  *   (`deltaY / frameScale` rounded to whole points);
+ * - **moved**: the window moved to a few origins (`it2 window move`), one raw scroll each, to see
+ *   whether the wheel's location offset follows the window's place on screen;
  * - **inner**: a page whose content scrolls in a full-window `overflow: auto` element, not the
  *   document (common in web apps): a raw scroll at its centre;
  * - **keys**: Page Down, Down ×5 and Space through `sendKey` (the browser key path), on both pages,
@@ -127,7 +129,7 @@ class RealIterm2BrowserTest {
 
         val windows = BrowserWindows(client, sender, linkId)
         try {
-            probe(client, controller, frames, sender, linkId, windows.open(), sent)
+            probe(client, controller, frames, sender, linkId, windows.open(), sent, windows::move)
         } finally {
             try {
                 windows.closeAll()
@@ -145,6 +147,7 @@ class RealIterm2BrowserTest {
         linkId: Long,
         browser: SessionSummary,
         sent: CopyOnWriteArrayList<PhoneMessage.BrowserScroll>,
+        moveWindow: suspend (x: Int, y: Int) -> Boolean,
     ) {
         val first = server.awaitLoad("", rig.requestTimeout)
             ?: failWith("the browser session did not load $PAGE_URL within ${rig.requestTimeout} (server saw ${server.beacons.size} beacons)")
@@ -178,6 +181,7 @@ class RealIterm2BrowserTest {
 
         val scale = probe.tap()
         val raw = probe.raw(scale)
+        probe.moved(scale, moveWindow)
         probe.drag(scale)
         probe.small()
         val inner = probe.inner(scale)
@@ -288,6 +292,14 @@ class RealIterm2BrowserTest {
                 line("close attempt $attempt left a browser session or window open")
             }
             treeReport("after closing")
+        }
+
+        /** Moves the browser window's origin to ([x], [y]) with `it2 window move`, then lists the windows (their frames); whether it moved. */
+        suspend fun move(x: Int, y: Int): Boolean {
+            val id = created.firstOrNull() ?: before?.let { old -> windowIds(null)?.minus(old)?.firstOrNull() } ?: return false
+            val moved = it2("window", "move", x.toString(), y.toString(), id).exit == 0
+            windowIds("after moving to ($x, $y)")
+            return moved
         }
 
         private fun noteCreated(output: String) {
@@ -419,6 +431,27 @@ class RealIterm2BrowserTest {
                 )
             }
             return moved
+        }
+
+        /**
+         * The wheel's location against the window's place on screen: iTerm2 3.7.7 builds the
+         * scroll event from a global location (`CompanionBrowserInput.scroll`) and WebKit reads it
+         * back as a window location, so the offset between where the phone aims and where the
+         * wheel lands should follow the window. For each position: move the window (`it2 window
+         * move`), load a fresh page and send one raw scroll at the centre.
+         */
+        suspend fun moved(scale: Double, moveWindow: suspend (x: Int, y: Int) -> Boolean) {
+            for ((x, y) in WINDOW_POSITIONS) {
+                if (!moveWindow(x, y)) {
+                    report("moved to ($x, $y): it2 window move failed; skipped")
+                    continue
+                }
+                val step = navigate("moved-$x-$y")
+                val wheelsBefore = server.count(step, "wheel")
+                client.send(PhoneMessage.BrowserScroll(streamID, w / 2, h / 2, 0.0, -300.0), onLink = linkId)
+                val after = server.settledScrollY(step)
+                report(fmt("window moved to (%d, %d): raw deltaY -300: scrollY 0 -> %.0f; ", x, y, after) + wheelText(server.wheels(step).drop(wheelsBefore), w / 2 / scale, h / 2 / scale))
+            }
         }
 
         /** [BrowserDriver.scroll] as a phone drag makes it, then a fling. */
@@ -654,7 +687,10 @@ class RealIterm2BrowserTest {
         val EVENT_GAP = 16.milliseconds
         const val SMALL_STEPS = 20
         val FLUSH_GAP = 40.milliseconds
-        val SETTLE = 800.milliseconds
+        val SETTLE = 500.milliseconds
+
+        /** Window origins (screen points) the wheel-offset step tries. */
+        val WINDOW_POSITIONS = listOf(0 to 0, 200 to 150, 400 to 300)
         val QUIET = 700.milliseconds
         val SETTLE_CAP = 4.seconds
         val POLL = 20.milliseconds
