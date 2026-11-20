@@ -263,9 +263,10 @@ class RealIterm2BrowserTest {
             val outFile = diagnosticsDir().resolve(IT2_OUT_FILE).also { it.delete() }
             sender.key(target, KeyEvent(Key.Text("c"), KeyModifiers(control = true)))
             delay(300)
-            sender.key(target, KeyEvent(Key.Text("u"), KeyModifiers(control = true)))
-            delay(300)
-            sender.typeThenReturn(
+            // Plain keys again and pasted, not typed: the key-bytes probe can leave kitty flags on.
+            RealIterm2Rig.restoreTerminal(sender, target)
+            RealIterm2Rig.pasteCommand(
+                sender,
                 target,
                 "\"$IT2\" window new --profile $PROFILE_NAME >\"${outFile.path}\" 2>&1; echo \"exit=\$?\" >>\"${outFile.path}\"",
             )

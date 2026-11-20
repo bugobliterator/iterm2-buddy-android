@@ -3,9 +3,6 @@ package dev.bugobliterator.itermbuddy.realiterm2
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.input.InputSender
 import dev.bugobliterator.itermbuddy.core.input.InputTarget
-import dev.bugobliterator.itermbuddy.core.input.Key
-import dev.bugobliterator.itermbuddy.core.input.KeyEvent
-import dev.bugobliterator.itermbuddy.core.input.KeyModifiers
 import dev.bugobliterator.itermbuddy.core.stream.FakeVideoOutput
 import dev.bugobliterator.itermbuddy.core.stream.LinkLookup
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
@@ -52,8 +49,11 @@ import kotlin.time.Duration.Companion.seconds
  * line, and asserts that every link was found exactly, and that the Mac's selection is cleared
  * afterwards (the stream's selection report goes back to none, and `copySelection` answers `""`).
  *
- * Before that it gets a clean prompt (Ctrl-C, Ctrl-U, `clear`, waiting until the rows below the
- * first are empty) and echoes each link with its own command. It dumps the first rows as the
+ * Before that it gets a clean prompt ([RealIterm2Rig.restoreTerminal]: kitty flags popped and
+ * zeroed, modifyOtherKeys and bracketed paste off, `stty sane`, `clear`; waiting until the rows
+ * below the first are empty) and echoes each link with its own command, all pasted, never typed
+ * (run 27: typed keys under the kitty flags an earlier probe left on reached bash mangled). It
+ * checks every echoed line is on the screen before tapping. It dumps the first rows as the
  * lookup sees them: each row's whole-line text escaped (control characters and NULs as `\\uXXXX`),
  * the Mac's selection report, the links found in it with their positions, and the smart selection
  * at column 10; and for each tap the cell's string index and the link the dumped line gives.
@@ -123,20 +123,16 @@ class RealIterm2LinkTapTest {
                 return text to span
             }
 
-            // A clean prompt: interrupt anything running, drop a half-typed line, clear the screen.
-            sender.key(target, KeyEvent(Key.Text("c"), KeyModifiers(control = true)))
-            delay(KEY_PAUSE)
-            sender.key(target, KeyEvent(Key.Text("u"), KeyModifiers(control = true)))
-            delay(KEY_PAUSE)
-            sender.typeThenReturn(target, "clear")
-            delay(KEY_PAUSE)
+            // A clean prompt: plain keys again (an earlier probe can leave kitty flags on), a clear screen.
+            // Everything is pasted, never typed: typed keys go through the keyboard mode left on.
+            RealIterm2Rig.restoreTerminal(sender, target)
             val clearedScreen = rig.poll {
                 (1..3).all { row -> probe(pointAt(row, 0), SelectionMode.LINE).first?.let(::gridLine).isNullOrEmpty() }.takeIf { it }
             }
             report("link-tap: screen cleared: ${clearedScreen == true}")
             // Each link on its own line, one command each.
             for (case in CASES) {
-                sender.typeThenReturn(target, "echo ${case.printed}")
+                RealIterm2Rig.pasteCommand(sender, target, "echo ${case.printed}")
                 delay(KEY_PAUSE)
             }
             // The commands run and the next frames carry the new live top.
@@ -155,6 +151,11 @@ class RealIterm2LinkTapTest {
                         "smart at column $SMART_PROBE_COLUMN \"${smart?.let(::escaped)}\"",
                 )
             }
+
+            // Each link must be on the screen as echo printed it before anything is tapped.
+            val missing = CASES.filter { case -> rows.values.none { (text, _) -> text?.let(::gridLine) == case.output } }
+            report("link-tap: echoed lines on the screen: ${CASES.size - missing.size}/${CASES.size}${if (missing.isEmpty()) "" else ", missing ${missing.map { it.label }}"}")
+            if (missing.isNotEmpty()) failWith("the echoed lines ${missing.map { it.label }} are not on the screen (see the row dump): the commands did not run as sent")
 
             val found = LinkedHashMap<String, Int>()
             for (case in CASES) {
@@ -204,17 +205,17 @@ class RealIterm2LinkTapTest {
     private companion object {
         const val NANOS_PER_MILLI = 1_000_000L
         /** What is printed (shell-quoted), the column tapped on its row, and the link a tap must find. */
-        class Case(val label: String, val printed: String, val column: Int, val url: String)
+        class Case(val label: String, val printed: String, val output: String, val column: Int, val url: String)
 
         val CASES = listOf(
-            Case("plain URL", "https://example.com/path", 10, "https://example.com/path"),
-            Case("URL in text", "'see (https://example.com/a_(b)). ok'", 12, "https://example.com/a_(b)"),
-            Case("bare www", "www.example.com/w", 4, "https://www.example.com/w"),
+            Case("plain URL", "https://example.com/path", "https://example.com/path", 10, "https://example.com/path"),
+            Case("URL in text", "'see (https://example.com/a_(b)). ok'", "see (https://example.com/a_(b)). ok", 12, "https://example.com/a_(b)"),
+            Case("bare www", "www.example.com/w", "www.example.com/w", 4, "https://www.example.com/w"),
         )
         val SETTLE = 3.seconds
 
-        /** After `clear`: each echo's command row and output row, for three links, and some slack. */
-        const val ROWS_TRIED = 9
+        /** After `clear`: each echo's command row and output row (and the empty prompt a Return leaves), for three links, and slack. */
+        const val ROWS_TRIED = 12
 
         /** The smart probe's column on each row (where the plain URL's host is). */
         const val SMART_PROBE_COLUMN = 10

@@ -222,8 +222,9 @@ text; failing that, a `smart` selection, used only when it is a whole link (run 
 smart selection stops at the scheme's `:`, giving `example.com/path`); then `clearSelection`.
 `RealIterm2LinkTapTest` checks that on the runner, after the Fit to phone report, in its own step
 that continues on error. It streams the first terminal session in the app's `StreamController`,
-gets a clean prompt (Ctrl-C, Ctrl-U, `clear`, then waits until the rows below the first are
-empty), echoes a plain URL, `see (https://example.com/a_(b)). ok` and `www.example.com/w`, each
+gets a clean prompt (`RealIterm2Rig.restoreTerminal`: kitty flags popped and zeroed,
+modifyOtherKeys and bracketed paste off, `stty sane`, `clear`; then waits until the rows below the
+first are empty), echoes a plain URL, `see (https://example.com/a_(b)). ok` and `www.example.com/w`, each
 with its own command, and dumps the first nine rows as the lookup sees them (the whole-line text
 escaped, the Mac's selection report, the links found with their positions, the smart selection
 at column 10; the content is the test's own). Then for each link it taps the top rows in turn through the app's own mapping
@@ -231,6 +232,13 @@ at column 10; the content is the test's own). Then for each link it taps the top
 link was found exactly, that the stream's selection report goes back to none, and that
 `copySelection` then answers `""` (nothing left selected). The report is `link-tap:` lines: rows,
 lengths and yes/no.
+
+Commands in the steps after the key-bytes probe (latency, browser, Fit, link tap) are pasted
+(`pasteText`), never typed, after that same restore: in run 27 the kitty flags Claude Code left
+on survived `key-probe.sh`'s reset (it zeroed the flags, then popped back to Claude's), and typed
+keys reached bash as CSI u sequences (`echo https://…` ran as `chouhttps9:58;2u…`). The reset now
+pops all flags first, then zeroes them, on both screens, and the key-bytes test restores once
+more when it ends.
 
 ## The browser probe
 

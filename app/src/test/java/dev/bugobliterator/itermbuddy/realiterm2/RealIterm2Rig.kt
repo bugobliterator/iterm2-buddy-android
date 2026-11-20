@@ -4,6 +4,10 @@ import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.ClientTimeouts
 import dev.bugobliterator.itermbuddy.core.CompanionClient
 import dev.bugobliterator.itermbuddy.core.chat.ChatSink
+import dev.bugobliterator.itermbuddy.core.input.InputSender
+import dev.bugobliterator.itermbuddy.core.input.InputTarget
+import dev.bugobliterator.itermbuddy.core.input.Key
+import dev.bugobliterator.itermbuddy.core.input.KeyEvent
 import dev.bugobliterator.itermbuddy.core.pairing.PairingCode
 import dev.bugobliterator.itermbuddy.core.relay.RelayEndpoints
 import dev.bugobliterator.itermbuddy.core.relay.relayHttpClient
@@ -251,6 +255,38 @@ class RealIterm2Rig(tcpNoDelay: Boolean = true) : AutoCloseable {
             tree.windows.flatMap { it.tabs }.flatMap { it.panes }.flatMap { pane -> listOf(pane.session) + pane.peers.map { it.session } }
 
         fun failWith(message: String): Nothing = throw AssertionError(message)
+
+        /**
+         * Puts the session's terminal back to plain keys: kitty keyboard flags popped (all of them,
+         * `CSI < 99 u`) and then zeroed (`CSI = 0 ; 1 u`; zeroing first and popping after could
+         * restore a program's pushed flags), modifyOtherKeys and bracketed paste off, a sane tty,
+         * and a clear screen. A program the key-bytes probe stopped (Claude Code) can leave kitty
+         * flags on, and then typed keys arrive as CSI u sequences the shell mangles (run 27:
+         * `echo https://…` became `chouhttps9:58;2u…`), so commands are pasted ([pasteCommand]).
+         */
+        const val RESTORE_TERMINAL = "printf '\\033[<99u\\033[=0;1u\\033[>4m\\033[?2004l'; stty sane; clear"
+
+        /** Return as a key: plain `\r` under any kitty flags short of "report all keys" (8), which no probe sets. */
+        val RETURN_KEY = KeyEvent(Key.Text("\n"))
+
+        /**
+         * [command] for the shell: a Return first (whatever was half typed runs or fails, and the
+         * line is empty), then the command pasted (`pasteText`: it does not go through iTerm2's key
+         * mapper, so a keyboard mode left on cannot mangle it), then Return.
+         */
+        fun pasteCommand(sender: InputSender, target: InputTarget, command: String) {
+            sender.key(target, RETURN_KEY)
+            sender.paste(target, command)
+            sender.key(target, RETURN_KEY)
+        }
+
+        /** [RESTORE_TERMINAL] through [pasteCommand], then a pause for the shell to run it. */
+        suspend fun restoreTerminal(sender: InputSender, target: InputTarget) {
+            pasteCommand(sender, target, RESTORE_TERMINAL)
+            delay(RESTORE_PAUSE)
+        }
+
+        val RESTORE_PAUSE = 1.seconds
 
         fun report(line: String) = println("real-iterm2: $line")
 
