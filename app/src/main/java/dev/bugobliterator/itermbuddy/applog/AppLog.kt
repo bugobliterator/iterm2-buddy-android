@@ -45,11 +45,14 @@ class AppLogger(
     private val file: LogFileSink?,
     private val wallMillis: () -> Long,
 ) {
-    fun log(level: LogLevel, tag: String, message: String, throwable: Throwable? = null) {
-        try {
-            logcat.write(level, tag, message, throwable)
-        } catch (_: RuntimeException) {
-            // android.util.Log is a stub in JVM tests; the file line below still goes.
+    /** Logs one line; with [toLogcat] false it goes to the file only (the in-app key trace). */
+    fun log(level: LogLevel, tag: String, message: String, throwable: Throwable? = null, toLogcat: Boolean = true) {
+        if (toLogcat) {
+            try {
+                logcat.write(level, tag, message, throwable)
+            } catch (_: RuntimeException) {
+                // android.util.Log is a stub in JVM tests; the file line below still goes.
+            }
         }
         val sink = file ?: return
         val text = if (throwable == null) message else message + "\n" + stackTraceWithoutMessages(throwable)
@@ -61,9 +64,16 @@ class AppLogger(
         file?.requestDrain()
     }
 
-    /** Writes what is queued now on this thread (the uncaught handler, before the process dies). */
-    fun drainNow() {
-        file?.drain()
+    /**
+     * Writes what is queued now on this thread (the uncaught handler, before the process dies),
+     * unless the log stays busy for [timeoutMillis]: a stuck write must not hang a crash.
+     */
+    fun drainNow(timeoutMillis: Long = CRASH_DRAIN_TIMEOUT_MILLIS) {
+        file?.drainWithin(timeoutMillis)
+    }
+
+    companion object {
+        const val CRASH_DRAIN_TIMEOUT_MILLIS = 1_000L
     }
 }
 
@@ -108,6 +118,17 @@ fun stackTraceWithoutMessages(throwable: Throwable): String {
         depth++
     }
     return out.toString()
+}
+
+/**
+ * An exception for a log line: its class's simple name, and its cause's, never a message (an
+ * I/O error's message can name hosts, paths or what was being read): `SocketException (caused
+ * by SSLException)`. A cause of its own class (a coroutine's stack-trace copy) is not named.
+ */
+fun logSummary(e: Throwable): String {
+    // A cause of the same class is a coroutine's recovered copy of it: not worth naming.
+    val cause = e.cause?.takeIf { it.javaClass != e.javaClass }
+    return e.javaClass.simpleName + (cause?.let { " (caused by ${it.javaClass.simpleName})" } ?: "")
 }
 
 private const val MAX_FRAMES = 64

@@ -19,6 +19,7 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.bugobliterator.itermbuddy.applog.AppLog
 import dev.bugobliterator.itermbuddy.applog.LogShare
+import dev.bugobliterator.itermbuddy.applog.logSummary
 import dev.bugobliterator.itermbuddy.core.input.InputTarget
 import dev.bugobliterator.itermbuddy.core.input.KeyEvent
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
@@ -33,12 +34,12 @@ import dev.bugobliterator.itermbuddy.ui.home.HomeModel
 import dev.bugobliterator.itermbuddy.ui.live.LiveVideoSource
 import dev.bugobliterator.itermbuddy.ui.scanFailureOutcome
 import dev.bugobliterator.itermbuddy.ui.scanOutcome
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.IOException
 
 class MainActivity : ComponentActivity() {
     private val app: CompanionApp get() = application as CompanionApp
@@ -215,27 +216,30 @@ class MainActivity : ComponentActivity() {
      * Settings › Share log: the app writes the share file off the main thread, then Android's
      * share sheet offers it as `text/plain` through the FileProvider (`<applicationId>.logs`,
      * serving only the cache's [LogShare.SHARE_DIR]), with read access granted to the chosen app.
+     * Any failure (the file not written whole, no provider) shows its message and shares nothing.
      */
     private fun shareAppLog() {
         val app = app
         lifecycleScope.launch {
-            val file = try {
-                withContext(Dispatchers.IO) { app.shareLogFile() }
-            } catch (e: IOException) {
-                AppLog.w(TAG, "could not prepare the log to share: ${e.javaClass.simpleName}")
-                Toast.makeText(this@MainActivity, "Could not prepare the log", Toast.LENGTH_SHORT).show()
-                return@launch
+            try {
+                val file = withContext(Dispatchers.IO) { app.shareLogFile() }
+                val uri = FileProvider.getUriForFile(this@MainActivity, packageName + LogShare.AUTHORITY_SUFFIX, file)
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    putExtra(Intent.EXTRA_SUBJECT, file.name)
+                    clipData = ClipData.newRawUri(file.name, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                AppLog.i(TAG, "sharing the log: ${file.length()} bytes")
+                startActivity(Intent.createChooser(send, "Share log"))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // A share file that could not be written whole is never offered.
+                AppLog.w(TAG, "could not share the log: ${logSummary(e)}")
+                Toast.makeText(this@MainActivity, "Could not share the log: ${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
             }
-            val uri = FileProvider.getUriForFile(this@MainActivity, packageName + LogShare.AUTHORITY_SUFFIX, file)
-            val send = Intent(Intent.ACTION_SEND).apply {
-                type = "text/plain"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                putExtra(Intent.EXTRA_SUBJECT, file.name)
-                clipData = ClipData.newRawUri(file.name, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            AppLog.i(TAG, "sharing the log: ${file.length()} bytes")
-            startActivity(Intent.createChooser(send, "Share log"))
         }
     }
 

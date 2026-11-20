@@ -1,5 +1,6 @@
 package dev.bugobliterator.itermbuddy.core
 
+import dev.bugobliterator.itermbuddy.applog.logSummary
 import dev.bugobliterator.itermbuddy.core.chat.ChatInboxStoppedException
 import dev.bugobliterator.itermbuddy.core.chat.ChatInput
 import dev.bugobliterator.itermbuddy.core.chat.ChatSink
@@ -463,7 +464,7 @@ internal class CompanionSession(
             relayClose = e.close.takeIf { it.code != CLOSE_ABNORMAL }
             log("relay closed the connection: ${e.code} ${e.reason}")
         } catch (e: IOException) {
-            log("connection failed: $e")
+            log("connection failed: ${logSummary(e)}")
         } catch (e: NoiseException) {
             log("Noise channel failed: ${e.message}")
         } finally {

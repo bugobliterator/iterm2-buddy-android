@@ -29,6 +29,7 @@ class LogShareTest {
         pasteKeys = true,
         scrollKeys = false,
         keyTrace = true,
+        keyTraceLinesPresent = true,
     )
 
     @Test
@@ -46,6 +47,7 @@ class LogShareTest {
             Send / * + = as paste: on
             Scroll web pages with keys: off
             Include typed-key trace: on
+            Key-trace lines present: yes
             Line format: local time | level | tag | message
             ----
 
@@ -56,6 +58,7 @@ class LogShareTest {
         assertTrue(idle.contains("Mac revision: not connected\n"))
         assertTrue(idle.contains("Paired: no\n"))
         assertTrue(idle.contains("(build 7, debug)"))
+        assertTrue(header.copy(keyTraceLinesPresent = false).render().contains("Key-trace lines present: no\n"))
         assertTrue(header.copy(paired = null).render().contains("Paired: unknown\n"))
     }
 
@@ -68,7 +71,7 @@ class LogShareTest {
             setOf(
                 "createdAt", "appVersionName", "appVersionCode", "debugBuild", "androidRelease", "sdkInt",
                 "deviceManufacturer", "deviceModel", "protocolRevision", "minimumPeer", "macRevision", "paired",
-                "pasteKeys", "scrollKeys", "keyTrace",
+                "pasteKeys", "scrollKeys", "keyTrace", "keyTraceLinesPresent",
             ),
             fields,
         )
@@ -78,7 +81,7 @@ class LogShareTest {
 
     @Test
     fun fileNameIsTheLocalTimestamp() {
-        assertEquals("itermbuddy-log-20261120-150305.txt", LogShare.fileName(1_795_183_385_123L, ZoneOffset.ofHours(1)))
+        assertEquals("itermbuddy-log-20261120-150305-123.txt", LogShare.fileName(1_795_183_385_123L, ZoneOffset.ofHours(1)))
         assertEquals("2026-11-20T15:03:05.123+01:00", LogShare.headerTime(1_795_183_385_123L, ZoneOffset.ofHours(1)))
     }
 
@@ -90,9 +93,9 @@ class LogShareTest {
         sink.offer(LogRecord(0L, LogLevel.INFO, "T", "last"))
         val cache = temp.newFolder("cache")
         val now = 1_795_183_385_123L
-        val file = LogShare.assemble(sink, header, cache, now, ZoneOffset.UTC)
+        val file = LogShare.assemble(sink, { header }, cache, now, ZoneOffset.UTC)
         assertEquals(File(cache, LogShare.SHARE_DIR), file.parentFile)
-        assertEquals("itermbuddy-log-20261120-140305.txt", file.name)
+        assertEquals("itermbuddy-log-20261120-140305-123.txt", file.name)
         val text = file.readText()
         assertTrue(text.startsWith(header.render()))
         val lines = text.removePrefix(header.render()).lines().filter { it.isNotEmpty() }.map { it.substringAfterLast(" | ") }
@@ -110,9 +113,50 @@ class LogShareTest {
         val old = File(dir, "itermbuddy-log-old.txt").apply { writeText("x"); setLastModified(now - LogShare.KEEP_MILLIS - 1_000) }
         val recent = File(dir, "itermbuddy-log-recent.txt").apply { writeText("x"); setLastModified(now - 60_000) }
         val sink = LogFileSink(temp.newFolder("logs"))
-        val file = LogShare.assemble(sink, header, cache, now, ZoneOffset.UTC)
+        val file = LogShare.assemble(sink, { header }, cache, now, ZoneOffset.UTC)
         assertFalse(old.exists())
         assertTrue(recent.exists())
         assertTrue(file.exists())
+    }
+
+    @Test
+    fun theHeaderSaysWhetherTheSharedLogHoldsKeyTraceLines() {
+        val sink = LogFileSink(temp.newFolder("logs"), wallMillis = { 0L }, zone = { ZoneOffset.UTC })
+        val cache = temp.newFolder("cache")
+        val seen = mutableListOf<Boolean>()
+        sink.offer(LogRecord(0L, LogLevel.INFO, "InputSender", "sent"))
+        LogShare.assemble(sink, { present -> seen += present; header.copy(keyTraceLinesPresent = present) }, cache, 1_000L, ZoneOffset.UTC)
+        sink.offer(LogRecord(0L, LogLevel.VERBOSE, "IB.Input", "key U+0061[a]"))
+        val traced = LogShare.assemble(sink, { present -> seen += present; header.copy(keyTraceLinesPresent = present) }, cache, 2_000L, ZoneOffset.UTC)
+        assertTrue(traced.readText().contains("Key-trace lines present: yes\n"))
+        sink.clear()
+        LogShare.assemble(sink, { present -> seen += present; header.copy(keyTraceLinesPresent = present) }, cache, 3_000L, ZoneOffset.UTC)
+        assertEquals(listOf(false, true, false), seen)
+    }
+
+    @Test
+    fun aShareThatCannotBeWrittenWholeThrowsAndLeavesNoFile() {
+        val sink = LogFileSink(temp.newFolder("logs"))
+        val cache = temp.newFolder("cache")
+        val thrown = runCatching { LogShare.assemble(sink, { throw java.io.IOException("no space") }, cache, 1_000L, ZoneOffset.UTC) }.exceptionOrNull()
+        assertTrue("$thrown", thrown is java.io.IOException)
+        assertEquals(emptyList<String>(), File(cache, LogShare.SHARE_DIR).list()!!.toList())
+    }
+
+    @Test
+    fun clearSharesDeletesEveryShareFile() {
+        val cache = temp.newFolder("cache")
+        val sink = LogFileSink(temp.newFolder("logs"))
+        LogShare.assemble(sink, { header }, cache, 1_000L, ZoneOffset.UTC)
+        LogShare.assemble(sink, { header }, cache, 2_000L, ZoneOffset.UTC)
+        assertEquals(2, File(cache, LogShare.SHARE_DIR).list()!!.size)
+        LogShare.clearShares(cache)
+        assertEquals(0, File(cache, LogShare.SHARE_DIR).list()!!.size)
+        LogShare.clearShares(temp.newFolder("empty"))
+    }
+
+    @Test
+    fun sharesMadeInTheSameSecondGetDifferentNames() {
+        assertTrue(LogShare.fileName(1_000L, ZoneOffset.UTC) != LogShare.fileName(1_001L, ZoneOffset.UTC))
     }
 }

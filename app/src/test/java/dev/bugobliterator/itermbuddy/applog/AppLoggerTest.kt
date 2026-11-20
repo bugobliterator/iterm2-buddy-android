@@ -63,6 +63,41 @@ class AppLoggerTest {
     }
 
     @Test
+    fun fileOnlyLinesSkipLogcat() {
+        val logger = AppLogger({ level, tag, message, t -> logcat += Logcat(level, tag, message, t) }, sink, wallMillis = { 0L })
+        logger.log(LogLevel.VERBOSE, "IB.Input", "key", toLogcat = false)
+        assertEquals(emptyList<Logcat>(), logcat)
+        assertTrue(sink.text().endsWith("| V | IB.Input | key\n"))
+    }
+
+    @Test
+    fun theCrashDrainDoesNotWaitOutABusyLog() {
+        val logger = AppLogger({ _, _, _, _ -> }, sink, wallMillis = { 0L })
+        logger.log(LogLevel.ERROR, "Crash", "x")
+        val holding = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val holder = Thread { sink.snapshot { holding.countDown(); release.await() } }
+        holder.start()
+        holding.await()
+        val started = System.nanoTime()
+        logger.drainNow(timeoutMillis = 50)
+        assertTrue(System.nanoTime() - started < 5_000_000_000L)
+        release.countDown()
+        holder.join()
+        assertEquals(1_000L, AppLogger.CRASH_DRAIN_TIMEOUT_MILLIS)
+    }
+
+    @Test
+    fun aLogSummaryNamesClassesNeverMessages() {
+        assertEquals("IOException", logSummary(java.io.IOException("wss://host/room")))
+        assertEquals(
+            "SocketException (caused by SSLException)",
+            logSummary(java.net.SocketException("secret").apply { initCause(javax.net.ssl.SSLException("more")) }),
+        )
+        assertEquals("IOException", logSummary(java.io.IOException("copy", java.io.IOException("original"))))
+    }
+
+    @Test
     fun stackTracesStopAtACauseCycle() {
         val a = RuntimeException("a")
         val b = IllegalArgumentException("b", a)

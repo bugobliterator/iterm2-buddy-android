@@ -18,6 +18,7 @@ import dev.bugobliterator.itermbuddy.applog.LogHeader
 import dev.bugobliterator.itermbuddy.applog.LogShare
 import dev.bugobliterator.itermbuddy.applog.UncaughtLogging
 import dev.bugobliterator.itermbuddy.applog.keyTraceGate
+import dev.bugobliterator.itermbuddy.applog.keyTraceSink
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.CompanionClient
 import dev.bugobliterator.itermbuddy.core.CompanionRequestException
@@ -237,7 +238,8 @@ class CompanionApp : Application() {
         InputTrace.current = InputTrace(
             gate = keyTraceGate(switch = { keyTrace.enabled.value }, adbVerbose = { Log.isLoggable(InputTrace.TAG, Log.VERBOSE) }),
             nowMillis = SystemClock::uptimeMillis,
-            sink = { AppLog.v(InputTrace.TAG, it) },
+            // The file always; logcat only with the adb property (the switch alone stays in the app).
+            sink = keyTraceSink(adbVerbose = { Log.isLoggable(InputTrace.TAG, Log.VERBOSE) }, logger = { AppLog.logger }),
         )
         video = HevcVideoOutput(MediaCodecCatalog())
         home = wireHome(
@@ -379,19 +381,20 @@ class CompanionApp : Application() {
     fun shareLogFile(): File {
         val now = System.currentTimeMillis()
         val zone = ZoneId.systemDefault()
-        return LogShare.assemble(logFile, logHeader(now, zone), cacheDir, now, zone)
+        return LogShare.assemble(logFile, { traced -> logHeader(now, zone, traced) }, cacheDir, now, zone)
     }
 
-    /** Settings › Clear log (confirmed): deletes the log, off the main thread. */
+    /** Settings › Clear log (confirmed): deletes the log and every share file, off the main thread. */
     fun clearLog() {
         scope.launch(Dispatchers.IO) {
             logFile.clear()
+            LogShare.clearShares(cacheDir)
             AppLog.i(TAG, "log cleared in Settings")
         }
     }
 
     /** The share's header: versions, device, revisions, whether paired, and the switches. Nothing secret. */
-    private fun logHeader(nowMillis: Long, zone: ZoneId): LogHeader {
+    private fun logHeader(nowMillis: Long, zone: ZoneId, keyTraceLinesPresent: Boolean): LogHeader {
         val info = try {
             packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
         } catch (_: PackageManager.NameNotFoundException) {
@@ -413,6 +416,7 @@ class CompanionApp : Application() {
             pasteKeys = home.pasteKeys.enabled.value,
             scrollKeys = home.scrollKeys.enabled.value,
             keyTrace = keyTrace.enabled.value,
+            keyTraceLinesPresent = keyTraceLinesPresent,
         )
     }
 

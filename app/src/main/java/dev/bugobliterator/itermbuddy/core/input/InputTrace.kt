@@ -13,7 +13,8 @@ import kotlinx.serialization.json.JsonPrimitive
  * envelope. Off by default in every build; the owner turns it on with Settings' "Include typed-key
  * trace" switch (in memory only: off again when the process restarts), or with
  * `adb shell setprop log.tag.IB.Input VERBOSE` (off with `... SUPPRESS`); either turns it on.
- * Its lines go to logcat and to the app's log that Settings › Share log sends.
+ * Its lines go to the app's log that Settings › Share log sends, and to logcat too only while the
+ * adb property is set ([dev.bugobliterator.itermbuddy.applog.keyTraceSink]).
  *
  * Typed text is never written as text: every character is written as its code point
  * ([codePoints]: `U+002F[/]`, the character in brackets only for printable ASCII). Everything
@@ -26,7 +27,7 @@ import kotlinx.serialization.json.JsonPrimitive
  * @param gate whether tracing is on (production: the switch or `Log.isLoggable(TAG, Log.VERBOSE)`,
  *   [dev.bugobliterator.itermbuddy.applog.keyTraceGate]).
  * @param nowMillis a monotonic clock in milliseconds.
- * @param sink writes one line (production: `AppLog.v(TAG, line)`, logcat and the app's log).
+ * @param sink writes one line (production: [dev.bugobliterator.itermbuddy.applog.keyTraceSink]).
  */
 class InputTrace(
     private val gate: () -> Boolean,
