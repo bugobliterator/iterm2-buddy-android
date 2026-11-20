@@ -82,6 +82,8 @@ class MainActivity : ComponentActivity() {
 
         override fun setFitToPhone(enabled: Boolean) = app.setFitToPhone(enabled)
 
+        override fun fitNow(sessionGuid: String) = app.fitNow(sessionGuid)
+
         override fun fitViewport(viewport: FitViewport) = app.autoFit.setViewport(viewport)
 
         override fun clearFitViewport(sessionGuid: String) = app.autoFit.clearViewport(sessionGuid)

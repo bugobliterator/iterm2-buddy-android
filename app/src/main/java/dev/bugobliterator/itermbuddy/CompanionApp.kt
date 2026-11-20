@@ -212,6 +212,13 @@ class CompanionApp : Application() {
         home.fitToPhone.set(enabled)
     }
 
+    /** The too-large overlay's Fit for [sessionGuid]: the toggle on, and that session fitted again now ([AutoFitter.refit]). */
+    fun fitNow(sessionGuid: String) {
+        AppLog.i(STREAM_TAG, "fit to phone now for $sessionGuid")
+        home.fitToPhone.set(true)
+        autoFit.refit(sessionGuid)
+    }
+
     override fun onCreate() {
         super.onCreate()
         // First, so everything after it reaches the log file too. The writer is one coroutine on IO.

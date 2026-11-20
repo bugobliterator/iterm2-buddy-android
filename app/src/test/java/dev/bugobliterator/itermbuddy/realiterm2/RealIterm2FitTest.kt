@@ -14,6 +14,7 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamInput
 import dev.bugobliterator.itermbuddy.core.stream.StreamSink
 import dev.bugobliterator.itermbuddy.core.stream.VideoReadiness
 import dev.bugobliterator.itermbuddy.core.stream.hasCompleteHevcParameterSets
+import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import dev.bugobliterator.itermbuddy.realiterm2.RealIterm2Rig.Companion.failWith
 import dev.bugobliterator.itermbuddy.realiterm2.RealIterm2Rig.Companion.report
 import dev.bugobliterator.itermbuddy.realiterm2.RealIterm2Rig.Companion.sessionsOf
@@ -46,8 +47,11 @@ import org.junit.Test
  * - **landscape**: the refit for 2200×1080 (120 columns);
  * - **split pane**: the session split top/bottom with the bundled `it2 session split`, run from the
  *   JVM ("Allow all apps to connect", which the Claude Code status step turns on) or else typed
- *   into the session, then the toggle off and on again to refit the now shorter pane; the new pane
- *   is closed after (`it2 session close --force`).
+ *   into the session, then the toggle off and on again to refit the now shorter pane.
+ *
+ * Afterwards, whatever happened (`finally`): every added pane is closed (`it2 session close
+ * --force`) and checked gone from the tree, the session is resized back to its first grid, and the
+ * stream is stopped. The fitter waits 10 s for a result ([RESULT_TIMEOUT]).
  *
  * It reports and does not judge; it fails only when the stream could not start or show a config.
  */
@@ -81,6 +85,23 @@ class RealIterm2FitTest {
         val live = rig.poll { controller.state.value as? LiveViewState.Live }
             ?: failWith("the controller is not Live within ${rig.requestTimeout}: ${controller.state.value}")
         report("fit: first config ${describe(live.config)}")
+        val firstGrid = live.config.columns to live.config.rows
+        val before = sessionsOf(rig.sessionTree(client)).map { it.guid }.toSet()
+        try {
+            runCases(client, controller, linkId, guid, before)
+        } finally {
+            cleanUp(client, controller, guid, before, firstGrid)
+        }
+    }
+
+    /** The cases; see the class comment. */
+    private suspend fun runCases(
+        client: dev.bugobliterator.itermbuddy.core.CompanionClient,
+        controller: StreamController,
+        linkId: Long,
+        guid: String,
+        before: Set<String>,
+    ) {
 
         val logs = CopyOnWriteArrayList<String>()
         val enabled = MutableStateFlow(true)
@@ -91,7 +112,7 @@ class RealIterm2FitTest {
             decoderMax = { null },
             sizeSupported = null,
             scope = rig.scope,
-            resultTimeout = rig.requestTimeout,
+            resultTimeout = RESULT_TIMEOUT,
             log = { line ->
                 logs += line
                 report("fit: ${line.replace(guid, "<session>")}")
@@ -109,16 +130,16 @@ class RealIterm2FitTest {
                 enabled.value = true
             }
             fitter.setViewport(FitViewport(guid, width, height))
-            val first = rig.poll { logs.drop(from).firstOrNull(::isFirstOutcome) }
+            val first = rig.poll(RESULT_TIMEOUT + OUTCOME_SLACK) { logs.drop(from).firstOrNull(::isFirstOutcome) }
             if (first == null) {
-                report("fit: $label: no outcome within ${rig.requestTimeout}")
+                report("fit: $label: no outcome within ${RESULT_TIMEOUT + OUTCOME_SLACK}")
                 return
             }
             // A corrective step is sent right after the first result; wait for its own result.
             delay(SETTLE_PAUSE)
             if (logs.drop(from).any { "corrective sent" in it }) {
-                rig.poll { logs.drop(from).firstOrNull { "corrective requested" in it } }
-                    ?: report("fit: $label: no corrective result within ${rig.requestTimeout}")
+                rig.poll(RESULT_TIMEOUT + OUTCOME_SLACK) { logs.drop(from).firstOrNull { "corrective requested" in it } }
+                    ?: report("fit: $label: no corrective result within ${RESULT_TIMEOUT + OUTCOME_SLACK}")
             }
             report("fit: $label: final config ${controller.activeStream.value?.config?.let(::describe) ?: "none"}")
         }
@@ -127,8 +148,7 @@ class RealIterm2FitTest {
         case("landscape", 2200, 1080)
         case("tall phone again", 1080, 2200)
 
-        // Split the session top/bottom with it2 typed into it, then refit the shorter pane.
-        val before = sessionsOf(rig.sessionTree(client)).map { it.guid }.toSet()
+        // Split the session top/bottom with it2, then refit the shorter pane.
         val rowsBefore = controller.activeStream.value?.config?.rows ?: 0
         val sender = InputSender(
             link = client,
@@ -152,19 +172,49 @@ class RealIterm2FitTest {
                 report("fit: split pane: the session is now ${describe(split)}")
                 case("split pane, tall phone", 1080, 2200, refit = true)
             }
-            val added = sessionsOf(rig.sessionTree(client)).map { it.guid }.filter { it !in before }
-            for (pane in added) {
-                if (pane.all { it.isLetterOrDigit() || it == '-' }) {
-                    report("fit: split pane: it2 session close: ${runIt2("session", "close", "--force", "--session", pane)}")
-                }
-            }
-            report("fit: split pane: ${added.size} added pane(s)")
         } else {
             report("fit: split pane skipped: the session GUID is not safe to pass to it2")
         }
 
         report("fit: summary: ${logs.size} log lines, ${notices.size} notices")
-        controller.close()
+    }
+
+    /**
+     * Whatever happened: closes every pane the test added (`it2 session close --force`) and checks
+     * the tree no longer has it, puts the session back at its first grid, and stops the stream.
+     * Reports each step; never throws over the test's own outcome.
+     */
+    private suspend fun cleanUp(
+        client: dev.bugobliterator.itermbuddy.core.CompanionClient,
+        controller: StreamController,
+        guid: String,
+        before: Set<String>,
+        firstGrid: Pair<Int, Int>,
+    ) {
+        try {
+            val added = sessionsOf(rig.sessionTree(client)).map { it.guid }.filter { it !in before }
+            for (pane in added) {
+                if (pane.all { it.isLetterOrDigit() || it == '-' }) {
+                    report("fit: cleanup: it2 session close: ${runIt2("session", "close", "--force", "--session", pane)}")
+                }
+            }
+            if (added.isNotEmpty()) {
+                val gone = rig.poll { sessionsOf(rig.sessionTree(client)).none { it.guid in added }.takeIf { it } }
+                report("fit: cleanup: ${added.size} added pane(s) ${if (gone == true) "closed" else "STILL OPEN after ${rig.requestTimeout}"}")
+            }
+            val (columns, rows) = firstGrid
+            val stream = controller.activeStream.value
+            if (stream?.config?.let { it.columns to it.rows } != firstGrid && stream?.config?.canResize == true) {
+                client.send(PhoneMessage.ResizeSession(guid, columns, rows), onLink = stream.linkId)
+                val restored = rig.poll { controller.activeStream.value?.config?.takeIf { it.columns == columns && it.rows == rows } }
+                report("fit: cleanup: restore ${columns}x$rows: ${restored?.let { "done" } ?: "the grid is ${controller.activeStream.value?.config?.let { "${it.columns}x${it.rows}" }}"}")
+            }
+        } catch (e: Exception) {
+            // A request that failed or timed out: its class only.
+            report("fit: cleanup failed: ${e.javaClass.simpleName}")
+        } finally {
+            controller.close()
+        }
     }
 
     /** Runs the bundled it2 with [args] for at most [IT2_TIMEOUT]: its exit status and stderr's last lines (it2's own messages). */
@@ -196,6 +246,12 @@ class RealIterm2FitTest {
     private companion object {
         const val NANOS_PER_MILLI = 1_000_000L
         val SETTLE_PAUSE = 1.seconds
+
+        /** How long the fitter waits for the Mac's config to show a resize. */
+        val RESULT_TIMEOUT = 10.seconds
+
+        /** Beyond [RESULT_TIMEOUT]: the settle delay and the send. */
+        val OUTCOME_SLACK = 5.seconds
         const val IT2 = "/Applications/iTerm.app/Contents/Resources/utilities/it2"
         const val IT2_STDERR_FILE = "fit-it2-stderr.txt"
         const val PLACEHOLDER_COOKIE = "buddy-ci-no-cookie"
@@ -203,7 +259,7 @@ class RealIterm2FitTest {
 
         /** A first fit's outcome line from the [AutoFitter]'s log. */
         fun isFirstOutcome(line: String): Boolean =
-            ("fit requested" in line && ("got" in line || "stayed" in line)) || "cannot resize" in line ||
+            ("fit requested" in line && ("got" in line || "stayed" in line || "no matching result" in line)) || "cannot resize" in line ||
                 "not sent" in line || "already at" in line
 
         fun describe(config: StreamConfig): String {

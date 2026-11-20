@@ -71,6 +71,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
@@ -121,6 +123,9 @@ interface LiveSessionActions {
 
     /** The view of [sessionGuid] left: Fit to phone stops fitting to its canvas. */
     fun clearFitViewport(sessionGuid: String) {}
+
+    /** The too-large overlay's Fit: the toggle on, and [sessionGuid] fitted now even if it was fitted before. */
+    fun fitNow(sessionGuid: String) = setFitToPhone(true)
 
     /** The debug video stats overlay on or off (debug builds only). */
     fun setVideoStatsShown(shown: Boolean)
@@ -214,7 +219,8 @@ interface LiveSessionActions {
  * Overlays are centred in that area, whose bottom follows the keyboard (read in layout).
  *
  * **Fit viewport.** Fit to phone computes its grid for the area inside the insets with the
- * keyboard hidden ([fitViewport]), so a fitted grid fills it; the canvas never shrinks for the
+ * keyboard hidden ([fitViewport]), under the bar row but not the Mac alert banner (a banner that
+ * comes and goes must not resize the Mac), so a fitted grid fills it; the canvas never shrinks for the
  * keyboard, so it follows rotation, split screen and window resizes at once, and the keyboard never
  * changes it (so never resizes the Mac).
  *
@@ -276,13 +282,16 @@ private fun LiveSessionContent(
     val density = LocalDensity.current
     var canvas by remember { mutableStateOf(IntSize.Zero) }
     var topChrome by remember { mutableIntStateOf(0) }
+    // The bar row alone (status bar and the 48 dp row), without the Mac alert banner: Fit's top inset,
+    // so the banner coming and going never resizes the Mac.
+    var barRow by remember { mutableIntStateOf(0) }
     val navigationBottom = WindowInsets.navigationBars.getBottom(density)
     // Side insets in landscape: system bars and display cutouts (never the IME), as iOS's safe area.
     val sides = WindowInsets.systemBars.union(WindowInsets.displayCutout)
     val layoutDirection = LocalLayoutDirection.current
     val leftInset = sides.getLeft(density, layoutDirection)
     val rightInset = sides.getRight(density, layoutDirection)
-    val (viewportWidth, viewportHeight) = fitViewport(canvas.width, canvas.height, topChrome, navigationBottom, leftInset, rightInset)
+    val (viewportWidth, viewportHeight) = fitViewport(canvas.width, canvas.height, barRow, navigationBottom, leftInset, rightInset)
     val canFit = !session.isBrowser && config != null &&
         fitGrid(viewportWidth, viewportHeight, config, source.output.maxSize(), source.output::sizeSupported) != null
     val fitState = fitButton(session, live, config, viewportWidth, viewportHeight, source.output.maxSize(), source.output::sizeSupported)
@@ -292,8 +301,8 @@ private fun LiveSessionContent(
         if (viewportWidth > 0 && viewportHeight > 0) fitActions.fitViewport(FitViewport(session.guid, viewportWidth, viewportHeight))
     }
     DisposableEffect(session.guid) { onDispose { fitActions.clearFitViewport(session.guid) } }
-    // The too-large overlay's Fit: turn the toggle on (it fits at once).
-    val fit = { actions.setFitToPhone(true) }
+    // The too-large overlay's Fit: the toggle on, and this session fitted now even if it already was.
+    val fit = { actions.fitNow(session.guid) }
     var menuOpen by remember { mutableStateOf(false) }
     val scrollback = remember(session.guid) { ScrollbackControl() }
     val snackbar = remember { SnackbarHostState() }
@@ -537,6 +546,7 @@ private fun LiveSessionContent(
             onBack = actions::back,
             banner = macAlert,
             modifier = Modifier.align(Alignment.TopCenter).onSizeChanged { topChrome = it.height },
+            onRowHeight = { barRow = it },
         ) {
             if (offersInput) {
                 IconButton(
@@ -664,10 +674,11 @@ private fun LiveTopBar(
     onBack: () -> Unit,
     banner: String?,
     modifier: Modifier,
+    onRowHeight: (Int) -> Unit = {},
     actions: @Composable RowScope.() -> Unit,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
-        LiveTopBarRow(title, onBack, actions)
+        LiveTopBarRow(title, onBack, Modifier.onSizeChanged { onRowHeight(it.height) }, actions)
         if (banner != null) LiveAlertBanner(banner)
     }
 }
@@ -690,10 +701,10 @@ internal fun LiveAlertBanner(text: String) {
 }
 
 @Composable
-private fun LiveTopBarRow(title: String, onBack: () -> Unit, actions: @Composable RowScope.() -> Unit) {
+private fun LiveTopBarRow(title: String, onBack: () -> Unit, modifier: Modifier, actions: @Composable RowScope.() -> Unit) {
     val colors = MaterialTheme.colorScheme
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .background(colors.surfaceContainer.copy(alpha = TOP_BAR_ALPHA))
             .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
@@ -733,8 +744,10 @@ internal fun Modifier.insetBy(left: Int, top: () -> Int, right: Int, bottom: () 
 /**
  * ⤢ in the live bar, the Fit to phone toggle. [on]: drawn on a filled circle (the theme's primary)
  * in the primary's content colour; off: plain, with a thin outline. Not [available] (it cannot fit
- * this session now) it is drawn greyed. A tap is [onToggle], whatever its state; a long press is
- * [onExplain]. TalkBack reads it as a switch, on or off, and "can't fit this session" when greyed.
+ * this session now) it is drawn greyed. The touch target is the whole 48 dp; the circle is drawn
+ * inside it. A tap is [onToggle], whatever its state; a long press is [onExplain]. TalkBack reads it
+ * as a switch with its on/off state (the same semantics `Modifier.toggleable` gives, kept on
+ * `combinedClickable` so the long press stays), and "can't fit this session" when greyed.
  */
 @Composable
 private fun FitToolbarButton(on: Boolean, available: Boolean, onToggle: () -> Unit, onExplain: () -> Unit) {
@@ -744,22 +757,28 @@ private fun FitToolbarButton(on: Boolean, available: Boolean, onToggle: () -> Un
     Box(
         modifier = Modifier
             .size(48.dp)
-            .padding(4.dp)
             .clip(CircleShape)
-            .then(
-                if (on) {
-                    Modifier.background(colors.primary.copy(alpha = alpha), CircleShape)
-                } else {
-                    Modifier.border(1.dp, LocalContentColor.current.copy(alpha = OUTLINE_ALPHA * alpha), CircleShape)
-                },
-            )
-            .combinedClickable(role = Role.Switch, onClick = onToggle, onLongClick = onExplain)
+            .combinedClickable(role = Role.Switch, onClick = onToggle, onLongClick = onExplain, onLongClickLabel = "Explain")
             .semantics {
                 contentDescription = "Fit to phone"
-                stateDescription = (if (on) "On" else "Off") + if (available) "" else ", can't fit this session"
+                toggleableState = ToggleableState(on)
+                if (!available) stateDescription = (if (on) "On" else "Off") + ", can't fit this session"
             },
         contentAlignment = Alignment.Center,
-    ) { Text("⤢", style = MaterialTheme.typography.titleMedium, color = content.copy(alpha = alpha)) }
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .then(
+                    if (on) {
+                        Modifier.background(colors.primary.copy(alpha = alpha), CircleShape)
+                    } else {
+                        Modifier.border(1.dp, LocalContentColor.current.copy(alpha = OUTLINE_ALPHA * alpha), CircleShape)
+                    },
+                ),
+            contentAlignment = Alignment.Center,
+        ) { Text("⤢", style = MaterialTheme.typography.titleMedium, color = content.copy(alpha = alpha)) }
+    }
 }
 
 /** **↓ Live**: back to the live band from the history (Android-only; iOS has no such control). */

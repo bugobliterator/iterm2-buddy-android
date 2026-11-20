@@ -252,7 +252,9 @@ jobs:
       - name: Report Fit to phone on the runner's screen
         if: success() || failure()
         continue-on-error: true
-        timeout-minutes: 6
+        # Worst case: a 3 min connect, four cases of up to 15 s for a result and 15 s more for a
+        # corrective step, two 30 s waits for the split, cleanup's waits, and Gradle's start.
+        timeout-minutes: 12
         env:
           REAL_ITERM2: '1'
           REAL_ITERM2_PAIRING_FILE: ${{ runner.temp }}/real-iterm2/pairing.env
