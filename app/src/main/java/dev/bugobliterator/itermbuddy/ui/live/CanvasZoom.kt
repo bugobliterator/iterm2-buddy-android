@@ -6,6 +6,7 @@ import dev.bugobliterator.itermbuddy.core.stream.StreamConfig
 import dev.bugobliterator.itermbuddy.core.stream.cellAt
 import dev.bugobliterator.itermbuddy.core.stream.historyCellAt
 import dev.bugobliterator.itermbuddy.core.wire.SelectionPoint
+import kotlin.math.abs
 import kotlin.math.hypot
 
 /*
@@ -13,7 +14,11 @@ import kotlin.math.hypot
  * [VideoCanvas] keeps a [KeptZoom] in snapshot state and calls these.
  */
 
-/** What the gesture detectors read at each event: the current fit, view size, maximum scale, insets and history height. */
+/**
+ * What the gesture detectors read at each event: the current fit, view size, maximum scale, insets
+ * and history height, and the base view a browser page rests at ([base]: [browserFillZoom]; null
+ * for a terminal, whose base is fit).
+ */
 internal class GestureGeometry(
     val fit: FitRect,
     val viewW: Float,
@@ -24,6 +29,7 @@ internal class GestureGeometry(
     val left: Float,
     val right: Float,
     val history: Float,
+    val base: ZoomState? = null,
 ) {
     /** The content zoom and pan work on: the band with the history above it ([documentFit]). */
     val docFit: FitRect = documentFit(fit, history)
@@ -31,16 +37,69 @@ internal class GestureGeometry(
 
 /**
  * A zoom as the owner left it, with the bottom inset (px) it was made for (null: the resting one)
- * and the history height (px) it was made for (null: whatever it is now).
+ * and the history height (px) it was made for (null: whatever it is now). [atBase]: it is at the
+ * geometry's base view ([GestureGeometry.base]), so when the base changes (a rotation, the bars
+ * measured, another canvas) it follows the new base instead of keeping its scale ([followBase]).
  */
-internal data class KeptZoom(val state: ZoomState, val inset: Float?, val history: Float? = null)
+internal data class KeptZoom(val state: ZoomState, val inset: Float?, val history: Float? = null, val atBase: Boolean = false)
 
 /**
- * What is shown: [kept] moved with the document from its history height to the current one
- * ([followDocument]; normally [rebaseKept] has done that already), then lifted from its inset to
- * [inset] ([liftForKeyboard]), clamped for [geometry].
+ * The browser page's base view ("fill the screen"): the page scaled to cover the visible area
+ * inside the insets (the resting bottom one, the keyboard hidden), so no band is left: a page
+ * relatively wider than that area fills its height and is centred across, its sides cropped; a
+ * relatively taller one fills its width, top-aligned. Null for an empty fit or view. A page of the
+ * area's own shape gives [ZoomState.FIT].
  */
-internal fun shownZoom(kept: KeptZoom, geometry: GestureGeometry, inset: Float): ZoomState {
+internal fun browserFillZoom(
+    fit: FitRect,
+    viewW: Float,
+    viewH: Float,
+    topInset: Float,
+    bottomInset: Float,
+    leftInset: Float = 0f,
+    rightInset: Float = 0f,
+): ZoomState? {
+    if (fit.isEmpty) return null
+    val left = nonNegative(leftInset)
+    val top = nonNegative(topInset)
+    val visibleW = viewW - left - nonNegative(rightInset)
+    val visibleH = viewH - top - nonNegative(bottomInset)
+    if (!(visibleW > 0f && visibleH > 0f) || !visibleW.isFinite() || !visibleH.isFinite()) return null
+    val scale = maxOf(1f, visibleW / fit.width, visibleH / fit.height)
+    if (!scale.isFinite()) return null
+    val offsetX = left + (visibleW - scale * fit.width) / 2 - scale * fit.left
+    val offsetY = top - scale * fit.top
+    return clampZoom(ZoomState(scale, offsetX, offsetY), fit, viewW, viewH, bottomInset, topInset, leftInset, rightInset)
+}
+
+/** Within this fraction of the base scale a zoom counts as at the base (as [BROWSER_FIT_SCALE] for fit). */
+private const val BASE_TOLERANCE = 0.001f
+
+/** Whether [scale] is the base view's [baseScale]. */
+internal fun isAtBase(scale: Float, baseScale: Float): Boolean = abs(scale - baseScale) <= baseScale * BASE_TOLERANCE
+
+/** A kept zoom made from [state] after a gesture: at the base when [geometry] has one and [state] is at its scale. */
+internal fun keptAfter(state: ZoomState, inset: Float, geometry: GestureGeometry): KeptZoom =
+    KeptZoom(state, inset, geometry.history, atBase = geometry.base?.let { isAtBase(state.scale, it.scale) } ?: false)
+
+/**
+ * [kept], or the geometry's base view (made for the resting inset) when [kept] is at a base of
+ * another scale: the first view of a page, or one left at its base before the canvas changed.
+ * A zoom the owner chose (fit, or zoomed in) is kept, as a terminal's is.
+ */
+internal fun followBase(kept: KeptZoom, geometry: GestureGeometry): KeptZoom {
+    val base = geometry.base ?: return kept
+    if (!kept.atBase || isAtBase(kept.state.scale, base.scale)) return kept
+    return KeptZoom(base, null, geometry.history, atBase = true)
+}
+
+/**
+ * What is shown: [kept] at its base ([followBase]), moved with the document from its history height
+ * to the current one ([followDocument]; normally [rebaseKept] has done that already), then lifted
+ * from its inset to [inset] ([liftForKeyboard]), clamped for [geometry].
+ */
+internal fun shownZoom(keptZoom: KeptZoom, geometry: GestureGeometry, inset: Float): ZoomState {
+    val kept = followBase(keptZoom, geometry)
     val keptInset = kept.inset ?: geometry.restBottom
     val keptHistory = kept.history ?: geometry.history
     val followed = if (keptHistory == geometry.history) {
@@ -62,7 +121,7 @@ internal fun rebaseKept(kept: KeptZoom, geometry: GestureGeometry): KeptZoom {
     if (from == geometry.history) return kept
     val inset = kept.inset ?: geometry.restBottom
     val followed = followDocument(kept.state, geometry.fit, geometry.viewW, geometry.viewH, from, geometry.history, inset, geometry.top, geometry.left, geometry.right)
-    return KeptZoom(followed, kept.inset, geometry.history)
+    return kept.copy(state = followed, history = geometry.history)
 }
 
 /** The outcome of one pan or pinch event: the new [kept] zoom, the wheel notches to send, and the gesture's two-finger latch. */
@@ -118,7 +177,9 @@ internal const val BROWSER_FIT_SCALE = 1.001f
  *   view locally ([applyGesture]) and never scrolls the page, until it ends.
  * - At fit ([BROWSER_FIT_SCALE]) a one-finger drag scrolls the page by all of it.
  * - Zoomed in, it pans the zoomed view ([wheelDrag]): horizontal travel only pans, and vertical
- *   travel scrolls the page only past the top or bottom pan edge.
+ *   travel scrolls the page only past the top or bottom pan edge. At the fill view
+ *   ([browserFillZoom]) of a page wider than the screen the height fits exactly, so a horizontal
+ *   drag pans to the cropped sides and all vertical travel scrolls the page.
  */
 internal fun browserGestureStep(
     kept: KeptZoom,
@@ -136,17 +197,22 @@ internal fun browserGestureStep(
     val shown = shownZoom(kept, g, inset)
     if (sawPinch || pointers > 1) {
         val next = applyGesture(shown, centroidX, centroidY, zoom, panX, panY, g.docFit, g.viewW, g.viewH, g.max, inset, g.top, g.left, g.right)
-        return BrowserGestureStep(KeptZoom(next, inset, g.history), 0f, 0f, sawPinch = true, pinchStarted = !sawPinch)
+        return BrowserGestureStep(keptAfter(next, inset, g), 0f, 0f, sawPinch = true, pinchStarted = !sawPinch)
     }
     if (shown.scale <= BROWSER_FIT_SCALE) {
         return BrowserGestureStep(kept, finiteOrZero(panX), finiteOrZero(panY), sawPinch = false, pinchStarted = false)
     }
     val drag = wheelDrag(shown, panX, panY, g.docFit, g.viewW, g.viewH, inset, g.top, g.left, g.right)
-    return BrowserGestureStep(KeptZoom(drag.state, inset, g.history), 0f, drag.pastEdgeY, sawPinch = false, pinchStarted = false)
+    return BrowserGestureStep(keptAfter(drag.state, inset, g), 0f, drag.pastEdgeY, sawPinch = false, pinchStarted = false)
 }
 
-/** Whether a released drag coasts: only with the whole page in view and no pinch in the gesture (iOS, `SessionView.swift:2283-2290`). */
-internal fun browserFlings(scale: Float, sawPinch: Boolean): Boolean = scale <= BROWSER_FIT_SCALE && !sawPinch
+/**
+ * Whether a released drag coasts: at the page's resting view and with no pinch in the gesture.
+ * iOS coasts only at zoom 1, its base (`SessionView.swift:2283-2290`); here that is the whole page
+ * (fit) or the fill view ([baseScale], [browserFillZoom]; 1 without one).
+ */
+internal fun browserFlings(scale: Float, sawPinch: Boolean, baseScale: Float = 1f): Boolean =
+    !sawPinch && (scale <= BROWSER_FIT_SCALE || isAtBase(scale, baseScale))
 
 /** Encoded-image pixels per view pixel at fit (`imageW / fit.width`); null without an image or a fit. */
 internal fun browserImagePxPerViewPx(imageW: Int, fit: FitRect): Float? {
@@ -175,6 +241,8 @@ internal fun browserScrollPoint(x: Float, y: Float, shown: ZoomState, fit: FitRe
 }
 
 private fun finiteOrZero(value: Float): Float = if (value.isFinite()) value else 0f
+
+private fun nonNegative(value: Float): Float = if (value.isFinite() && value > 0f) value else 0f
 
 /** How long a still finger is held before a selection begins: iOS's 0.3 s (`IOS/Screens/SessionView.swift:1928-1933`). */
 internal const val SELECTION_HOLD_MILLIS = 300L
