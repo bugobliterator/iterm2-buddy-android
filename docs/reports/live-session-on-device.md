@@ -211,7 +211,7 @@ Expected: no typed or pasted text is found.
 
 An opt-in trace of everything the keyboard sends, for debugging characters that do not arrive
 (for example `/` and `*` in Claude Code). It is off by default in every build. While it is on,
-logcat shows each InputConnection call, key event, translated key, sender decision and the
+the app's log (and logcat) shows each InputConnection call, key event, translated key, sender decision and the
 `sendKey`/`pasteText` envelope, with every typed character written as a code point
 (`U+002F[/]`), never as plain text.
 
@@ -227,20 +227,30 @@ decision is a sender line: `sender: pasted key U+002F[/] as pasteText (key, run 
 `sender: typed run U+0061[a] as sendKey (...)`. The upstream report is
 `docs/reports/iterm2-companion-key-injection-bug.md`.
 
-1. Turn it on (takes effect within a second; no restart needed):
+The main path needs no computer: the trace and Share log are in the app's Settings.
 
-       adb shell setprop log.tag.IB.Input VERBOSE
-
-2. Capture it:
-
-       adb logcat -c
-       adb logcat -s IB.Input:V > input-trace.txt
-
-3. In a live Claude Code session, type `a/b`, then Return; then `a*b`, then Return. Do it once
+1. Settings › Diagnostics › **Include typed-key trace**: turn it on. It takes effect at the next
+   key, is not saved, and is off again whenever the app process restarts.
+2. In a live Claude Code session, type `a/b`, then Return; then `a*b`, then Return. Do it once
    with **Send / * + = as paste** on and once with it off.
-4. Stop the capture (Ctrl-C) and send `input-trace.txt`.
-5. Turn it off afterwards:
+3. Settings › Diagnostics › **Share log**: Android's share sheet sends the app's log (save to
+   Files, email, chat). It starts with a header (app version and build, Android version, device,
+   protocol revision, Mac revision if connected, whether a pairing is stored, and the paste,
+   scroll-keys and key-trace switches), then the log oldest first, one line per entry:
+   `local time with ms | level | tag | message`. The trace lines are tag `IB.Input`.
+4. Turn the switch off afterwards. **Clear log** (confirmed) deletes the log.
 
-       adb shell setprop log.tag.IB.Input SUPPRESS
+The app always keeps a rolling log on the device (`filesDir/logs`, two files of about 1 MB,
+oldest lines dropped first), so a problem that already happened is in a shared log. It holds
+what logcat shows from the app (no terminal or chat content, keys, codes or secrets; lengths,
+counts, IDs and timings only; crash stack traces without exception messages). The typed-key
+trace is the only exception, and only while it is on. Unpair keeps the log.
+
+With adb (still works; either this or the switch turns the trace on):
+
+    adb shell setprop log.tag.IB.Input VERBOSE     # on, within a second
+    adb logcat -c
+    adb logcat -s IB.Input:V > input-trace.txt
+    adb shell setprop log.tag.IB.Input SUPPRESS    # off
 
 **Result:**
