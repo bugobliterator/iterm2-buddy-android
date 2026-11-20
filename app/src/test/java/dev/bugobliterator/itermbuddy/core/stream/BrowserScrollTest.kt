@@ -1,6 +1,7 @@
 package dev.bugobliterator.itermbuddy.core.stream
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -145,5 +146,30 @@ class BrowserScrollTest {
         var t = 0L
         while (scroll.isFlinging) scroll.flush(++t)
         return t
+    }
+
+    @Test
+    fun keyTravelPagesThenLinesAndNeverReverses() {
+        val keys = KeyScrollAccumulator()
+        keys.add(-1000.0, 900.0)
+        assertEquals(ScrollKey.PAGE_DOWN, keys.next(40.0, 900.0))
+        // 100 left: lines while at least half a line is pending (100, 60, 20), never below 0.
+        assertEquals(ScrollKey.LINE_DOWN, keys.next(40.0, 900.0))
+        assertEquals(ScrollKey.LINE_DOWN, keys.next(40.0, 900.0))
+        assertEquals(ScrollKey.LINE_DOWN, keys.next(40.0, 900.0))
+        assertEquals(null, keys.next(40.0, 900.0))
+        assertFalse(keys.hasWork(40.0))
+        // Half a page or more pages; a page bigger than what is pending leaves 0, not an overshoot back.
+        keys.add(500.0, 900.0)
+        assertEquals(ScrollKey.PAGE_UP, keys.next(40.0, 900.0))
+        assertEquals(null, keys.next(40.0, 900.0))
+        // The backlog is capped at two pages.
+        keys.add(-10_000.0, 900.0)
+        assertEquals(ScrollKey.PAGE_DOWN, keys.next(40.0, 900.0))
+        assertEquals(ScrollKey.PAGE_DOWN, keys.next(40.0, 900.0))
+        assertEquals(null, keys.next(40.0, 900.0))
+        keys.add(-30.0, 900.0)
+        keys.cancel()
+        assertEquals(null, keys.next(40.0, 900.0))
     }
 }
