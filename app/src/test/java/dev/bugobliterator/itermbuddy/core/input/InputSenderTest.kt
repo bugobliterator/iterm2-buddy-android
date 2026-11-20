@@ -74,12 +74,17 @@ class InputSenderTest {
         @Volatile var current: InputTarget? = null
     }
 
-    private fun TestScope.harness(current: InputTarget? = first, typeChunkBytes: Int = InputSender.TYPE_CHUNK_BYTES): Harness {
+    private fun TestScope.harness(
+        current: InputTarget? = first,
+        typeChunkBytes: Int = InputSender.TYPE_CHUNK_BYTES,
+        pasteKeys: () -> Boolean = { false },
+    ): Harness {
         val link = RecordingLink(this)
         val log = Collections.synchronizedList(mutableListOf<String>())
         lateinit var harness: Harness
         val sender = InputSender(
             link, backgroundScope, isCurrent = { it == harness.current }, log = { log += it }, typeChunkBytes = typeChunkBytes,
+            pasteKeys = pasteKeys,
         )
         harness = Harness(link, sender, log)
         harness.current = current
@@ -401,6 +406,199 @@ class InputSenderTest {
         ).map { Json.parseToJsonElement(Fixtures.read("messages/live-session/$it.json")).jsonObject.getValue("json") }
         val actual = h.link.completed.map { buildJsonObject { put("payload", it.message.payload()) } }
         assertEquals(expected, actual)
+    }
+
+    // --- Pasted keys (Settings: "Send / * + = as paste") -----------------------------------
+
+    private fun pasteText(s: String, target: InputTarget = first) = PhoneMessage.PasteText(target.sessionGuid, s)
+
+    /** "a/b*c+d=e" as the runs the sender sends with the setting on. */
+    private val mixedRuns = listOf(
+        sendKey("a"), pasteText("/"), sendKey("b"), pasteText("*"), sendKey("c"), pasteText("+"), sendKey("d"), pasteText("="), sendKey("e"),
+    )
+
+    @Test
+    fun pastedKeysAreSplitIntoRunsInOrder() = runTest {
+        val h = harness(pasteKeys = { true })
+        h.sender.key(first, text("a/b*c+d=e"))
+        h.sender.key(first, text("//"))
+        h.sender.key(first, text("x"))
+        h.sender.paste(first, "y/")
+        h.sender.key(first, text("="))
+        settle()
+        assertEquals(
+            mixedRuns + listOf(pasteText("/"), pasteText("/"), sendKey("x"), pasteText("y/"), pasteText("=")),
+            h.link.completed.map { it.message },
+        )
+        assertTrue(h.link.completed.all { it.onLink == first.linkId })
+    }
+
+    @Test
+    fun withTheSettingOffEveryKeyIsAKey() = runTest {
+        val h = harness(pasteKeys = { false })
+        h.sender.key(first, text("a/b*c+d=e"))
+        h.sender.typeThenReturn(first, "ls /tmp")
+        settle()
+        assertEquals(listOf(sendKey("a/b*c+d=e"), sendKey("ls /tmp"), sendKey("\n")), h.link.completed.map { it.message })
+    }
+
+    @Test
+    fun theSettingIsReadWhenTheKeyIsSent() = runTest {
+        var on = false
+        val h = harness(pasteKeys = { on })
+        h.sender.key(first, text("/"))
+        settle()
+        on = true
+        h.sender.key(first, text("/"))
+        settle()
+        on = false
+        h.sender.key(first, text("/"))
+        settle()
+        assertEquals(listOf(sendKey("/"), pasteText("/"), sendKey("/")), h.link.completed.map { it.message })
+    }
+
+    @Test
+    fun onlyTheFourCharactersArePasted() = runTest {
+        val h = harness(pasteKeys = { true })
+        val others = (0x20..0x7e).map { it.toChar() }.filter { it !in "/*+=" }.joinToString("") + "é😀\t"
+        h.sender.key(first, text(others))
+        for (c in listOf("-", ".", "?", "_", "8", "<")) h.sender.key(first, text(c))
+        settle()
+        assertEquals(
+            listOf(sendKey(others)) + listOf("-", ".", "?", "_", "8", "<").map { sendKey(it) },
+            h.link.completed.map { it.message },
+        )
+        assertEquals("/*+=", PASTED_KEYS)
+    }
+
+    @Test
+    fun aKeyWithAModifierStaysAKey() = runTest {
+        val h = harness(pasteKeys = { true })
+        val modified = listOf(
+            KeyEvent(Key.Text("/"), KeyModifiers(control = true)),
+            KeyEvent(Key.Text("*"), KeyModifiers(leftOption = true)),
+            KeyEvent(Key.Text("+"), KeyModifiers(rightOption = true)),
+            KeyEvent(Key.Text("a/="), KeyModifiers(shift = true)),
+        )
+        modified.forEach { h.sender.key(first, it) }
+        h.sender.key(first, KeyEvent(Key.Special(SpecialKey.TAB)))
+        settle()
+        assertEquals(
+            modified.map { PhoneMessage.SendKey(guid, it) } + PhoneMessage.SendKey(guid, KeyEvent(Key.Special(SpecialKey.TAB))),
+            h.link.completed.map { it.message },
+        )
+    }
+
+    @Test
+    fun anArmedStickyModifierKeepsTheKey() = runTest {
+        val h = harness(pasteKeys = { true })
+        val modifiers = StickyModifiers()
+        val ime = ImeTranslator(modifiers, emit = { h.sender.key(first, it) }, onComposingFlushed = {}, toComposer = {})
+        modifiers.tap(ModifierKey.CONTROL, nowMillis = 0)
+        ime.commitText("/")
+        ime.commitText("/")
+        settle()
+        assertEquals(
+            listOf(PhoneMessage.SendKey(guid, KeyEvent(Key.Text("/"), KeyModifiers(control = true))), pasteText("/")),
+            h.link.completed.map { it.message },
+        )
+    }
+
+    @Test
+    fun aBrowserKeyIsNeverPasted() = runTest {
+        val h = harness(pasteKeys = { true })
+        h.sender.key(first, text("a/b"), pasteKeys = false)
+        settle()
+        assertEquals(listOf(sendKey("a/b")), h.link.completed.map { it.message })
+    }
+
+    @Test
+    fun aTypedDraftPastesTheFourCharactersThenReturns() = runTest {
+        val h = harness(pasteKeys = { true }, typeChunkBytes = 4)
+        h.sender.typeThenReturn(first, "ls /tmp/x")
+        // A multi-line draft is one paste, as before.
+        h.sender.typeThenReturn(first, "a/b\nc")
+        settle()
+        assertEquals(
+            listOf(
+                // Pieces of at most 4 bytes: "ls /", "tmp/", "x"; each split at the pasted keys.
+                sendKey("ls "), pasteText("/"), sendKey("tmp"), pasteText("/"), sendKey("x"), sendKey("\n"),
+                pasteText("a/b\nc"),
+            ),
+            h.link.completed.map { it.message },
+        )
+    }
+
+    @Test
+    fun runsStopWhenTheTargetChanges() = runTest {
+        val h = harness(pasteKeys = { true })
+        val moved = first.copy(watchEpoch = 2)
+        h.link.behaviour = { message -> if (message == pasteText("/")) h.current = moved }
+        h.sender.key(first, text("a/b"))
+        h.sender.typeThenReturn(first, "c/d")
+        settle()
+        assertEquals("the run after the target changed is not sent", listOf(sendKey("a"), pasteText("/")), h.link.attempted.map { it.message })
+        assertTrue(h.log.any { "stopped at run 3/3" in it })
+        assertTrue("the typed draft was stale at dequeue", h.log.any { "discarded stale typed draft" in it })
+    }
+
+    @Test
+    fun aFailedRunStopsTheItemAndATypedDraftIsNotReturned() = runTest {
+        val h = harness(pasteKeys = { true })
+        h.link.behaviour = { message -> if (message == pasteText("*")) throw CompanionRequestException("refused") }
+        h.sender.key(first, text("a*b"))
+        h.sender.typeThenReturn(first, "c*d")
+        h.sender.key(first, text("e"))
+        settle()
+        assertEquals(
+            listOf(sendKey("a"), pasteText("*"), sendKey("c"), pasteText("*"), sendKey("e")),
+            h.link.attempted.map { it.message },
+        )
+        assertTrue(h.log.any { "Return not sent" in it })
+        assertFalse("no text in the logs", h.log.any { "a*b" in it || "c*d" in it })
+    }
+
+    @Test
+    fun aSlowRunIsSkippedAndTheRestOfTheItemDropped() = runTest {
+        val h = harness(pasteKeys = { true })
+        h.link.behaviour = { message -> if (message == pasteText("+")) awaitCancellation() }
+        h.sender.key(first, text("1+1"))
+        h.sender.key(first, text("2"))
+        settle()
+        assertEquals(listOf(sendKey("1"), sendKey("2")), h.link.completed.map { it.message })
+        assertEquals(listOf(sendKey("1"), pasteText("+"), sendKey("2")), h.link.attempted.map { it.message })
+        assertEquals(2_000L, h.link.attempted[2].atMillis - h.link.attempted[1].atMillis)
+    }
+
+    @Test
+    fun theTraceLogsEachDecisionAsCodePoints() = runTest {
+        val lines = Collections.synchronizedList(mutableListOf<String>())
+        val previous = InputTrace.current
+        InputTrace.current = InputTrace({ true }, { 0L }, { lines += it })
+        try {
+            val h = harness(pasteKeys = { true })
+            h.sender.key(first, text("a/b"))
+            settle()
+        } finally {
+            InputTrace.current = previous
+        }
+        val decisions = lines.filter { "pasted key" in it || "typed run" in it }
+        assertEquals(3, decisions.size)
+        assertTrue(decisions[0], "typed run U+0061[a] as sendKey" in decisions[0])
+        assertTrue(decisions[1], "pasted key U+002F[/] as pasteText" in decisions[1])
+        assertTrue(decisions[2], "typed run U+0062[b] as sendKey" in decisions[2])
+        assertFalse("never plain text", lines.any { "a/b" in it })
+    }
+
+    @Test
+    fun splitPastedKeysKeepsTheTextBetween() {
+        assertEquals(emptyList<TextRun>(), splitPastedKeys(""))
+        assertEquals(listOf(TextRun("abc", false)), splitPastedKeys("abc"))
+        assertEquals(
+            listOf(TextRun("/", true), TextRun("😀", false), TextRun("=", true), TextRun("=", true), TextRun("é", false)),
+            splitPastedKeys("/😀==é"),
+        )
+        assertEquals("TextRun(len=3, pasted=false)", TextRun("abc", false).toString())
     }
 
     @Test

@@ -32,6 +32,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.bugobliterator.itermbuddy.core.ClientState
+import dev.bugobliterator.itermbuddy.core.input.PASTE_KEYS_SUMMARY
+import dev.bugobliterator.itermbuddy.core.input.PASTE_KEYS_TITLE
 import dev.bugobliterator.itermbuddy.ui.UNPAIR_FAILED
 import dev.bugobliterator.itermbuddy.ui.connectionBanner
 import dev.bugobliterator.itermbuddy.video.VideoStats
@@ -53,8 +55,9 @@ internal fun decoderRowText(stats: VideoStats): String = stats.decoderName ?: st
 /**
  * Settings, reached from the home's overflow menu: the connection, the relay origin, Unpair
  * (confirmed first), the app version and the HEVC decoder ([decoder], [decoderRowText]). The
- * pairing screen's Connected content (status and Unpair) lives here now. Debug builds
- * ([debugBuild]) also get the "Video stats" toggle for the live view's stats overlay.
+ * pairing screen's Connected content (status and Unpair) lives here now. The "Send / * + = as
+ * paste" switch ([pasteKeys], [PASTE_KEYS_TITLE]) sets how the live view sends those four keys.
+ * Debug builds ([debugBuild]) also get the "Video stats" toggle for the live view's stats overlay.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -68,6 +71,8 @@ fun SettingsScreen(
     debugBuild: Boolean,
     videoStatsShown: Boolean,
     onVideoStatsShownChange: (Boolean) -> Unit,
+    pasteKeys: Boolean,
+    onPasteKeysChange: (Boolean) -> Unit,
     onBack: () -> Unit,
     onUnpair: () -> Unit,
     modifier: Modifier = Modifier,
@@ -101,20 +106,8 @@ fun SettingsScreen(
             }
             Entry("App version", appVersion)
             Entry("Decoder", decoder)
-            if (debugBuild) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().toggleable(
-                        value = videoStatsShown,
-                        role = Role.Switch,
-                        onValueChange = onVideoStatsShownChange,
-                    ),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Video stats", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                    Switch(checked = videoStatsShown, onCheckedChange = null)
-                }
-            }
+            SwitchRow(PASTE_KEYS_TITLE, PASTE_KEYS_SUMMARY, pasteKeys, onPasteKeysChange)
+            if (debugBuild) SwitchRow("Video stats", summary = null, videoStatsShown, onVideoStatsShownChange)
         }
     }
     if (confirming) {
@@ -129,6 +122,24 @@ fun SettingsScreen(
             },
             dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancel") } },
         )
+    }
+}
+
+/** A whole-row switch: [title], an optional [summary] under it, and the switch. */
+@Composable
+private fun SwitchRow(title: String, summary: String?, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            if (summary != null) {
+                Text(summary, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        Switch(checked = checked, onCheckedChange = null)
     }
 }
 

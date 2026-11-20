@@ -201,7 +201,7 @@ private fun BrowserSessionContent(
     var expanded by remember(session.guid) { mutableStateOf(memory.expanded) }
     var address by remember(session.guid) { mutableStateOf(AddressFieldState("", focused = false)) }
     val translator = remember(session.guid) {
-        val emit = { event: KeyEvent -> currentTarget?.let { currentActions.key(it, event) } ?: Unit }
+        val emit = { event: KeyEvent -> currentTarget?.let { currentActions.browserKey(it, event) } ?: Unit }
         ImeTranslator(
             modifiers,
             emit = emit,

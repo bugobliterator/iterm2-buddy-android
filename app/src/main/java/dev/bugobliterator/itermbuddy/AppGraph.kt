@@ -13,6 +13,9 @@ import dev.bugobliterator.itermbuddy.core.chat.DeleteFromOutcome
 import dev.bugobliterator.itermbuddy.core.chat.MentionResolver
 import dev.bugobliterator.itermbuddy.core.chat.NewChatMode
 import dev.bugobliterator.itermbuddy.core.chat.WorkgroupWatch
+import dev.bugobliterator.itermbuddy.core.input.InMemoryPasteKeysStore
+import dev.bugobliterator.itermbuddy.core.input.PasteKeysSetting
+import dev.bugobliterator.itermbuddy.core.input.PasteKeysStore
 import dev.bugobliterator.itermbuddy.core.sessions.ClaudeStateTip
 import dev.bugobliterator.itermbuddy.core.sessions.ClaudeTipStore
 import dev.bugobliterator.itermbuddy.core.sessions.InMemoryClaudeTipStore
@@ -118,7 +121,8 @@ import kotlin.time.Duration.Companion.seconds
  *   the conversations and the workgroup watches), [repository] and [chats] cleared (the chat
  *   repository clears its seen marks itself, on its consumer), the shared chat contents reset
  *   ([clearShared]), the mentions, bound-session verdicts, icons and images forgotten, and the
- *   searches, drafts and input memories emptied, and [claudeTip]'s dismissal forgotten.
+ *   searches, drafts and input memories emptied, [claudeTip]'s dismissal forgotten, and
+ *   [pasteKeys] (the Settings switch "Send / * + = as paste") back to its default.
  */
 class HomeGraph(
     private val scope: CoroutineScope,
@@ -140,6 +144,7 @@ class HomeGraph(
     private val workgroupLog: (String) -> Unit = {},
     sessionPollInterval: Duration = SESSION_POLL_INTERVAL,
     val claudeTip: ClaudeStateTip,
+    val pasteKeys: PasteKeysSetting,
 ) {
     private val foregroundFlow = MutableStateFlow(true)
 
@@ -473,6 +478,7 @@ private fun boundGuid(list: ChatListState, chatID: String): String? =
  * @param sessionPollInterval how often the Sessions list fetches the tree again while shown.
  * @param claudeTipStore where the Sessions list's `\(status)` tip keeps its dismissal.
  * @param tipContext where the tip reads and writes [claudeTipStore] (disk I/O, off the main thread).
+ * @param pasteKeysStore where the "Send / * + = as paste" switch is kept; read and written on [tipContext].
  */
 fun wireHome(
     scope: CoroutineScope,
@@ -489,6 +495,7 @@ fun wireHome(
     sessionPollInterval: Duration = SESSION_POLL_INTERVAL,
     claudeTipStore: ClaudeTipStore = InMemoryClaudeTipStore(),
     tipContext: CoroutineContext = Dispatchers.IO,
+    pasteKeysStore: PasteKeysStore = InMemoryPasteKeysStore(),
 ): HomeGraph {
     val sink = ForwardingStreamSink()
     val chatSink = ForwardingChatSink()
@@ -519,7 +526,7 @@ fun wireHome(
     val graph = HomeGraph(
         scope, client, controller, repository, chats, search, drafts, inputMemories, mentions, chatSearch, chatIcons,
         boundSessions, inlineImages, chatDrafts, listContext, listSharingStopMillis, chatLog,
-        sessionPollInterval, ClaudeStateTip(claudeTipStore, scope, tipContext),
+        sessionPollInterval, ClaudeStateTip(claudeTipStore, scope, tipContext), PasteKeysSetting(pasteKeysStore, scope, tipContext),
     )
     val navigator = graph.navigator
     // The Sessions list polls while it is the destination shown, on a live link.
@@ -561,7 +568,7 @@ fun wireHome(
             // The navigator's reset also clears the graph's shared chat contents, under its lock.
             navigator::reset, graph.newChat::clear, repository::clear, chats::clear, mentions::clear, boundSessions::clear,
             chatIcons::clear, inlineImages::clear, search::clear, chatSearch::clear, drafts::clear, chatDrafts::clear,
-            inputMemories::clear, tip::clear,
+            inputMemories::clear, tip::clear, graph.pasteKeys::clear,
         ),
         log,
     )

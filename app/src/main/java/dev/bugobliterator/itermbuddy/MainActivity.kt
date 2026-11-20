@@ -74,6 +74,8 @@ class MainActivity : ComponentActivity() {
 
         override fun key(target: InputTarget, event: KeyEvent) = app.input.key(target, event)
 
+        override fun browserKey(target: InputTarget, event: KeyEvent) = app.input.key(target, event, pasteKeys = false)
+
         override fun paste(target: InputTarget, text: String) = app.input.paste(target, text)
 
         override fun typeThenReturn(target: InputTarget, text: String) = app.input.typeThenReturn(target, text)
@@ -92,6 +94,8 @@ class MainActivity : ComponentActivity() {
         override fun refresh() = app.home.repository.refresh()
 
         override fun dismissClaudeTip() = app.home.claudeTip.dismiss()
+
+        override fun setPasteKeys(enabled: Boolean) = app.home.pasteKeys.set(enabled)
 
         override fun reconnect() {
             app.clearNotices()
@@ -136,13 +140,14 @@ class MainActivity : ComponentActivity() {
             val query by sessions.search.query.collectAsStateWithLifecycle()
             val macStatus by app.client.macStatus.collectAsStateWithLifecycle()
             val claudeTip by sessions.claudeTip.shown.collectAsStateWithLifecycle()
+            val pasteKeys by sessions.pasteKeys.enabled.collectAsStateWithLifecycle()
             AppTheme {
                 AppRoot(
                     paired = paired,
                     home = HomeModel(
                         state, nav.destination, tree, live, unpairing, unpairFailed, version, relayOrigin,
                         activeStream, video, debugBuild, videoStatsShown, query, macStatus, nav.tab, chatsAttention,
-                        nav.key, nav.stackKeys, claudeTip,
+                        nav.key, nav.stackKeys, claudeTip, pasteKeys,
                     ),
                     homeActions = homeActions,
                     chats = sessions.chatsHome,

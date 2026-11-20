@@ -110,6 +110,9 @@ interface HomeActions : LiveSessionActions {
 
     /** The owner dismissed the Sessions list's `\(status)` tip ([HomeModel.claudeTip]). */
     fun dismissClaudeTip() {}
+
+    /** The owner flipped Settings' "Send / * + = as paste" switch ([HomeModel.pasteKeys]). */
+    fun setPasteKeys(enabled: Boolean) {}
 }
 
 /**
@@ -118,7 +121,8 @@ interface HomeActions : LiveSessionActions {
  * the controller's adopted stream (its config stays for Fit while a window is too large).
  * [destination], [tab], [navKey] and [stackKeys] come from one
  * [NavState][dev.bugobliterator.itermbuddy.ui.NavState], so they always agree; [chatsAttention]
- * is the Chats item's dot; [claudeTip] shows the Sessions list's `\(status)` tip. The chat
+ * is the Chats item's dot; [claudeTip] shows the Sessions list's `\(status)` tip; [pasteKeys] is
+ * Settings' "Send / * + = as paste" switch. The chat
  * destinations collect their own flows from [ChatsHome].
  */
 data class HomeModel(
@@ -141,6 +145,7 @@ data class HomeModel(
     val navKey: String = "",
     val stackKeys: Set<String> = emptySet(),
     val claudeTip: Boolean = false,
+    val pasteKeys: Boolean = true,
 )
 
 /**
@@ -222,6 +227,8 @@ private fun HomeDestinationView(destination: HomeDestination, model: HomeModel, 
                 debugBuild = model.debugBuild,
                 videoStatsShown = model.videoStatsShown,
                 onVideoStatsShownChange = actions::setVideoStatsShown,
+                pasteKeys = model.pasteKeys,
+                onPasteKeysChange = actions::setPasteKeys,
                 onBack = actions::back,
                 onUnpair = actions::unpair,
                 modifier = modifier,
