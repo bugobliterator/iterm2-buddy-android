@@ -84,6 +84,9 @@ import org.junit.Test
  * - **keys**: Page Down, Down ×5 and Space through `sendKey` (the browser key path), on both pages;
  * - **key drag**: the app's drag with "Scroll web pages with keys" on, with the window moved (where
  *   raw scrolls land off target), on both pages, without and then with a tap first;
+ * - **slow key drag**: a slow phone drag through the keys at the moved window, the page's scrollY
+ *   against the finger's travel in CSS px (the keys should follow it within half a line, not run
+ *   to twice as far);
  * - **calibrate**: how far one arrow, bursts of arrows at 0 to 250 ms gaps, and Page Down/Up move.
  *
  * Every result is a `browser:` line on stdout: the stream's size and scale, each step's deltas and
@@ -198,6 +201,7 @@ class RealIterm2BrowserTest {
         probe.moved(scale, moveWindow)
         // Still at the last (most offset) window position: the app's drag through the key path.
         probe.keyDrag(keysDriver)
+        probe.slowKeyDrag(keysDriver, scale)
         if (!moveWindow(0, 0)) line("could not move the window back to (0, 0)")
         probe.drag(scale)
         probe.small()
@@ -568,6 +572,33 @@ class RealIterm2BrowserTest {
             }
         }
 
+        /**
+         * A slow drag through the keys ([keysDriver]) at the window's current (moved) place: 900
+         * view px up at about 190 view px/s (3 px every 16 ms, slower than the keys' pace), then
+         * the page's scrollY against the finger's travel in CSS px (view px × image px per view
+         * px at a phone's fit ÷ the frame [scale]), and the keys WebKit saw.
+         */
+        suspend fun slowKeyDrag(keysDriver: BrowserDriver, scale: Double) {
+            val density = (w / PHONE_WIDTH).toFloat()
+            val step = navigate("slowkeydrag")
+            val before = server.scrollY(step)
+            val keysBefore = server.count(step, "key")
+            keysDriver.touchDown()
+            repeat(SLOW_DRAG_EVENTS) {
+                keysDriver.scroll(0f, -SLOW_DRAG_STEP_PX, density, 1f, (w / 2).toFloat(), (h / 2).toFloat())
+                delay(EVENT_GAP)
+            }
+            val after = server.settledScrollY(step)
+            val finger = SLOW_DRAG_EVENTS * SLOW_DRAG_STEP_PX * density / scale
+            val keys = server.count(step, "key") - keysBefore
+            report(
+                fmt(
+                    "slow key drag: finger %.0f CSS px up over %d ms: scrollY %.0f -> %.0f (%+.0f CSS px, %.2f of the finger), %d keydown events",
+                    finger, SLOW_DRAG_EVENTS * EVENT_GAP.inWholeMilliseconds, before, after, after - before, (after - before) / finger, keys,
+                ),
+            )
+        }
+
         /** How far one arrow, bursts of five arrows at a few gaps, and one Page Down/Up scroll the document. */
         suspend fun calibrateKeys() {
             val step = navigate("calibrate")
@@ -754,6 +785,8 @@ class RealIterm2BrowserTest {
 
         const val PHONE_WIDTH = 1080.0
         const val DRAG_EVENTS = 30
+        const val SLOW_DRAG_EVENTS = 300
+        const val SLOW_DRAG_STEP_PX = 3f
         val EVENT_GAP = 16.milliseconds
         const val SMALL_STEPS = 20
         val FLUSH_GAP = 40.milliseconds

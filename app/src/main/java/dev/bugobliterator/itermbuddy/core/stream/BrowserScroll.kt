@@ -2,7 +2,6 @@ package dev.bugobliterator.itermbuddy.core.stream
 
 import kotlin.math.abs
 import kotlin.math.hypot
-import kotlin.math.pow
 import kotlin.math.truncate
 
 /**
@@ -22,9 +21,12 @@ data class ScrollStep(val x: Double, val y: Double, val deltaX: Int, val deltaY:
  *   `imagePixelsPerScrollPoint`, 2246-2250), for drags and fling velocities alike, where
  *   `imagePxPerViewPx` is the image's density at zoom 1 (Fit) and `zoom` the current zoom, divided
  *   separately.
- * - A fling coasts: on each [flush] its velocity adds `velocity × elapsed`, then decays by
- *   `0.998^elapsedMs` (UIScrollView's normal deceleration), and stops below 30 image px/s. Each
- *   flush counts at most 100 ms, as iOS caps a display-link step (2337-2350).
+ * - A fling coasts along the app's one fling decay ([FlingCurve], Android's spline fling, the
+ *   feel of any Android list; iOS uses UIScrollView's 0.998/ms), computed in screen px at the
+ *   screen's density and scaled to image px: each [flush] adds the curve's travel since the last
+ *   one, so steps shrink smoothly as it slows and stop at the curve's end. Each flush counts at
+ *   most 100 ms, as iOS caps a display-link step (2337-2350). A release slower than
+ *   [MIN_FLING_DP_PER_SEC] does not coast.
  * - A new drag stops a fling (iOS zeroes the velocity when a pan begins); [stopFling] stops it and
  *   keeps the travel not yet sent (a tap, 2193); [cancel] drops both (a pinch, `stopBrowserScrolling`).
  *
@@ -36,12 +38,12 @@ class BrowserScrollAccumulator {
     private var pendingY = 0.0
     private var pointX = 0.0
     private var pointY = 0.0
-    private var velocityX = 0.0
-    private var velocityY = 0.0
-    private var lastFlushMillis = 0L
+    private var fling: FlingStepper? = null
+    private var flingX = 0.0
+    private var flingY = 0.0
 
     /** Whether a fling is still coasting. */
-    val isFlinging: Boolean get() = velocityX != 0.0 || velocityY != 0.0
+    val isFlinging: Boolean get() = fling != null
 
     /**
      * Adds a drag of ([dxViewPx], [dyViewPx]) view pixels, at the image's density at zoom 1 (Fit)
@@ -60,16 +62,26 @@ class BrowserScrollAccumulator {
 
     /**
      * Starts coasting at a release velocity of ([velocityXViewPxPerSec], [velocityYViewPxPerSec])
-     * view px/s, scaled to image px/s as [drag] scales distance, from [nowMillis]; a velocity
-     * already below 30 image px/s does not coast. It scrolls the page under the last drag's point.
+     * view (screen) px/s on a screen of [densityPxPerDp] px per dp, from [nowMillis], along a
+     * [FlingCurve] whose travel is scaled to image px as [drag] scales distance; a release below
+     * [MIN_FLING_DP_PER_SEC] does not coast. It scrolls the page under the last drag's point.
      */
-    fun fling(velocityXViewPxPerSec: Float, velocityYViewPxPerSec: Float, imagePxPerViewPx: Float, zoom: Float, nowMillis: Long) {
+    fun fling(
+        velocityXViewPxPerSec: Float,
+        velocityYViewPxPerSec: Float,
+        imagePxPerViewPx: Float,
+        zoom: Float,
+        nowMillis: Long,
+        densityPxPerDp: Float = 1f,
+    ) {
         val scale = scale(imagePxPerViewPx, zoom) ?: return
         if (!velocityXViewPxPerSec.isFinite() || !velocityYViewPxPerSec.isFinite()) return
-        velocityX = velocityXViewPxPerSec * scale
-        velocityY = velocityYViewPxPerSec * scale
-        lastFlushMillis = nowMillis
-        if (hypot(velocityX, velocityY) < MINIMUM_VELOCITY) stopFling()
+        stopFling()
+        val speed = hypot(velocityXViewPxPerSec, velocityYViewPxPerSec)
+        val curve = FlingCurve.orNull(speed, densityPxPerDp) ?: return
+        flingX = velocityXViewPxPerSec / speed * scale
+        flingY = velocityYViewPxPerSec / speed * scale
+        fling = FlingStepper(curve, MAX_STEP_MILLIS).also { it.start(nowMillis) }
     }
 
     /** Sets the image point a fling scrolls at, for a fling with no drag before it. */
@@ -84,15 +96,11 @@ class BrowserScrollAccumulator {
      * flush (toward zero), keeping the fraction; null when both are 0.
      */
     fun flush(nowMillis: Long): ScrollStep? {
-        val elapsedMillis = (nowMillis - lastFlushMillis).coerceIn(0, MAX_STEP_MILLIS)
-        lastFlushMillis = nowMillis
-        if (isFlinging) {
-            pendingX += velocityX * elapsedMillis / 1000.0
-            pendingY += velocityY * elapsedMillis / 1000.0
-            val decay = DECELERATION.pow(elapsedMillis.toDouble())
-            velocityX *= decay
-            velocityY *= decay
-            if (hypot(velocityX, velocityY) < MINIMUM_VELOCITY) stopFling()
+        fling?.let { coast ->
+            val travel = coast.advance(nowMillis).toDouble()
+            pendingX += travel * flingX
+            pendingY += travel * flingY
+            if (coast.isFinished) stopFling()
         }
         val sendX = truncate(pendingX)
         val sendY = truncate(pendingY)
@@ -104,8 +112,7 @@ class BrowserScrollAccumulator {
 
     /** Stops a fling; travel not yet flushed stays. */
     fun stopFling() {
-        velocityX = 0.0
-        velocityY = 0.0
+        fling = null
     }
 
     /** Drops the travel not yet flushed and any fling. */
@@ -121,12 +128,6 @@ class BrowserScrollAccumulator {
     }
 
     private companion object {
-        /** UIScrollView's normal deceleration: the velocity kept per millisecond. */
-        const val DECELERATION = 0.998
-
-        /** A fling below this many image px/s stops. */
-        const val MINIMUM_VELOCITY = 30.0
-
         /** The longest step one flush counts, as iOS caps its display-link step at 0.1 s. */
         const val MAX_STEP_MILLIS = 100L
     }
@@ -141,18 +142,33 @@ enum class ScrollKey { LINE_UP, LINE_DOWN, PAGE_UP, PAGE_DOWN }
  * scrolls whatever has focus on the page, wherever the window is.
  *
  * Travel uses the [ScrollStep] sign (positive moves the content down: the page scrolls up, so
- * the keys go up). [next] hands over at most one key: Page Up/Down once at least half a page
- * ([pagePx]) is pending, else an arrow once at least half a line ([linePx]) is; each takes its
- * size off the pending travel but never past zero, so rounding never sends a key back the other
- * way. The backlog is capped at [MAX_BACKLOG_PAGES] pages, so a long fling does not keep paging
- * long after the finger has gone. Not thread-safe; the caller serialises calls.
+ * the keys go up). [next] hands over at most one key, and keeps the page within half a line of
+ * the finger:
+ *
+ * - **Page** Up/Down once at least a page ([pagePx]) less half a line ([linePx]) is pending;
+ * - else an **arrow** once at least half a line is.
+ *
+ * Each key takes its whole size off the pending travel, signed, so a key that overshoots (an
+ * arrow for 0.6 of a line) is paid back by the travel that follows: a slow drag scrolls as far as
+ * the finger went, within half a line, never twice as far. What is left is clamped to just inside
+ * half a line either way, so rounding never fires a key back the other way. Travel against keys
+ * still owed (a drag reversing a fling's backlog) drops them first ([add]). The backlog is capped
+ * at [MAX_BACKLOG_PAGES] pages, so a long fling does not keep paging long after the finger has
+ * gone. Not thread-safe; the caller serialises calls.
  */
 class KeyScrollAccumulator {
     private var pending = 0.0
 
-    /** Adds [deltaPx] encoded px of vertical travel; [pagePx] bounds the backlog. */
-    fun add(deltaPx: Double, pagePx: Double) {
-        if (!deltaPx.isFinite()) return
+    /** The travel not yet handed over as keys, encoded px (positive: content down). */
+    val pendingPx: Double get() = pending
+
+    /**
+     * Adds [deltaPx] encoded px of vertical travel for lines of [linePx]; [pagePx] bounds the
+     * backlog. Travel against a key still owed ([hasWork]) drops the backlog first.
+     */
+    fun add(deltaPx: Double, linePx: Double, pagePx: Double) {
+        if (!deltaPx.isFinite() || deltaPx == 0.0) return
+        if (pending != 0.0 && (deltaPx > 0) != (pending > 0) && hasWork(linePx)) pending = 0.0
         val cap = if (pagePx.isFinite() && pagePx > 0) pagePx * MAX_BACKLOG_PAGES else Double.MAX_VALUE
         pending = (pending + deltaPx).coerceIn(-cap, cap)
     }
@@ -166,11 +182,12 @@ class KeyScrollAccumulator {
         val up = pending > 0
         val size = abs(pending)
         val (key, step) = when {
-            size >= pagePx / 2 -> (if (up) ScrollKey.PAGE_UP else ScrollKey.PAGE_DOWN) to pagePx
+            pagePx > linePx && size >= pagePx - linePx / 2 -> (if (up) ScrollKey.PAGE_UP else ScrollKey.PAGE_DOWN) to pagePx
             size >= linePx / 2 -> (if (up) ScrollKey.LINE_UP else ScrollKey.LINE_DOWN) to linePx
             else -> return null
         }
-        val left = maxOf(0.0, size - step)
+        // Just inside half a line the other way, so the overshoot never fires a key back.
+        val left = maxOf(size - step, -(linePx / 2) * INSIDE)
         pending = if (up) left else -left
         return key
     }
@@ -182,5 +199,8 @@ class KeyScrollAccumulator {
 
     private companion object {
         const val MAX_BACKLOG_PAGES = 2.0
+
+        /** "Just inside" half a line: a remainder of exactly half a line would fire. */
+        const val INSIDE = 1 - 1e-6
     }
 }
