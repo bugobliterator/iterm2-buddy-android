@@ -103,6 +103,8 @@ class KeystorePairingStoreTest {
                 .putString(SharedPrefsBlobFile.BLOB_KEY, Base64.getEncoder().encodeToString(oldBlob))
                 .commit(),
         )
+        // Loading it finds the key gone (proof of bad data) and wipes, as every other case here.
+        assertNull(store.load())
         assertCleared()
     }
 
