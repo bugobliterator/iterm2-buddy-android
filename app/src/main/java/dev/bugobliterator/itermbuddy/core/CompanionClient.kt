@@ -1,6 +1,6 @@
 package dev.bugobliterator.itermbuddy.core
 
-import android.util.Log
+import dev.bugobliterator.itermbuddy.applog.AppLog
 import dev.bugobliterator.itermbuddy.core.chat.ChatInput
 import dev.bugobliterator.itermbuddy.core.chat.ChatSink
 import dev.bugobliterator.itermbuddy.core.noise.DEFAULT_MAX_MESSAGE_BYTES
@@ -222,7 +222,7 @@ class CompanionClient internal constructor(
         endpointsFor: (String) -> RelayEndpoints? = { RelayEndpoints.forOrigin(it) },
         timeouts: ClientTimeouts = ClientTimeouts(),
         random: Random = Random.Default,
-        log: (String) -> Unit = { Log.i(TAG, it) },
+        log: (String) -> Unit = { AppLog.i(TAG, it) },
         streamSink: StreamSink? = null,
         chatSink: ChatSink? = null,
         maxRawChatBytes: Int = DEFAULT_MAX_RAW_CHAT_BYTES,
