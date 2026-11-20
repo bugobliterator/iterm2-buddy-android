@@ -23,6 +23,7 @@ import dev.bugobliterator.itermbuddy.applog.logSummary
 import dev.bugobliterator.itermbuddy.core.input.InputTarget
 import dev.bugobliterator.itermbuddy.core.input.KeyEvent
 import dev.bugobliterator.itermbuddy.core.sessions.SessionSummary
+import dev.bugobliterator.itermbuddy.core.stream.FitViewport
 import dev.bugobliterator.itermbuddy.core.stream.pingActiveLink
 import dev.bugobliterator.itermbuddy.ui.AppRoot
 import dev.bugobliterator.itermbuddy.ui.AppTheme
@@ -79,8 +80,11 @@ class MainActivity : ComponentActivity() {
 
         override fun retry() = app.home.controller.retry()
 
-        override fun fitToPhone(sessionGuid: String, viewportWidthPx: Int, viewportHeightPx: Int) =
-            app.fitToPhone(sessionGuid, viewportWidthPx, viewportHeightPx)
+        override fun setFitToPhone(enabled: Boolean) = app.setFitToPhone(enabled)
+
+        override fun fitViewport(viewport: FitViewport) = app.autoFit.setViewport(viewport)
+
+        override fun clearFitViewport(sessionGuid: String) = app.autoFit.clearViewport(sessionGuid)
 
         override fun setVideoStatsShown(shown: Boolean) = app.setVideoStatsShown(shown)
 
@@ -145,6 +149,7 @@ class MainActivity : ComponentActivity() {
             app.browser,
             latency = app.latency,
             ping = { pingActiveLink(sessions.client, sessions.controller.activeStream.value) },
+            fitNotices = app.autoFit.notices,
         )
         val debugBuild = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         // The live view reads the stream's session and config; liveTop moves with the output, so
@@ -172,6 +177,7 @@ class MainActivity : ComponentActivity() {
             val claudeTip by sessions.claudeTip.shown.collectAsStateWithLifecycle()
             val pasteKeys by sessions.pasteKeys.enabled.collectAsStateWithLifecycle()
             val scrollKeys by sessions.scrollKeys.enabled.collectAsStateWithLifecycle()
+            val fitToPhone by sessions.fitToPhone.enabled.collectAsStateWithLifecycle()
             val keyTrace by app.keyTrace.enabled.collectAsStateWithLifecycle()
             val decoderLowLatency by app.decoderLowLatency.collectAsStateWithLifecycle()
             AppTheme {
@@ -181,7 +187,7 @@ class MainActivity : ComponentActivity() {
                         state, nav.destination, tree, live, unpairing, unpairFailed, version, relayOrigin,
                         activeStream, video, debugBuild, videoStatsShown, query, macStatus, nav.tab, chatsAttention,
                         nav.key, nav.stackKeys, claudeTip, pasteKeys, scrollKeys, keyTrace,
-                        decoderLowLatency,
+                        decoderLowLatency, fitToPhone,
                     ),
                     homeActions = homeActions,
                     chats = sessions.chatsHome,

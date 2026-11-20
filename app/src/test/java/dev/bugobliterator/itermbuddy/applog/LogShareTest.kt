@@ -28,6 +28,7 @@ class LogShareTest {
         paired = true,
         pasteKeys = true,
         scrollKeys = false,
+        fitToPhone = true,
         keyTrace = true,
         keyTraceLinesPresent = true,
     )
@@ -46,6 +47,7 @@ class LogShareTest {
             Paired: yes
             Send / * + = as paste: on
             Scroll web pages with keys: off
+            Fit to phone: on
             Include typed-key trace: on
             Key-trace lines present: yes
             Line format: local time | level | tag | message
@@ -71,7 +73,7 @@ class LogShareTest {
             setOf(
                 "createdAt", "appVersionName", "appVersionCode", "debugBuild", "androidRelease", "sdkInt",
                 "deviceManufacturer", "deviceModel", "protocolRevision", "minimumPeer", "macRevision", "paired",
-                "pasteKeys", "scrollKeys", "keyTrace", "keyTraceLinesPresent",
+                "pasteKeys", "scrollKeys", "fitToPhone", "keyTrace", "keyTraceLinesPresent",
             ),
             fields,
         )

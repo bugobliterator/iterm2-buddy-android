@@ -247,7 +247,6 @@ class BrowserCanvasDeviceTest {
     private object NoActions : LiveSessionActions {
         override fun back() = Unit
         override fun retry() = Unit
-        override fun fitToPhone(sessionGuid: String, viewportWidthPx: Int, viewportHeightPx: Int) = Unit
         override fun setVideoStatsShown(shown: Boolean) = Unit
         override fun key(target: InputTarget, event: KeyEvent) = Unit
         override fun paste(target: InputTarget, text: String) = Unit

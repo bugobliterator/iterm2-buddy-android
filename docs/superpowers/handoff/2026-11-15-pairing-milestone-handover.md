@@ -125,6 +125,32 @@ Notes from that task:
 - **Open:** the on-device checks in `docs/reports/browser-sessions-on-device.md` (Fill the
   screen, Scroll with keys).
 
+## Fit to phone as a toggle (2026-11-20)
+
+- **Owner decision:** ⤢ is an on/off toggle (`FitToPhoneSetting`, a `StoredSwitch`, key
+  `fit-to-phone` in `input-settings`), off by default, one global value, back to off on unpair (as
+  the other per-owner switches, `wireHome`'s unpair list). It replaces the one-shot Fit; the
+  too-large overlay's Fit turns it on. Off never undoes a resize.
+- **`AutoFitter`** (`core/stream/AutoFit.kt`, built in `CompanionApp`): while on, fits the live
+  terminal session (`fitGrid`) when its view opens or its stream goes live (reopen, reconnect,
+  another session), when the toggle turns on, and after a rotation or other viewport change once
+  the viewport holds still for 400 ms (`FIT_SETTLE_DELAY`). The keyboard never resizes: the fit
+  viewport is measured with the keyboard hidden. It acts once per target per stream (it never
+  fights a later Mac-side resize), skips a grid already at the target or where the last fit of
+  that session to the same target ended, and never touches browser sessions or `canResize` false.
+- **Owner report, the fit filled only ~75 % of a tall phone:** iTerm2 caps row growth to its
+  screens (`PseudoTerminal.m` `safelySetSessionSize:rows:columns:`, rows only), and a split pane
+  shares the window's rows. After a fit the `AutoFitter` reads the next config; when the rows came
+  back more than 5 % short it sends one corrective resize with fewer columns
+  (`correctedFitGrid`: `floor(rows × viewportW/viewportH × cellH/cellW)`, at least 40) and keeps
+  the rows. One step per fit, never a loop. When the grid does not change within 4 s, or
+  `canResize` is false, the view shows a brief message. Requested and resulting grids go to the
+  app log (`fit to phone for <guid>: …`).
+- **Real-Mac report:** `RealIterm2FitTest` (`fit:` lines) runs the fitter on the runner's small
+  screen for 1080×2200, landscape, and a split pane.
+- **Open:** the on-device check (Fit to phone in `docs/reports/live-session-on-device.md`), and
+  the first real-Mac `fit:` lines.
+
 ## Plan deviations already ruled on
 
 - Plan tasks are named, not numbered. Hand each implementer only "Global Constraints", "Review Focus" and its own `### Task:` section, never the whole plan.

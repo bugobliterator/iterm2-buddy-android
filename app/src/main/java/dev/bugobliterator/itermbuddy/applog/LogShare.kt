@@ -31,6 +31,7 @@ data class LogHeader(
     val paired: Boolean?,
     val pasteKeys: Boolean,
     val scrollKeys: Boolean,
+    val fitToPhone: Boolean,
     val keyTrace: Boolean,
     val keyTraceLinesPresent: Boolean,
 ) {
@@ -45,6 +46,7 @@ data class LogHeader(
         appendLine("Paired: ${when (paired) { true -> "yes"; false -> "no"; null -> "unknown" }}")
         appendLine("Send / * + = as paste: ${onOff(pasteKeys)}")
         appendLine("Scroll web pages with keys: ${onOff(scrollKeys)}")
+        appendLine("Fit to phone: ${onOff(fitToPhone)}")
         appendLine("Include typed-key trace: ${onOff(keyTrace)}")
         appendLine("Key-trace lines present: ${if (keyTraceLinesPresent) "yes" else "no"}")
         appendLine("Line format: local time | level | tag | message")

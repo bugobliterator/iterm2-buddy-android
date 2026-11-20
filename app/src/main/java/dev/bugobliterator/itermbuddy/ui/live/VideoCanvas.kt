@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.Velocity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.bugobliterator.itermbuddy.core.stream.BrowserDriver
+import dev.bugobliterator.itermbuddy.core.stream.FitNotice
 import dev.bugobliterator.itermbuddy.core.stream.HistoryTileStore
 import dev.bugobliterator.itermbuddy.core.stream.LatencyMeter
 import dev.bugobliterator.itermbuddy.core.stream.LiveViewState
@@ -58,6 +59,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emptyFlow
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -78,6 +80,8 @@ class LiveVideoSource(
     val browser: BrowserDriver? = null,
     val latency: LatencyMeter? = null,
     val ping: suspend () -> Boolean = { false },
+    /** Fit to phone's brief messages ([AutoFitter.notices][dev.bugobliterator.itermbuddy.core.stream.AutoFitter.notices]). */
+    val fitNotices: Flow<FitNotice> = emptyFlow(),
 ) {
     /** [videoVisible] now, for the view of [sessionGuid]. */
     fun visible(sessionGuid: String): Boolean = videoVisible(state, output.stats, sessionGuid)

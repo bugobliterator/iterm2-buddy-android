@@ -1,6 +1,5 @@
 package dev.bugobliterator.itermbuddy.core.stream
 
-import dev.bugobliterator.itermbuddy.core.wire.PhoneMessage
 import kotlin.math.ceil
 import kotlin.math.floor
 
@@ -68,26 +67,39 @@ fun fitGrid(
 private fun framePixels(cells: Int, size: Double, margin: Double): Int =
     ceil(cells * size + 2 * margin).coerceIn(0.0, Int.MAX_VALUE.toDouble()).toInt()
 
+/** The fewest columns [correctedFitGrid] asks for: narrower than this, a shell line is too short to use. */
+const val FIT_MIN_CORRECTED_COLUMNS = 40
+
+/** [correctedFitGrid] leaves a fit alone unless the Mac capped its rows by more than this share (a row or two is not worth a resize). */
+const val FIT_CORRECTION_MIN_SHORTFALL = 0.05
+
 /**
- * Fit to phone: sends `resizeSession` with [fitGrid] for [stream]'s session on [stream]'s link
- * only (a link that has ended sends nothing and throws, as [StreamLink.send]). Returns the grid
- * sent, or null when there is none (no config yet, a browser, or a window that cannot resize).
- * Only an explicit tap calls this; nothing ever undoes it.
+ * The one corrective step after a fit the Mac capped. iTerm2 grows a window's rows only as far as
+ * its screens allow (`PseudoTerminal.m` `safelySetSessionSize:rows:columns:`, "Cap growth if it
+ * exceeds the maximum", rows only; the columns are taken as asked), and a split pane shares the
+ * window's height with its siblings, so a tall phone's [requested] rows can come back as fewer
+ * [achieved] rows with all the columns: a grid wider than the phone, drawn with black below it.
  *
- * @throws dev.bugobliterator.itermbuddy.core.CompanionRequestException as [StreamLink.send].
+ * Returns the grid that fills the viewport at the [achieved] rows: those rows and
+ * `floor(rows × viewportW / viewportH × cellHeight / cellWidth)` columns (the cell from [config],
+ * the config that reported [achieved], as [fitGrid] reads it), at least [FIT_MIN_CORRECTED_COLUMNS].
+ * Null when no correction applies: the rows were not capped by more than
+ * [FIT_CORRECTION_MIN_SHORTFALL] of [requested]'s, the result would not be narrower than
+ * [achieved], the viewport is empty or the cell unreadable.
  */
-suspend fun fitToPhone(
-    link: StreamLink,
-    stream: ActiveStream,
+fun correctedFitGrid(
+    requested: Grid,
+    achieved: Grid,
     viewportWidthPx: Int,
     viewportHeightPx: Int,
-    decoderMax: Pair<Int, Int>?,
-    sizeSupported: ((Int, Int) -> Boolean)? = null,
+    config: StreamConfig,
 ): Grid? {
-    val config = stream.config ?: return null
-    val grid = fitGrid(viewportWidthPx, viewportHeightPx, config, decoderMax, sizeSupported) ?: return null
-    link.send(PhoneMessage.ResizeSession(stream.sessionGuid, grid.columns, grid.rows), onLink = stream.linkId)
-    return grid
+    if (achieved.rows <= 0 || achieved.rows >= requested.rows * (1 - FIT_CORRECTION_MIN_SHORTFALL)) return null
+    if (viewportWidthPx <= 0 || viewportHeightPx <= 0) return null
+    val cell = effectiveCellGeometry(config) ?: return null
+    val fitting = achieved.rows.toDouble() * viewportWidthPx / viewportHeightPx * cell.cellHeight / cell.cellWidth
+    val columns = maxOf(FIT_MIN_CORRECTED_COLUMNS, floorAtLeastOne(fitting))
+    return if (columns < achieved.columns) Grid(columns, achieved.rows) else null
 }
 
 /**

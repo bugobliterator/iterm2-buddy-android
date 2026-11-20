@@ -21,7 +21,6 @@ import dev.bugobliterator.itermbuddy.applog.keyTraceGate
 import dev.bugobliterator.itermbuddy.applog.keyTraceSink
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.CompanionClient
-import dev.bugobliterator.itermbuddy.core.CompanionRequestException
 import dev.bugobliterator.itermbuddy.core.chat.ChatRepository
 import dev.bugobliterator.itermbuddy.core.chat.FileChatSeenStore
 import dev.bugobliterator.itermbuddy.core.input.InputSender
@@ -36,7 +35,8 @@ import dev.bugobliterator.itermbuddy.core.stream.SelectionDriver
 import dev.bugobliterator.itermbuddy.core.sessions.SessionTreeRepository
 import dev.bugobliterator.itermbuddy.core.sessions.SharedPrefsClaudeTipStore
 import dev.bugobliterator.itermbuddy.core.stream.StreamController
-import dev.bugobliterator.itermbuddy.core.stream.fitToPhone
+import dev.bugobliterator.itermbuddy.core.stream.AutoFitter
+import dev.bugobliterator.itermbuddy.core.stream.SharedPrefsFitToPhoneStore
 import dev.bugobliterator.itermbuddy.core.wire.ProtocolRevision
 import dev.bugobliterator.itermbuddy.store.KeystorePairingStore
 import dev.bugobliterator.itermbuddy.ui.chats.BitmapImageDecoder
@@ -149,6 +149,10 @@ class CompanionApp : Application() {
     lateinit var browser: BrowserDriver
         private set
 
+    /** Fit to phone while the live bar's toggle is on; see the class comment. */
+    lateinit var autoFit: AutoFitter
+        private set
+
     /** The rolling on-device log (`filesDir/logs`); see [LogFileSink]. */
     lateinit var logFile: LogFileSink
         private set
@@ -202,27 +206,10 @@ class CompanionApp : Application() {
         video.setLowLatencyKeys(enabled)
     }
 
-    /**
-     * Fit to phone for [sessionGuid], from an explicit tap only: sends `resizeSession` with
-     * [fitGrid][dev.bugobliterator.itermbuddy.core.stream.fitGrid] on the active stream's link
-     * ([fitToPhone]), in the app scope so leaving the view does not cut it short. Nothing is sent
-     * unless the active stream is that session's; nothing ever undoes it (owner decision). Logs the
-     * GUID and the grid only.
-     */
-    fun fitToPhone(sessionGuid: String, viewportWidthPx: Int, viewportHeightPx: Int) {
-        val stream = home.controller.activeStream.value
-        if (stream == null || stream.sessionGuid != sessionGuid) {
-            AppLog.i(STREAM_TAG, "fit to phone for $sessionGuid skipped: not the active stream")
-            return
-        }
-        scope.launch {
-            try {
-                val grid = fitToPhone(client, stream, viewportWidthPx, viewportHeightPx, video.maxSize(), video::sizeSupported)
-                AppLog.i(STREAM_TAG, "fit to phone for $sessionGuid: ${grid?.let { "${it.columns}x${it.rows}" } ?: "no grid"}")
-            } catch (e: CompanionRequestException) {
-                AppLog.w(STREAM_TAG, "fit to phone for $sessionGuid failed: ${e.message}")
-            }
-        }
+    /** The live bar's Fit to phone toggle: on fits now and keeps fitting ([AutoFitter]); off undoes nothing. */
+    fun setFitToPhone(enabled: Boolean) {
+        AppLog.i(STREAM_TAG, "fit to phone ${if (enabled) "on" else "off"}")
+        home.fitToPhone.set(enabled)
     }
 
     override fun onCreate() {
@@ -272,6 +259,7 @@ class CompanionApp : Application() {
             claudeTipStore = SharedPrefsClaudeTipStore(this),
             pasteKeysStore = SharedPrefsPasteKeysStore(this),
             scrollKeysStore = SharedPrefsScrollKeysStore(this),
+            fitToPhoneStore = SharedPrefsFitToPhoneStore(this),
         )
         input = InputSender(
             link = home.client,
@@ -300,6 +288,16 @@ class CompanionApp : Application() {
             // Read at each flush: Settings' "Scroll web pages with keys".
             scrollKeys = { home.scrollKeys.enabled.value },
             log = { AppLog.i(BROWSER_TAG, it) },
+        )
+        autoFit = AutoFitter(
+            link = home.client,
+            enabled = home.fitToPhone.enabled,
+            active = home.controller.activeStream,
+            decoderMax = video::maxSize,
+            sizeSupported = video::sizeSupported,
+            scope = scope,
+            // Session GUIDs and grid sizes only.
+            log = { AppLog.i(STREAM_TAG, it) },
         )
         // Application.onCreate runs on the main thread, as addObserver requires.
         ProcessLifecycleOwner.get().lifecycle.addObserver(
@@ -415,6 +413,7 @@ class CompanionApp : Application() {
             paired = client.paired.value,
             pasteKeys = home.pasteKeys.enabled.value,
             scrollKeys = home.scrollKeys.enabled.value,
+            fitToPhone = home.fitToPhone.enabled.value,
             keyTrace = keyTrace.enabled.value,
             keyTraceLinesPresent = keyTraceLinesPresent,
         )

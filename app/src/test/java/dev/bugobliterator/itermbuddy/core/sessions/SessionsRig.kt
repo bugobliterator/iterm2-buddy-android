@@ -19,6 +19,8 @@ import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.decodeEnvelope
 import dev.bugobliterator.itermbuddy.core.input.InMemoryPasteKeysStore
 import dev.bugobliterator.itermbuddy.core.input.PasteKeysStore
+import dev.bugobliterator.itermbuddy.core.stream.FitToPhoneStore
+import dev.bugobliterator.itermbuddy.core.stream.InMemoryFitToPhoneStore
 import dev.bugobliterator.itermbuddy.fakemac.FakeChatMac
 import dev.bugobliterator.itermbuddy.fakemac.FakeMac
 import dev.bugobliterator.itermbuddy.fakemac.FakeRelay
@@ -56,6 +58,7 @@ import kotlin.time.Duration.Companion.seconds
  * @param sessionPollInterval the Sessions list's poll of the tree.
  * @param claudeTipStore where the `\(status)` tip's dismissal is kept.
  * @param pasteKeysStore where Settings' "Send / * + = as paste" switch is kept.
+ * @param fitToPhoneStore where the live bar's Fit to phone toggle is kept.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal class SessionsRig(
@@ -65,6 +68,7 @@ internal class SessionsRig(
     sessionPollInterval: Duration = 4.seconds,
     claudeTipStore: ClaudeTipStore = InMemoryClaudeTipStore(),
     pasteKeysStore: PasteKeysStore = InMemoryPasteKeysStore(),
+    fitToPhoneStore: FitToPhoneStore = InMemoryFitToPhoneStore(),
 ) {
     private val macKeys = newStaticKeyPair()
     val code = PairingCode(macKeys.second, "sessions-rig-pid", ORIGIN)
@@ -117,6 +121,7 @@ internal class SessionsRig(
         sessionPollInterval = sessionPollInterval,
         claudeTipStore = claudeTipStore,
         pasteKeysStore = pasteKeysStore,
+        fitToPhoneStore = fitToPhoneStore,
         // The tip's store work in virtual time, on the test's dispatcher.
         tipContext = EmptyCoroutineContext,
     )
