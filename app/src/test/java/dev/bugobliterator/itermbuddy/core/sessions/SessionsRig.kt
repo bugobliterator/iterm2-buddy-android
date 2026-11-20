@@ -17,6 +17,8 @@ import dev.bugobliterator.itermbuddy.core.stream.FakeVideoOutput
 import dev.bugobliterator.itermbuddy.core.stream.StreamController
 import dev.bugobliterator.itermbuddy.core.wire.MacMessage
 import dev.bugobliterator.itermbuddy.core.wire.decodeEnvelope
+import dev.bugobliterator.itermbuddy.core.input.InMemoryPasteKeysStore
+import dev.bugobliterator.itermbuddy.core.input.PasteKeysStore
 import dev.bugobliterator.itermbuddy.fakemac.FakeChatMac
 import dev.bugobliterator.itermbuddy.fakemac.FakeMac
 import dev.bugobliterator.itermbuddy.fakemac.FakeRelay
@@ -53,6 +55,7 @@ import kotlin.time.Duration.Companion.seconds
  * @param listSharingStopMillis how long the shared chat list keeps computing after its last reader.
  * @param sessionPollInterval the Sessions list's poll of the tree.
  * @param claudeTipStore where the `\(status)` tip's dismissal is kept.
+ * @param pasteKeysStore where Settings' "Send / * + = as paste" switch is kept.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal class SessionsRig(
@@ -61,6 +64,7 @@ internal class SessionsRig(
     listSharingStopMillis: Long = 5_000,
     sessionPollInterval: Duration = 4.seconds,
     claudeTipStore: ClaudeTipStore = InMemoryClaudeTipStore(),
+    pasteKeysStore: PasteKeysStore = InMemoryPasteKeysStore(),
 ) {
     private val macKeys = newStaticKeyPair()
     val code = PairingCode(macKeys.second, "sessions-rig-pid", ORIGIN)
@@ -112,6 +116,7 @@ internal class SessionsRig(
         listSharingStopMillis = listSharingStopMillis,
         sessionPollInterval = sessionPollInterval,
         claudeTipStore = claudeTipStore,
+        pasteKeysStore = pasteKeysStore,
         // The tip's store work in virtual time, on the test's dispatcher.
         tipContext = EmptyCoroutineContext,
     )

@@ -12,6 +12,7 @@ import dev.bugobliterator.itermbuddy.core.chat.ChatRepository
 import dev.bugobliterator.itermbuddy.core.chat.FileChatSeenStore
 import dev.bugobliterator.itermbuddy.core.input.InputSender
 import dev.bugobliterator.itermbuddy.core.input.InputTrace
+import dev.bugobliterator.itermbuddy.core.input.SharedPrefsPasteKeysStore
 import dev.bugobliterator.itermbuddy.core.input.isInputTarget
 import dev.bugobliterator.itermbuddy.core.stream.BrowserDriver
 import dev.bugobliterator.itermbuddy.core.stream.SelectionDriver
@@ -205,12 +206,15 @@ class CompanionApp : Application() {
             log = { Log.w(TAG, it) },
             chatLog = { Log.i(CHAT_TAG, it) },
             claudeTipStore = SharedPrefsClaudeTipStore(this),
+            pasteKeysStore = SharedPrefsPasteKeysStore(this),
         )
         input = InputSender(
             link = home.client,
             scope = scope,
             isCurrent = { target -> isInputTarget(home.controller.activeStream.value, target) },
             log = { Log.i(INPUT_TAG, it) },
+            // Read as each key is sent: the Settings switch "Send / * + = as paste".
+            pasteKeys = { home.pasteKeys.enabled.value },
         )
         selection = SelectionDriver(
             link = home.client,

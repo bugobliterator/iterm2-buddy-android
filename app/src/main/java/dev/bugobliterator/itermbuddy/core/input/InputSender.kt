@@ -56,6 +56,25 @@ fun isInputTarget(active: ActiveStream?, target: InputTarget): Boolean =
  *   sent only after every piece was sent **and** the target is still current at that moment, so
  *   failed or overtaken typing never submits.
  *
+ * - **Pasted keys** (owner decision 2026-11-20, the Settings switch "Send / * + = as paste", on by
+ *   default). While [pasteKeys] holds, each of [PASTED_KEYS] (`/ * + =`) in a `text` key event
+ *   with **no** modifiers, and in each typed piece of **Type then Return**, is sent as its own
+ *   one-character `pasteText` instead of a key: the text is split into runs ([splitPastedKeys]),
+ *   sent in order, so `a/b` is `text "a"`, `pasteText "/"`, `text "b"`. Why: iTerm2 3.7.7 turns
+ *   these four into the wrong key when the program enabled the kitty keyboard protocol or
+ *   modifyOtherKeys (Claude Code does): `/` arrives as `CSI 30:47;2u` (key U+001E with Shift), so
+ *   Claude Code draws nothing (`NSEvent.keyDown(forCharacter:)`'s reverse map,
+ *   `sources/Keyboard/VimKeyParser.swift:243-275`; see
+ *   `docs/reports/iterm2-companion-key-injection-bug.md`). A paste is written as text whatever
+ *   the keyboard mode (bracketed when the program asked). A one-character paste is written at
+ *   once on the Mac (`iTermPasteHelper.pasteLiteralEventUnconditionallyImmediately`: no
+ *   indicator, no timer), so the key sent after it is not overtaken. A key event with any modifier
+ *   (Ctrl+/) is sent as a key, unchanged, as is a key for a browser session's page ([key] with
+ *   `pasteKeys` false); the composer's **Paste** is unchanged. As with typed
+ *   pieces, each run after the first is sent only while the target is still current, and the item
+ *   stops at the first run that is stale, fails or times out. [pasteKeys] is read when the item
+ *   is sent.
+ *
  * Logs carry the item's kind (key, paste, typed draft), counts, link ids, watch epochs, GUIDs and
  * exception class names: never typed or pasted text, never which key (a special key's name is a
  * keystroke pattern), and never an exception's message (it may quote what it failed to send).
@@ -64,6 +83,8 @@ fun isInputTarget(active: ActiveStream?, target: InputTarget): Boolean =
  *
  * @param sendBound the bound on each send, 2 s by default.
  * @param typeChunkBytes the largest piece of a typed draft, in UTF-8 bytes ([TYPE_CHUNK_BYTES]).
+ * @param pasteKeys whether [PASTED_KEYS] are sent as pastes (see above); off unless given. The
+ *   app passes its Settings switch.
  */
 class InputSender(
     private val link: StreamLink,
@@ -72,13 +93,14 @@ class InputSender(
     private val log: (String) -> Unit,
     private val sendBound: Duration = 2.seconds,
     private val typeChunkBytes: Int = TYPE_CHUNK_BYTES,
+    private val pasteKeys: () -> Boolean = { false },
 ) {
     private sealed interface Item {
         val target: InputTarget
         val label: String
     }
 
-    private class KeyItem(override val target: InputTarget, val event: KeyEvent) : Item {
+    private class KeyItem(override val target: InputTarget, val event: KeyEvent, val pasteKeys: Boolean) : Item {
         override val label: String get() = "key"
     }
 
@@ -119,7 +141,11 @@ class InputSender(
         }
     }
 
-    fun key(target: InputTarget, event: KeyEvent) = enqueue(KeyItem(target, event))
+    /**
+     * A key for [target]. With [pasteKeys] false (a browser session's page: iTerm2 types its keys
+     * into the page, not through the garbling key mapper) it is always sent as a key.
+     */
+    fun key(target: InputTarget, event: KeyEvent, pasteKeys: Boolean = true) = enqueue(KeyItem(target, event, pasteKeys))
 
     fun paste(target: InputTarget, text: String) = enqueue(PasteItem(target, text))
 
@@ -174,7 +200,7 @@ class InputSender(
         }
         InputTrace.current.log { "sender: kept ${traceItem(item)} for ${target.sessionGuid} link ${target.linkId} watch ${target.watchEpoch}" }
         when (item) {
-            is KeyItem -> send(PhoneMessage.SendKey(target.sessionGuid, item.event), target, item.label)
+            is KeyItem -> sendKey(item.event, target, item.label, item.pasteKeys)
             is PasteItem -> send(PhoneMessage.PasteText(target.sessionGuid, item.text), target, item.label)
             is TypeItem -> typeThenReturn(item)
             is WheelItem -> send(item.message, target, item.label)
@@ -188,8 +214,7 @@ class InputSender(
         for ((index, piece) in pieces.withIndex()) {
             // The first piece was checked at dequeue; the rest are checked again before each send.
             val label = "typed piece ${index + 1}/${pieces.size}"
-            val sent = (index == 0 || isCurrent(target)) &&
-                send(PhoneMessage.SendKey(target.sessionGuid, KeyEvent(Key.Text(piece))), target, label)
+            val sent = (index == 0 || isCurrent(target)) && sendKey(KeyEvent(Key.Text(piece)), target, label)
             if (!sent) {
                 log("${item.label} for ${target.sessionGuid} stopped at piece ${index + 1}/${pieces.size}; Return not sent")
                 return
@@ -200,6 +225,36 @@ class InputSender(
         } else {
             log("Return after typed draft for ${target.sessionGuid} not sent: the target changed")
         }
+    }
+
+    /**
+     * Sends [event] as one `sendKey`, or, when it is [eligible], [pasteKeys] holds and it is text with no modifiers
+     * that has any of [PASTED_KEYS], as its runs in order ([splitPastedKeys]); each run after the
+     * first only while [target] is current. False at the first run not sent.
+     */
+    private suspend fun sendKey(event: KeyEvent, target: InputTarget, label: String, eligible: Boolean = true): Boolean {
+        val key = event.key
+        if (!eligible || key !is Key.Text || event.modifiers != KeyModifiers() || key.text.none { it in PASTED_KEYS } || !pasteKeys()) {
+            return send(PhoneMessage.SendKey(target.sessionGuid, event), target, label)
+        }
+        val runs = splitPastedKeys(key.text)
+        for ((index, run) in runs.withIndex()) {
+            val runLabel = "$label, run ${index + 1}/${runs.size}"
+            if (index > 0 && !isCurrent(target)) {
+                InputTrace.current.log { "sender: stopped before $runLabel: the target changed" }
+                log("$label for ${target.sessionGuid} stopped at run ${index + 1}/${runs.size}: the target changed")
+                return false
+            }
+            val message = if (run.pasted) {
+                InputTrace.current.log { "sender: pasted key ${codePoints(run.text)} as pasteText ($runLabel)" }
+                PhoneMessage.PasteText(target.sessionGuid, run.text)
+            } else {
+                InputTrace.current.log { "sender: typed run ${codePoints(run.text)} as sendKey ($runLabel)" }
+                PhoneMessage.SendKey(target.sessionGuid, KeyEvent(Key.Text(run.text)))
+            }
+            if (!send(message, target, runLabel)) return false
+        }
+        return true
     }
 
     /** An item for the opt-in [InputTrace]: its kind and its text as code points. */
@@ -235,6 +290,36 @@ class InputSender(
         const val TYPE_CHUNK_BYTES = 16 * 1024
         private val RETURN = KeyEvent(Key.Text("\n"))
     }
+}
+
+/**
+ * The characters sent as pastes when the Settings switch is on (see [InputSender]): exactly the
+ * four iTerm2 3.7.7 garbles under the kitty keyboard protocol and modifyOtherKeys, measured on a
+ * real Mac (every other printable ASCII character arrives right).
+ */
+const val PASTED_KEYS = "/*+="
+
+/** A run of typed text: one of [PASTED_KEYS] alone ([pasted]), or text with none of them. */
+data class TextRun(val text: String, val pasted: Boolean) {
+    override fun toString(): String = "TextRun(len=${text.length}, pasted=$pasted)"
+}
+
+/**
+ * [text] split into runs, in order: each of [PASTED_KEYS] a run of its own ([TextRun.pasted]),
+ * the text between them typed runs. Empty for empty text. The pasted characters are ASCII, so a
+ * split never falls inside a surrogate pair.
+ */
+fun splitPastedKeys(text: String): List<TextRun> {
+    val runs = mutableListOf<TextRun>()
+    var start = 0
+    for ((index, char) in text.withIndex()) {
+        if (char !in PASTED_KEYS) continue
+        if (index > start) runs += TextRun(text.substring(start, index), pasted = false)
+        runs += TextRun(char.toString(), pasted = true)
+        start = index + 1
+    }
+    if (start < text.length) runs += TextRun(text.substring(start), pasted = false)
+    return runs
 }
 
 /** Whether a composer draft has a line break (`\n` or `\r`): Paste ⏎ then pastes it with no Return. */

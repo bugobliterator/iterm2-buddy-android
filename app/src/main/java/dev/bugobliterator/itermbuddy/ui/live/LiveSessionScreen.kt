@@ -112,6 +112,13 @@ interface LiveSessionActions {
     /** A key for [target], through the app's one ordered input sender. */
     fun key(target: InputTarget, event: KeyEvent)
 
+    /**
+     * A key for a browser session's page [target], through the same sender: always a key, never
+     * a paste, whatever Settings' "Send / * + = as paste" (iTerm2 types a browser session's keys
+     * into the page itself, so they are not garbled, and its paste path is a terminal's).
+     */
+    fun browserKey(target: InputTarget, event: KeyEvent) = key(target, event)
+
     /** The composer's Paste for [target]. */
     fun paste(target: InputTarget, text: String)
 
