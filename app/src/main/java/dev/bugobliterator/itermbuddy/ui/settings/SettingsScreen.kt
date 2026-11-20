@@ -34,6 +34,8 @@ import androidx.compose.ui.unit.dp
 import dev.bugobliterator.itermbuddy.core.ClientState
 import dev.bugobliterator.itermbuddy.core.input.PASTE_KEYS_SUMMARY
 import dev.bugobliterator.itermbuddy.core.input.PASTE_KEYS_TITLE
+import dev.bugobliterator.itermbuddy.core.input.SCROLL_KEYS_SUMMARY
+import dev.bugobliterator.itermbuddy.core.input.SCROLL_KEYS_TITLE
 import dev.bugobliterator.itermbuddy.ui.UNPAIR_FAILED
 import dev.bugobliterator.itermbuddy.ui.connectionBanner
 import dev.bugobliterator.itermbuddy.video.VideoStats
@@ -56,7 +58,8 @@ internal fun decoderRowText(stats: VideoStats): String = stats.decoderName ?: st
  * Settings, reached from the home's overflow menu: the connection, the relay origin, Unpair
  * (confirmed first), the app version and the HEVC decoder ([decoder], [decoderRowText]). The
  * pairing screen's Connected content (status and Unpair) lives here now. The "Send / * + = as
- * paste" switch ([pasteKeys], [PASTE_KEYS_TITLE]) sets how the live view sends those four keys.
+ * paste" switch ([pasteKeys], [PASTE_KEYS_TITLE]) sets how the live view sends those four keys;
+ * "Scroll web pages with keys" ([scrollKeys], [SCROLL_KEYS_TITLE]) how a browser page scrolls.
  * Debug builds ([debugBuild]) also get the "Video stats" toggle for the live view's stats overlay.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -73,6 +76,8 @@ fun SettingsScreen(
     onVideoStatsShownChange: (Boolean) -> Unit,
     pasteKeys: Boolean,
     onPasteKeysChange: (Boolean) -> Unit,
+    scrollKeys: Boolean,
+    onScrollKeysChange: (Boolean) -> Unit,
     onBack: () -> Unit,
     onUnpair: () -> Unit,
     modifier: Modifier = Modifier,
@@ -107,6 +112,7 @@ fun SettingsScreen(
             Entry("App version", appVersion)
             Entry("Decoder", decoder)
             SwitchRow(PASTE_KEYS_TITLE, PASTE_KEYS_SUMMARY, pasteKeys, onPasteKeysChange)
+            SwitchRow(SCROLL_KEYS_TITLE, SCROLL_KEYS_SUMMARY, scrollKeys, onScrollKeysChange)
             if (debugBuild) SwitchRow("Video stats", summary = null, videoStatsShown, onVideoStatsShownChange)
         }
     }

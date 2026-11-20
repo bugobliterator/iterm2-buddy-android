@@ -19,19 +19,22 @@ const val PASTE_KEYS_SUMMARY =
         "Turn off if an app needs them as keys (for example / to search in vim)."
 
 /**
- * Where [PasteKeysSetting] keeps the switch. Holds one flag, no content. May do disk I/O: the
- * setting calls it off the main thread.
+ * Where a [StoredSwitch] keeps its flag. Holds one flag, no content. May do disk I/O: the switch
+ * calls it off the main thread.
  */
-interface PasteKeysStore {
-    /** The stored value; null when never set (the setting is then [PasteKeysSetting.DEFAULT]). */
+interface SwitchStore {
+    /** The stored value; null when never set (the switch is then at its default). */
     fun enabled(): Boolean?
 
     /** Stores [enabled]; null forgets it. */
     fun setEnabled(enabled: Boolean?)
 }
 
-/** A [PasteKeysStore] in memory only, for tests. Thread-safe. */
-class InMemoryPasteKeysStore(@Volatile private var value: Boolean? = null) : PasteKeysStore {
+/** Where [PasteKeysSetting] keeps the switch. */
+interface PasteKeysStore : SwitchStore
+
+/** A [SwitchStore] in memory only, for tests. Thread-safe. */
+open class InMemorySwitchStore(@Volatile private var value: Boolean? = null) : SwitchStore {
     override fun enabled(): Boolean? = value
 
     override fun setEnabled(enabled: Boolean?) {
@@ -39,41 +42,43 @@ class InMemoryPasteKeysStore(@Volatile private var value: Boolean? = null) : Pas
     }
 }
 
+/** A [PasteKeysStore] in memory only, for tests. Thread-safe. */
+class InMemoryPasteKeysStore(value: Boolean? = null) : InMemorySwitchStore(value), PasteKeysStore
+
 /**
- * The app's [PasteKeysStore]: one boolean in the private SharedPreferences file [PREFS_NAME],
- * written with `apply()` (off the caller's thread); absent when never set.
+ * A switch's flag in the app's private SharedPreferences file [PREFS_NAME] under [key], written
+ * with `apply()` (off the caller's thread); absent when never set.
  */
-class SharedPrefsPasteKeysStore(context: Context) : PasteKeysStore {
+open class SharedPrefsSwitchStore(context: Context, private val key: String) : SwitchStore {
     private val appContext = context.applicationContext
 
-    /** Opened on first use, on the setting's I/O coroutine, never while the app starts. */
+    /** Opened on first use, on the switch's I/O coroutine, never while the app starts. */
     private val prefs by lazy { appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
 
-    override fun enabled(): Boolean? = if (prefs.contains(KEY_ENABLED)) prefs.getBoolean(KEY_ENABLED, PasteKeysSetting.DEFAULT) else null
+    override fun enabled(): Boolean? = if (prefs.contains(key)) prefs.getBoolean(key, false) else null
 
     override fun setEnabled(enabled: Boolean?) {
-        prefs.edit { if (enabled == null) remove(KEY_ENABLED) else putBoolean(KEY_ENABLED, enabled) }
+        prefs.edit { if (enabled == null) remove(key) else putBoolean(key, enabled) }
     }
 
     private companion object {
         const val PREFS_NAME = "input-settings"
-        const val KEY_ENABLED = "paste-keys"
     }
 }
 
+/** The app's [PasteKeysStore]. */
+class SharedPrefsPasteKeysStore(context: Context) : SharedPrefsSwitchStore(context, "paste-keys"), PasteKeysStore
+
 /**
- * The Settings switch "Send / * + = as paste" ([PASTE_KEYS_TITLE]): whether [InputSender] sends
- * [PASTED_KEYS] typed with no modifiers as pastes. Owner decision 2026-11-20: on by default
- * ([DEFAULT]).
- *
- * [enabled] is [DEFAULT] until the stored value is read, then the stored value, then each [set].
- * [clear] (unpair, as every other per-owner setting) forgets it: back to [DEFAULT].
+ * An owner's Settings switch kept in a [SwitchStore]: [enabled] is [default] until the stored
+ * value is read, then the stored value, then each [set]. [clear] (unpair, as every other
+ * per-owner setting) forgets it: back to [default].
  *
  * **Store I/O.** Nothing touches [store] on the caller's thread: one coroutine in [scope] on
  * [ioContext] (the app passes `Dispatchers.IO`) reads the value once and then writes every
  * change, in order. A change made before the read wins over the value read. Thread-safe.
  */
-class PasteKeysSetting(private val store: PasteKeysStore, scope: CoroutineScope, ioContext: CoroutineContext) {
+open class StoredSwitch(private val store: SwitchStore, private val default: Boolean, scope: CoroutineScope, ioContext: CoroutineContext) {
     private val lock = Any()
 
     // Guarded by lock.
@@ -83,7 +88,7 @@ class PasteKeysSetting(private val store: PasteKeysStore, scope: CoroutineScope,
     /** The values to write, in order, after the load; null forgets the stored value. */
     private val writes = Channel<Boolean?>(Channel.UNLIMITED)
 
-    private val enabledFlow = MutableStateFlow(DEFAULT)
+    private val enabledFlow = MutableStateFlow(default)
 
     val enabled: StateFlow<Boolean> = enabledFlow.asStateFlow()
 
@@ -101,8 +106,8 @@ class PasteKeysSetting(private val store: PasteKeysStore, scope: CoroutineScope,
     /** The owner flipped the switch. */
     fun set(enabled: Boolean) = change(enabled, enabled)
 
-    /** Unpair: the switch goes back to [DEFAULT] and the stored value is forgotten. */
-    fun clear() = change(DEFAULT, null)
+    /** Unpair: the switch goes back to its default and the stored value is forgotten. */
+    fun clear() = change(default, null)
 
     private fun change(value: Boolean, stored: Boolean?) {
         synchronized(lock) {
@@ -112,8 +117,15 @@ class PasteKeysSetting(private val store: PasteKeysStore, scope: CoroutineScope,
         }
     }
 
-    override fun toString(): String = synchronized(lock) { "PasteKeysSetting(enabled=${enabledFlow.value}, loaded=$loaded)" }
+    override fun toString(): String = synchronized(lock) { "${javaClass.simpleName}(enabled=${enabledFlow.value}, loaded=$loaded)" }
+}
 
+/**
+ * The Settings switch "Send / * + = as paste" ([PASTE_KEYS_TITLE]): whether [InputSender] sends
+ * [PASTED_KEYS] typed with no modifiers as pastes. Owner decision 2026-11-20: on by default
+ * ([DEFAULT]). Kept as a [StoredSwitch].
+ */
+class PasteKeysSetting(store: PasteKeysStore, scope: CoroutineScope, ioContext: CoroutineContext) : StoredSwitch(store, DEFAULT, scope, ioContext) {
     companion object {
         /** On: Claude Code, the app this is for, is where the four keys go wrong. */
         const val DEFAULT = true

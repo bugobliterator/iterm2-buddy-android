@@ -113,6 +113,9 @@ interface HomeActions : LiveSessionActions {
 
     /** The owner flipped Settings' "Send / * + = as paste" switch ([HomeModel.pasteKeys]). */
     fun setPasteKeys(enabled: Boolean) {}
+
+    /** The owner flipped Settings' "Scroll web pages with keys" switch ([HomeModel.scrollKeys]). */
+    fun setScrollKeys(enabled: Boolean) {}
 }
 
 /**
@@ -122,7 +125,7 @@ interface HomeActions : LiveSessionActions {
  * [destination], [tab], [navKey] and [stackKeys] come from one
  * [NavState][dev.bugobliterator.itermbuddy.ui.NavState], so they always agree; [chatsAttention]
  * is the Chats item's dot; [claudeTip] shows the Sessions list's `\(status)` tip; [pasteKeys] is
- * Settings' "Send / * + = as paste" switch. The chat
+ * Settings' "Send / * + = as paste" switch and [scrollKeys] its "Scroll web pages with keys". The chat
  * destinations collect their own flows from [ChatsHome].
  */
 data class HomeModel(
@@ -146,6 +149,7 @@ data class HomeModel(
     val stackKeys: Set<String> = emptySet(),
     val claudeTip: Boolean = false,
     val pasteKeys: Boolean = true,
+    val scrollKeys: Boolean = true,
 )
 
 /**
@@ -229,6 +233,8 @@ private fun HomeDestinationView(destination: HomeDestination, model: HomeModel, 
                 onVideoStatsShownChange = actions::setVideoStatsShown,
                 pasteKeys = model.pasteKeys,
                 onPasteKeysChange = actions::setPasteKeys,
+                scrollKeys = model.scrollKeys,
+                onScrollKeysChange = actions::setScrollKeys,
                 onBack = actions::back,
                 onUnpair = actions::unpair,
                 modifier = modifier,

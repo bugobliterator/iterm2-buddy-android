@@ -16,6 +16,9 @@ import dev.bugobliterator.itermbuddy.core.chat.WorkgroupWatch
 import dev.bugobliterator.itermbuddy.core.input.InMemoryPasteKeysStore
 import dev.bugobliterator.itermbuddy.core.input.PasteKeysSetting
 import dev.bugobliterator.itermbuddy.core.input.PasteKeysStore
+import dev.bugobliterator.itermbuddy.core.input.InMemoryScrollKeysStore
+import dev.bugobliterator.itermbuddy.core.input.ScrollKeysSetting
+import dev.bugobliterator.itermbuddy.core.input.ScrollKeysStore
 import dev.bugobliterator.itermbuddy.core.sessions.ClaudeStateTip
 import dev.bugobliterator.itermbuddy.core.sessions.ClaudeTipStore
 import dev.bugobliterator.itermbuddy.core.sessions.InMemoryClaudeTipStore
@@ -122,7 +125,8 @@ import kotlin.time.Duration.Companion.seconds
  *   repository clears its seen marks itself, on its consumer), the shared chat contents reset
  *   ([clearShared]), the mentions, bound-session verdicts, icons and images forgotten, and the
  *   searches, drafts and input memories emptied, [claudeTip]'s dismissal forgotten, and
- *   [pasteKeys] (the Settings switch "Send / * + = as paste") back to its default.
+ *   [pasteKeys] (the Settings switch "Send / * + = as paste") and [scrollKeys] ("Scroll web pages
+ *   with keys") back to their defaults.
  */
 class HomeGraph(
     private val scope: CoroutineScope,
@@ -145,6 +149,7 @@ class HomeGraph(
     sessionPollInterval: Duration = SESSION_POLL_INTERVAL,
     val claudeTip: ClaudeStateTip,
     val pasteKeys: PasteKeysSetting,
+    val scrollKeys: ScrollKeysSetting,
 ) {
     private val foregroundFlow = MutableStateFlow(true)
 
@@ -479,6 +484,7 @@ private fun boundGuid(list: ChatListState, chatID: String): String? =
  * @param claudeTipStore where the Sessions list's `\(status)` tip keeps its dismissal.
  * @param tipContext where the tip reads and writes [claudeTipStore] (disk I/O, off the main thread).
  * @param pasteKeysStore where the "Send / * + = as paste" switch is kept; read and written on [tipContext].
+ * @param scrollKeysStore where the "Scroll web pages with keys" switch is kept; the same.
  */
 fun wireHome(
     scope: CoroutineScope,
@@ -496,6 +502,7 @@ fun wireHome(
     claudeTipStore: ClaudeTipStore = InMemoryClaudeTipStore(),
     tipContext: CoroutineContext = Dispatchers.IO,
     pasteKeysStore: PasteKeysStore = InMemoryPasteKeysStore(),
+    scrollKeysStore: ScrollKeysStore = InMemoryScrollKeysStore(),
 ): HomeGraph {
     val sink = ForwardingStreamSink()
     val chatSink = ForwardingChatSink()
@@ -527,6 +534,7 @@ fun wireHome(
         scope, client, controller, repository, chats, search, drafts, inputMemories, mentions, chatSearch, chatIcons,
         boundSessions, inlineImages, chatDrafts, listContext, listSharingStopMillis, chatLog,
         sessionPollInterval, ClaudeStateTip(claudeTipStore, scope, tipContext), PasteKeysSetting(pasteKeysStore, scope, tipContext),
+        ScrollKeysSetting(scrollKeysStore, scope, tipContext),
     )
     val navigator = graph.navigator
     // The Sessions list polls while it is the destination shown, on a live link.
@@ -568,7 +576,7 @@ fun wireHome(
             // The navigator's reset also clears the graph's shared chat contents, under its lock.
             navigator::reset, graph.newChat::clear, repository::clear, chats::clear, mentions::clear, boundSessions::clear,
             chatIcons::clear, inlineImages::clear, search::clear, chatSearch::clear, drafts::clear, chatDrafts::clear,
-            inputMemories::clear, tip::clear, graph.pasteKeys::clear,
+            inputMemories::clear, tip::clear, graph.pasteKeys::clear, graph.scrollKeys::clear,
         ),
         log,
     )

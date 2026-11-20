@@ -13,6 +13,7 @@ import dev.bugobliterator.itermbuddy.core.chat.FileChatSeenStore
 import dev.bugobliterator.itermbuddy.core.input.InputSender
 import dev.bugobliterator.itermbuddy.core.input.InputTrace
 import dev.bugobliterator.itermbuddy.core.input.SharedPrefsPasteKeysStore
+import dev.bugobliterator.itermbuddy.core.input.SharedPrefsScrollKeysStore
 import dev.bugobliterator.itermbuddy.core.input.isInputTarget
 import dev.bugobliterator.itermbuddy.core.relay.relayHttpClient
 import dev.bugobliterator.itermbuddy.core.stream.BrowserDriver
@@ -214,6 +215,7 @@ class CompanionApp : Application() {
             chatLog = { Log.i(CHAT_TAG, it) },
             claudeTipStore = SharedPrefsClaudeTipStore(this),
             pasteKeysStore = SharedPrefsPasteKeysStore(this),
+            scrollKeysStore = SharedPrefsScrollKeysStore(this),
         )
         input = InputSender(
             link = home.client,
@@ -239,6 +241,8 @@ class CompanionApp : Application() {
             macRevision = home.client.state.map(::macRevisionOf).stateIn(scope, SharingStarted.Eagerly, macRevisionOf(home.client.state.value)),
             scope = scope,
             nowMillis = SystemClock::uptimeMillis,
+            // Read at each flush: Settings' "Scroll web pages with keys".
+            scrollKeys = { home.scrollKeys.enabled.value },
             log = { Log.i(BROWSER_TAG, it) },
         )
         // Application.onCreate runs on the main thread, as addObserver requires.
