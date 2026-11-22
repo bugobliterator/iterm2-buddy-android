@@ -6,6 +6,10 @@
 //     tailscale's IsFunnelOn (ipn/serve.go) checks. `null` (no serve config)
 //     is off. Malformed JSON exits non-zero.
 //
+//   node install-relay-helpers.mjs tailnet-name < tailscale-status.json
+//     Prints this machine's tailnet DNS name (Self.DNSName without the
+//     trailing dot). Exits non-zero if there is none.
+//
 //   RELAY_NODE=… RELAY_CHECKOUT=… RELAY_LOG=… \
 //   node install-relay-helpers.mjs render-plist <template> <relay.env> <out.plist>
 //     Fills @NODE@, @CHECKOUT@, @LOG@ and @ENVIRONMENT@ (from the KEY=value
@@ -53,9 +57,16 @@ function renderPlist(templatePath, envFilePath, outPath) {
 const [command, ...args] = process.argv.slice(2);
 if (command === "funnel-state") {
   process.stdout.write(funnelIsOn(JSON.parse(readFileSync(0, "utf8"))) ? "on" : "off");
+} else if (command === "tailnet-name") {
+  const name = (JSON.parse(readFileSync(0, "utf8"))?.Self?.DNSName ?? "").replace(/\.$/, "");
+  if (!name) {
+    console.error("tailscale status has no Self.DNSName; is tailscale logged in?");
+    process.exit(1);
+  }
+  process.stdout.write(name);
 } else if (command === "render-plist" && args.length === 3) {
   renderPlist(...args);
 } else {
-  console.error("usage: install-relay-helpers.mjs funnel-state | render-plist <template> <relay.env> <out.plist>");
+  console.error("usage: install-relay-helpers.mjs funnel-state | tailnet-name | render-plist <template> <relay.env> <out.plist>");
   process.exit(2);
 }

@@ -11,14 +11,17 @@
 # Needs git, Node 20+, pnpm and tailscale on PATH. The port is kept from the
 # installed relay.env (default 8787); set RELAY_PORT to change it. iTerm2 and
 # the phone only see the tailnet origin.
+#
+# The origin is one-time config, never committed. The first run takes
+# RELAY_ORIGIN if set, otherwise https://<this Mac's tailnet name> from
+# `tailscale status`, and saves it in relay.env. Later runs keep the saved
+# origin unless RELAY_ORIGIN overrides it.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_REPO="https://github.com/gnachman/iterm2-companion-relay.git"
 RELAY_COMMIT="b8aa2f90d2bc8b617d1b9c97043aa0b171885310"
-RELAY_ORIGIN="https://relay.example.ts.net"
-RELAY_HOSTNAME="${RELAY_ORIGIN#https://}"
 LABEL="dev.bugobliterator.itermbuddy.relay"
 
 CHECKOUT="$HOME/Library/Application Support/iterm2-companion-relay"
@@ -41,14 +44,29 @@ node_major="$("$NODE" -p 'process.versions.node.split(".")[0]')"
 
 # --- Preflight: nothing below changes the running service ------------------
 
+HELPERS="$SCRIPT_DIR/install-relay-helpers.mjs"
+
+# Relay origin: RELAY_ORIGIN, else the one saved in relay.env, else this Mac's
+# tailnet name.
+if [[ -z "${RELAY_ORIGIN:-}" && -f "$ENV_FILE" ]]; then
+    RELAY_ORIGIN="$(sed -n 's/^RELAY_ORIGIN=//p' "$ENV_FILE" | head -n 1)"
+fi
+if [[ -z "${RELAY_ORIGIN:-}" ]]; then
+    tailnet_name="$(tailscale status --json | "$NODE" "$HELPERS" tailnet-name)" \
+        || die "cannot read this Mac's tailnet name; set RELAY_ORIGIN=https://<name>.ts.net"
+    RELAY_ORIGIN="https://$tailnet_name"
+    say "relay origin from tailscale: $RELAY_ORIGIN"
+fi
+[[ "$RELAY_ORIGIN" =~ ^https://[A-Za-z0-9.-]+$ ]] \
+    || die "RELAY_ORIGIN '$RELAY_ORIGIN' is not https://<hostname> (no port, path or trailing slash)"
+RELAY_HOSTNAME="${RELAY_ORIGIN#https://}"
+
 # Without a tailnet HTTPS certificate `tailscale serve` would stop and wait for
 # the owner to enable HTTPS in the admin console.
 tailscale status --json \
     | "$NODE" -e 'const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
                   process.exit((s.CertDomains ?? []).includes(process.argv[1]) ? 0 : 1)' "$RELAY_HOSTNAME" \
     || die "tailscale CertDomains does not list $RELAY_HOSTNAME; enable HTTPS certificates for the tailnet"
-
-HELPERS="$SCRIPT_DIR/install-relay-helpers.mjs"
 
 # Prints "on" or "off" from the machine-readable serve config (top-level and
 # foreground Funnel). Any failure to read or parse it returns non-zero.
@@ -177,3 +195,6 @@ funnel="$(funnel_state)" || unpublish_and_stop "cannot read the Funnel state aft
 [[ "$funnel" == "off" ]] || unpublish_and_stop "tailscale funnel is on after publishing"
 tailscale serve status
 say "done; probe with: node $SCRIPT_DIR/check-relay.mjs $RELAY_ORIGIN"
+say "point iTerm2 at it (quit iTerm2 first):"
+say "  defaults write com.googlecode.iterm2 CompanionRelayOrigin -string $RELAY_ORIGIN"
+say "  defaults write com.googlecode.iterm2 CompanionResolverURL -string \"\""
