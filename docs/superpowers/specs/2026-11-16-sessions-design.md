@@ -414,7 +414,7 @@ are hoisted; peer title `"<role>: <name>"` or `<role>` when the name is empty or
 │ ← Settings                               │
 ├──────────────────────────────────────────┤
 │ Mac          Connected (iTerm2 rev 15)   │
-│ Relay        relay.example.ts.net     │
+│ Relay        relay.example.ts.net        │
 │ [ Unpair this phone ]                    │  confirm dialog first
 │ App version  0.2.0-<sha>                 │
 │ Decoder      c2.<vendor>.hevc.decoder    │  (debug builds: + "Video stats" toggle)

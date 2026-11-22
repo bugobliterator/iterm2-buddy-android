@@ -80,8 +80,8 @@ strangers, and store compliance are out of scope.
   signature".
 - The phone has the Tailscale app connected (it takes Android's single VPN
   slot).
-- The Mac's tailnet name is `relay.example.ts.net`, so
-  the origin is `https://relay.example.ts.net`. HTTPS
+- The Mac's tailnet name (for example `relay.example.ts.net`) gives
+  the origin `https://relay.example.ts.net`. HTTPS
   certificates are currently **off** for the tailnet (`CertDomains` empty);
   the owner enables them once in the Tailscale admin console (DNS → HTTPS
   Certificates) before Relay Setup.
